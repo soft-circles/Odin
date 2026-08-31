@@ -96,42 +96,96 @@ NOINLINE uint32_t gcc_to_c_ret_big(
 }
 NOINLINE int64_t gcc_to_c_var_i32(int32_t tag, int32_t x) { return c_var_i32(tag, x); }
 
-/* Keep every differential entry point live through libdragon's --gc-sections. */
-int main(void) {
+/* Keep the GCC reference entry points live for run.py's linked differential. */
+static volatile uintptr_t reference_sink;
+
+static NOINLINE void keep_reference_entries(void) {
 	struct S3 s3 = {0x81, 0xa5, 0xfe};
 	struct S12 s12 = {0x11223344, 0x89abcdef, 0xfedcba98};
 	union U8 u8 = {.q = 0x8123456789abcdefULL};
 	uint32_t x = 0x81234567;
 	uintptr_t sum = 0;
 
-#define KEEP_SCALAR(name, value) \
-	sum += (uintptr_t)c_to_odin_##name(value); \
+#define KEEP_REFERENCE(name, value) \
 	sum += (uintptr_t)c_to_gcc_##name(value); \
-	sum += (uintptr_t)odin_to_c_##name(value); \
 	sum += (uintptr_t)gcc_to_c_##name(value)
-	KEEP_SCALAR(i32, (int32_t)x);
-	KEEP_SCALAR(u32, x);
-	KEEP_SCALAR(i64, (int64_t)0x8123456789abcdefULL);
-	KEEP_SCALAR(f32, -13.25f);
-	KEEP_SCALAR(f64, 9876.5);
-	KEEP_SCALAR(s3, s3);
-	KEEP_SCALAR(s12, s12);
-	KEEP_SCALAR(u8, u8);
-#undef KEEP_SCALAR
+	KEEP_REFERENCE(i32, (int32_t)x);
+	KEEP_REFERENCE(u32, x);
+	KEEP_REFERENCE(i64, (int64_t)0x8123456789abcdefULL);
+	KEEP_REFERENCE(f32, -13.25f);
+	KEEP_REFERENCE(f64, 9876.5);
+	KEEP_REFERENCE(s3, s3);
+	KEEP_REFERENCE(s12, s12);
+	KEEP_REFERENCE(u8, u8);
+#undef KEEP_REFERENCE
 
-	sum += (uintptr_t)c_to_odin_ptr_add((uint8_t *)0x80102030, 0x1234);
 	sum += (uintptr_t)c_to_gcc_ptr_add((uint8_t *)0x80102030, 0x1234);
-	sum += (uintptr_t)odin_to_c_ptr_add((uint8_t *)0x80102030, 0x1234);
 	sum += (uintptr_t)gcc_to_c_ptr_add((uint8_t *)0x80102030, 0x1234);
-	sum += (uintptr_t)c_to_odin_stack(1, 2, 3, 4, (int32_t)x);
 	sum += (uintptr_t)c_to_gcc_stack(1, 2, 3, 4, (int32_t)x);
-	sum += (uintptr_t)odin_to_c_stack(1, 2, 3, 4, (int32_t)x);
 	sum += (uintptr_t)gcc_to_c_stack(1, 2, 3, 4, (int32_t)x);
-	sum += c_to_odin_ret_big(0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x);
 	sum += c_to_gcc_ret_big(0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x);
-	sum += odin_to_c_ret_big(0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x);
 	sum += gcc_to_c_ret_big(0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x);
-	sum += (uintptr_t)odin_to_c_var_i32(0x13579bdf, (int32_t)x);
 	sum += (uintptr_t)gcc_to_c_var_i32(0x13579bdf, (int32_t)x);
-	return (int)sum;
+	reference_sink = sum;
+}
+
+int main(void) {
+	struct S3 s3 = {0x81, 0xa5, 0xfe};
+	struct S12 s12 = {0x11223344, 0x89abcdef, 0xfedcba98};
+	union U8 u8 = {.q = 0x8123456789abcdefULL};
+	uint32_t x = 0x81234567;
+	int failures = 0;
+
+	debug_init_emulog();
+
+#define CHECK(label, condition) do { \
+	if (!(condition)) { \
+		debugf("FAIL: " label "\n"); \
+		failures++; \
+	} \
+} while (0)
+
+	CHECK("C -> Odin i32", c_to_odin_i32((int32_t)x) == (int32_t)x);
+	CHECK("C -> Odin u32", c_to_odin_u32(x) == x);
+	CHECK("C -> Odin i64", c_to_odin_i64((int64_t)0x8123456789abcdefULL) ==
+		(int64_t)0x8123456789abcdefULL);
+	CHECK("C -> Odin pointer", c_to_odin_ptr_add((uint8_t *)0x80102030, 0x1234) ==
+		(uint8_t *)0x80103264);
+	CHECK("C -> Odin f32", c_to_odin_f32(-13.25f) == -13.25f);
+	CHECK("C -> Odin f64", c_to_odin_f64(9876.5) == 9876.5);
+	CHECK("C -> Odin small struct", c_to_odin_s3(s3) == 0xfe);
+	CHECK("C -> Odin multi-slot struct", c_to_odin_s12(s12) == 0xfedcba98);
+	CHECK("C -> Odin raw union", c_to_odin_u8(u8) == 0x81234567);
+	CHECK("C -> Odin stack arg", c_to_odin_stack(1, 2, 3, 4, (int32_t)x) ==
+		(int32_t)x);
+	CHECK("C -> Odin indirect return", c_to_odin_ret_big(
+		0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x) == x);
+
+	CHECK("Odin -> C i32", odin_to_c_i32((int32_t)x) == (int32_t)x);
+	CHECK("Odin -> C u32", odin_to_c_u32(x) == x);
+	CHECK("Odin -> C i64", odin_to_c_i64((int64_t)0x8123456789abcdefULL) ==
+		(int64_t)0x8123456789abcdefULL);
+	CHECK("Odin -> C pointer", odin_to_c_ptr_add((uint8_t *)0x80102030, 0x1234) ==
+		(uint8_t *)0x80103264);
+	CHECK("Odin -> C f32", odin_to_c_f32(-13.25f) == -13.25f);
+	CHECK("Odin -> C f64", odin_to_c_f64(9876.5) == 9876.5);
+	CHECK("Odin -> C small struct", odin_to_c_s3(s3) == 0xfe);
+	CHECK("Odin -> C multi-slot struct", odin_to_c_s12(s12) == 0xfedcba98);
+	CHECK("Odin -> C raw union", odin_to_c_u8(u8) == 0x81234567);
+	CHECK("Odin -> C stack arg", odin_to_c_stack(1, 2, 3, 4, (int32_t)x) ==
+		(int32_t)x);
+	CHECK("Odin -> C indirect return", odin_to_c_ret_big(
+		0x11223344, 0x89abcdef, 0xfedcba98, 4, 5, x) == x);
+	CHECK("Odin -> variadic C", odin_to_c_var_i32(0x13579bdf, (int32_t)x) ==
+		(int64_t)0x13579bdf81234567ULL);
+
+#undef CHECK
+
+	if (failures == 0)
+		debugf("PASS: Odin O64 ABI 23/23\n");
+	else
+		debugf("FAIL: Odin O64 ABI\n");
+
+	keep_reference_entries();
+	for (;;) {}
 }
