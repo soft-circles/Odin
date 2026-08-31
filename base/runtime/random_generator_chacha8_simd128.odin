@@ -1,4 +1,5 @@
 #+build !i386
+#+build !mips32be
 package runtime
 
 import "base:intrinsics"

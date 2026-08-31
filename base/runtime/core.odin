@@ -624,6 +624,7 @@ Odin_OS_Type :: type_of(ODIN_OS)
 		wasm32,
 		wasm64p32,
 		riscv64,
+		mips32be,
 	}
 */
 Odin_Arch_Type :: type_of(ODIN_ARCH)
@@ -638,6 +639,7 @@ ALL_ODIN_ARCH_TYPES :: Odin_Arch_Types{
 	.wasm32,
 	.wasm64p32,
 	.riscv64,
+	.mips32be,
 }
 
 /*

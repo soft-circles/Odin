@@ -21,6 +21,7 @@ HAS_HARDWARE_SIMD :: false when (ODIN_ARCH == .amd64 || ODIN_ARCH == .i386) && !
 	false when (ODIN_ARCH == .arm64 || ODIN_ARCH == .arm32) && !intrinsics.has_target_feature("neon") else
 	false when (ODIN_ARCH == .wasm64p32 || ODIN_ARCH == .wasm32) && !intrinsics.has_target_feature("simd128") else
 	false when (ODIN_ARCH == .riscv64) && !intrinsics.has_target_feature("v") else
+	false when ODIN_ARCH == .mips32be else
 	true
 
 // Size of a native SIMD register for the current compilation target

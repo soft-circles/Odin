@@ -54,6 +54,8 @@ gb_internal String get_default_microarchitecture() {
 		//
 		// `arm1176jzf-s` is what clang picks by default for this same triple.
 		default_march = str_lit("arm1176jzf-s");
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		default_march = str_lit("mips3");
 	}
 
 	return default_march;
@@ -111,6 +113,16 @@ gb_internal String get_default_features() {
 
 			return features;
 		}
+	}
+
+	if (bc->metrics.arch == TargetArch_mips32be) {
+		String features = str_lit("noabicalls");
+		if (bc->target_features_string.len > 0) {
+			bc->target_features_string = concatenate3_strings(permanent_allocator(), features, str_lit(","), bc->target_features_string);
+		} else {
+			bc->target_features_string = features;
+		}
+		return features;
 	}
 
 	for (int i = off; i < off+target_microarch_counts[bc->metrics.arch]; i += 1) {
@@ -3080,53 +3092,15 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	lbModule *default_module = &gen->default_module;
 	CheckerInfo *info = gen->info;
 
-	switch (build_context.metrics.arch) {
-	case TargetArch_amd64: 
-	case TargetArch_i386:
-		LLVMInitializeX86TargetInfo();
-		LLVMInitializeX86Target();
-		LLVMInitializeX86TargetMC();
-		LLVMInitializeX86AsmPrinter();
-		LLVMInitializeX86AsmParser();
-		LLVMInitializeX86Disassembler();
-		break;
-	case TargetArch_arm64:
-		LLVMInitializeAArch64TargetInfo();
-		LLVMInitializeAArch64Target();
-		LLVMInitializeAArch64TargetMC();
-		LLVMInitializeAArch64AsmPrinter();
-		LLVMInitializeAArch64AsmParser();
-		LLVMInitializeAArch64Disassembler();
-		break;
-	case TargetArch_wasm32:
-	case TargetArch_wasm64p32:
-		LLVMInitializeWebAssemblyTargetInfo();
-		LLVMInitializeWebAssemblyTarget();
-		LLVMInitializeWebAssemblyTargetMC();
-		LLVMInitializeWebAssemblyAsmPrinter();
-		LLVMInitializeWebAssemblyAsmParser();
-		LLVMInitializeWebAssemblyDisassembler();
-		break;
-	case TargetArch_riscv64:
-		LLVMInitializeRISCVTargetInfo();
-		LLVMInitializeRISCVTarget();
-		LLVMInitializeRISCVTargetMC();
-		LLVMInitializeRISCVAsmPrinter();
-		LLVMInitializeRISCVAsmParser();
-		LLVMInitializeRISCVDisassembler();
-		break;
-	case TargetArch_arm32:
-		LLVMInitializeARMTargetInfo();
-		LLVMInitializeARMTarget();
-		LLVMInitializeARMTargetMC();
-		LLVMInitializeARMAsmPrinter();
-		LLVMInitializeARMAsmParser();
-		LLVMInitializeARMDisassembler();
-		break;
-	default:
-		GB_PANIC("Unimplemented LLVM target initialization");
-		break;
-	}
+	// These inline helpers expand only to the targets present in the LLVM build.
+	// That keeps a MIPS-only static LLVM usable while retaining all targets when
+	// Odin is built against a full distribution.
+	LLVMInitializeAllTargetInfos();
+	LLVMInitializeAllTargets();
+	LLVMInitializeAllTargetMCs();
+	LLVMInitializeAllAsmPrinters();
+	LLVMInitializeAllAsmParsers();
+	LLVMInitializeAllDisassemblers();
 
 	
 	if (build_context.microarch == "native") {
@@ -3197,12 +3171,28 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	auto target_machines = array_make<LLVMTargetMachineRef>(permanent_allocator(), 0, gen->modules.count);
 
 	for (auto const &entry : gen->modules) {
-		LLVMTargetMachineRef target_machine = LLVMCreateTargetMachine(
-			target, target_triple, (const char *)llvm_cpu.text,
-			llvm_features,
-			code_gen_level,
-			get_reloc_mode(),
-			code_mode);
+		LLVMTargetMachineRef target_machine;
+		#if LLVM_VERSION_MAJOR >= 18
+		if (build_context.metrics.arch == TargetArch_mips32be) {
+			LLVMTargetMachineOptionsRef options = LLVMCreateTargetMachineOptions();
+			LLVMTargetMachineOptionsSetCPU(options, cast(char const *)llvm_cpu.text);
+			LLVMTargetMachineOptionsSetFeatures(options, llvm_features);
+			LLVMTargetMachineOptionsSetABI(options, "o64");
+			LLVMTargetMachineOptionsSetCodeGenOptLevel(options, code_gen_level);
+			LLVMTargetMachineOptionsSetRelocMode(options, get_reloc_mode());
+			LLVMTargetMachineOptionsSetCodeModel(options, code_mode);
+			target_machine = LLVMCreateTargetMachineWithOptions(target, target_triple, options);
+			LLVMDisposeTargetMachineOptions(options);
+		} else
+		#endif
+		{
+			target_machine = LLVMCreateTargetMachine(
+				target, target_triple, (const char *)llvm_cpu.text,
+				llvm_features,
+				code_gen_level,
+				get_reloc_mode(),
+				code_mode);
+		}
 		lbModule *m = entry.value;
 		m->target_machine = target_machine;
 		LLVMTargetDataRef data_layout = LLVMCreateTargetDataLayout(target_machine);

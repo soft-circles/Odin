@@ -28,6 +28,7 @@ struct lbProcedure;
 struct lbValue {
 	LLVMValueRef value;
 	Type *type;
+	LLVMAttributeRef abi_attribute;
 };
 
 

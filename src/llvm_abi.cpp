@@ -159,6 +159,9 @@ gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType
 	unsigned offset = 0;
 	if (ft->ret.kind == lbArg_Indirect) {
 		offset += 1;
+	} else if (build_context.metrics.arch == TargetArch_mips32be &&
+	           ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
+		LLVMAddAttributeAtIndex(fn, LLVMAttributeReturnIndex, ft->ret.attribute);
 	}
 
 	LLVMContextRef c = ft->ctx;
@@ -2273,6 +2276,126 @@ namespace lbAbiArm32 {
 	}
 };
 
+namespace lbAbiMipsO64 {
+	gb_internal LLVMAttributeRef integer_extension_attribute(LLVMContextRef c,
+	                                                         LLVMTypeRef type,
+	                                                         Type *source_type) {
+		if (source_type == nullptr) {
+			return type == LLVMInt1TypeInContext(c)
+			     ? lb_create_enum_attribute(c, "zeroext")
+			     : nullptr;
+		}
+		if (lb_sizeof(type) >= 8 ||
+		    (!is_type_integer_like(source_type) && !is_type_enum(source_type))) {
+			return nullptr;
+		}
+		// O64 sign-extends every 32-bit integer in a 64-bit GPR, including
+		// unsigned values. Sub-word integers keep their C signedness.
+		if (lb_sizeof(type) == 4) {
+			return lb_create_enum_attribute(c, "signext");
+		}
+		return lb_create_enum_attribute(c,
+		       is_type_unsigned(source_type) || is_type_boolean(source_type)
+		       ? "zeroext" : "signext");
+	}
+
+	gb_internal bool is_aggregate(LLVMTypeRef type, Type *source_type) {
+		LLVMTypeKind kind = LLVMGetTypeKind(type);
+		if (kind == LLVMStructTypeKind || kind == LLVMArrayTypeKind) {
+			return true;
+		}
+
+		Type *bt = base_type(source_type);
+		return bt != nullptr &&
+		       (bt->kind == Type_Struct || bt->kind == Type_Union || is_type_bit_field(bt));
+	}
+
+	gb_internal LLVMTypeRef aggregate_type(LLVMContextRef c, i64 size) {
+		GB_ASSERT(size > 0);
+		if (size <= 8) {
+			return LLVMIntTypeInContext(c, cast(unsigned)(size*8));
+		}
+
+		unsigned count = cast(unsigned)((size + 7) / 8);
+		LLVMTypeRef *fields = gb_alloc_array(temporary_allocator(), LLVMTypeRef, count);
+		for (unsigned i = 0; i < count; i++) {
+			i64 bytes = gb_min(cast(i64)8, size - cast(i64)i*8);
+			fields[i] = LLVMIntTypeInContext(c, cast(unsigned)(bytes*8));
+		}
+		return LLVMStructTypeInContext(c, fields, count, false);
+	}
+
+	gb_internal lbArgType compute_arg_type(LLVMContextRef c, LLVMTypeRef type, Type *source_type) {
+		if (!is_aggregate(type, source_type)) {
+			LLVMAttributeRef attr = integer_extension_attribute(c, type, source_type);
+			return lb_arg_type_direct(type, nullptr, nullptr, attr);
+		}
+
+		i64 size = lb_sizeof(type);
+		if (size == 0) {
+			return lb_arg_type_ignore(type);
+		}
+
+		// O64 passes structures and unions by value in consecutive 8-byte slots.
+		// `inreg` tells LLVM that a big-endian partial slot is left-justified.
+		LLVMAttributeRef attr = lb_create_enum_attribute(c, "inreg");
+		return lb_arg_type_direct(type, aggregate_type(c, size), nullptr, attr);
+	}
+
+	gb_internal Array<lbArgType> compute_arg_types(LLVMContextRef c, LLVMTypeRef *arg_types,
+	                                               unsigned arg_count, Type *original_type) {
+		auto args = array_make<lbArgType>(lb_function_type_args_allocator(), arg_count);
+		auto srcs = lb_abi_param_source_types(original_type, arg_count);
+		for (unsigned i = 0; i < arg_count; i++) {
+			args[i] = compute_arg_type(c, arg_types[i], srcs[i]);
+		}
+		return args;
+	}
+
+	gb_internal lbArgType compute_return_type(lbFunctionType *ft, LLVMContextRef c,
+	                                           LLVMTypeRef return_type, bool return_is_defined,
+	                                           bool return_is_tuple, Type *original_type) {
+		if (!return_is_defined) {
+			return lb_arg_type_direct(LLVMVoidTypeInContext(c));
+		}
+
+		Type *source_type = lb_abi_single_result_type(original_type);
+		if (return_is_tuple && lb_is_type_kind(return_type, LLVMStructTypeKind)) {
+			unsigned count = LLVMCountStructElementTypes(return_type);
+			if (count > 1) {
+				ft->original_arg_count = ft->args.count;
+				ft->multiple_return_original_type = return_type;
+				for (unsigned i = 0; i < count-1; i++) {
+					LLVMTypeRef field = LLVMStructGetTypeAtIndex(return_type, i);
+					array_add(&ft->args, lb_arg_type_direct(LLVMPointerType(field, 0)));
+				}
+
+				LLVMTypeRef last = LLVMStructGetTypeAtIndex(return_type, count-1);
+				return compute_return_type(ft, c, last, true, false, nullptr);
+			}
+		}
+
+		if (is_aggregate(return_type, source_type)) {
+			LLVMAttributeRef attr = lb_create_enum_attribute_with_type(c, "sret", return_type);
+			return lb_arg_type_indirect(return_type, attr);
+		}
+
+		LLVMAttributeRef attr = integer_extension_attribute(c, return_type, source_type);
+		return lb_arg_type_direct(return_type, nullptr, nullptr, attr);
+	}
+
+	gb_internal LB_ABI_INFO(abi_info) {
+		LLVMContextRef c = m->ctx;
+		lbFunctionType *ft = permanent_alloc_item<lbFunctionType>();
+		ft->ctx = c;
+		ft->calling_convention = calling_convention;
+		ft->args = compute_arg_types(c, arg_types, arg_count, original_type);
+		ft->ret = compute_return_type(ft, c, return_type, return_is_defined,
+		                              return_is_tuple, original_type);
+		return ft;
+	}
+}
+
 namespace lbAbiRiscv64 {
 
 	gb_internal bool is_register(LLVMTypeRef type) {
@@ -2743,6 +2866,9 @@ gb_internal LB_ABI_INFO(lb_get_abi_info_internal) {
 		return lbAbiWasm::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);
 	case TargetArch_riscv64:
 		return lbAbiRiscv64::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);
+	case TargetArch_mips32be:
+		GB_ASSERT(build_context.metrics.abi == TargetABI_O64);
+		return lbAbiMipsO64::abi_info(m, arg_types, arg_count, return_type, return_is_defined, return_is_tuple, calling_convention, original_type);
 	}
 
 	GB_PANIC("Unsupported ABI");

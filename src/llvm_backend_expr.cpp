@@ -1479,6 +1479,8 @@ gb_internal lbValue lb_emit_arith_matrix(lbProcedure *p, TokenKind op, lbValue l
 	return {};
 }
 
+
+
 gb_internal LLVMValueRef lb_integer_division(lbProcedure *p, LLVMValueRef lhs, LLVMValueRef rhs, bool is_signed) {
 	LLVMTypeRef type = LLVMTypeOf(rhs);
 	GB_ASSERT(LLVMTypeOf(lhs) == type);
@@ -3370,7 +3372,17 @@ gb_internal lbValue lb_emit_c_vararg(lbProcedure *p, lbValue arg, Type *type) {
 	}
 
 	Type *promoted = c_vararg_promote_type(core);
-	return lb_emit_conv(p, arg, promoted);
+	arg = lb_emit_conv(p, arg, promoted);
+
+	if (build_context.metrics.arch == TargetArch_mips32be) {
+		LLVMTypeRef llvm_type = lb_type(p->module, arg.type);
+		if (lbAbiMipsO64::is_aggregate(llvm_type, type)) {
+			LLVMTypeRef abi_type = lbAbiMipsO64::aggregate_type(p->module->ctx, lb_sizeof(llvm_type));
+			arg.value = OdinLLVMBuildTransmute(p, arg.value, abi_type);
+			arg.abi_attribute = lb_create_enum_attribute(p->module->ctx, "inreg");
+		}
+	}
+	return arg;
 }
 
 gb_internal lbValue lb_compare_records(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right, Type *type) {
@@ -7019,4 +7031,3 @@ gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr) {
 
 	return {};
 }
-

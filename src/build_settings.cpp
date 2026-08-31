@@ -56,6 +56,7 @@ enum TargetArchKind : u16 {
 	TargetArch_wasm32,
 	TargetArch_wasm64p32,
 	TargetArch_riscv64,
+	TargetArch_mips32be,
 
 	TargetArch_COUNT,
 };
@@ -69,6 +70,7 @@ gb_global String target_arch_names[TargetArch_COUNT] = {
 	str_lit("wasm32"),
 	str_lit("wasm64p32"),
 	str_lit("riscv64"),
+	str_lit("mips32be"),
 };
 
 enum TargetEndianKind : u8 {
@@ -88,6 +90,7 @@ enum TargetABIKind : u16 {
 
 	TargetABI_Win64,
 	TargetABI_SysV,
+	TargetABI_O64,
 
 	TargetABI_COUNT,
 };
@@ -96,6 +99,7 @@ gb_global String target_abi_names[TargetABI_COUNT] = {
 	str_lit(""),
 	str_lit("win64"),
 	str_lit("sysv"),
+	str_lit("o64"),
 };
 
 enum Windows_Subsystem : u8 {
@@ -147,6 +151,8 @@ gb_global TargetEndianKind target_endians[TargetArch_COUNT] = {
 	TargetEndian_Little,
 	TargetEndian_Little,
 	TargetEndian_Little,
+	TargetEndian_Little,
+	TargetEndian_Big,
 };
 
 #ifndef ODIN_VERSION_RAW
@@ -900,6 +906,14 @@ gb_global TargetMetrics target_freestanding_riscv64 = {
 	str_lit("riscv64-unknown-gnu"),
 };
 
+gb_global TargetMetrics target_freestanding_mips32be = {
+	TargetOs_freestanding,
+	TargetArch_mips32be,
+	4, 4, 8, 8,
+	str_lit("mips64-unknown-elf"),
+	TargetABI_O64,
+};
+
 
 struct NamedTargetMetrics {
 	String name;
@@ -945,6 +959,7 @@ gb_global NamedTargetMetrics named_targets[] = {
 	{ str_lit("freestanding_arm32"), &target_freestanding_arm32 },
 
 	{ str_lit("freestanding_riscv64"), &target_freestanding_riscv64 },
+	{ str_lit("freestanding_mips32be"), &target_freestanding_mips32be },
 };
 
 gb_global NamedTargetMetrics *selected_target_metrics;
@@ -1938,6 +1953,10 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 		if (bc->reloc_mode == RelocMode_Default) {
 			bc->reloc_mode = RelocMode_PIC;
 		}
+	} else if (metrics->arch == TargetArch_mips32be) {
+		if (bc->reloc_mode == RelocMode_Default) {
+			bc->reloc_mode = RelocMode_Static;
+		}
 	} else if (metrics->os == TargetOs_linux && subtarget == Subtarget_Android) {
 		switch (metrics->arch) {
 		case TargetArch_arm64:
@@ -2146,6 +2165,9 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 // a binary search is possible.
 
 gb_internal bool check_single_target_feature_is_valid(String const &feature_list, String const &feature) {
+	if (build_context.metrics.arch == TargetArch_mips32be && feature == str_lit("noabicalls")) {
+		return true;
+	}
 	String_Iterator it = {feature_list, 0};
 	String str = {};
 	while (string_split_iterator_next(&it, ',', &str)) {
@@ -2269,6 +2291,7 @@ gb_internal String infer_object_extension_from_build_context() {
 			default:
 			case TargetABI_Default:
 			case TargetABI_SysV:
+			case TargetABI_O64:
 				output_extension = STR_LIT("o");
 				break;
 			case TargetABI_Win64:

@@ -1086,6 +1086,20 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 			param_offset += 1;
 
 			LLVMAddCallSiteAttribute(ret, 1, lb_create_enum_attribute_with_type(p->module->ctx, "sret", LLVMTypeOf(args[0])));
+		} else if (build_context.metrics.arch == TargetArch_mips32be &&
+		           ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
+			LLVMAddCallSiteAttribute(ret, LLVMAttributeIndex_ReturnIndex, ft->ret.attribute);
+		}
+
+		LLVMAttributeIndex value_offset = LLVMAttributeIndex_FirstArgIndex;
+		if (return_ptr.value != nullptr) {
+			value_offset += 1;
+		}
+		for_array(i, processed_args) {
+			if (processed_args[i].abi_attribute != nullptr) {
+				LLVMAddCallSiteAttribute(ret, value_offset+cast(LLVMAttributeIndex)i,
+				                         processed_args[i].abi_attribute);
+			}
 		}
 
 		for_array(i, ft->args) {
@@ -5411,4 +5425,3 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst);
 	}
 }
-

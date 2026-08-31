@@ -113,7 +113,12 @@ Darwin)
 	fi
 
 	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags) ${darwin_sysroot}"
-	LDFLAGS="$LDFLAGS -liconv -ldl -framework System -lLLVM"
+	if [ -f "$($LLVM_CONFIG --libdir)/libLLVM.dylib" ]; then
+		LLVM_LIBS="-lLLVM"
+	else
+		LLVM_LIBS="$($LLVM_CONFIG --link-static --libs core passes all-targets --system-libs)"
+	fi
+	LDFLAGS="$LDFLAGS -liconv -ldl -framework System $LLVM_LIBS"
 	;;
 FreeBSD)
 	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
@@ -125,7 +130,7 @@ NetBSD)
 	;;
 Linux)
 	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ -ldl $($LLVM_CONFIG --libs core native passes arm aarch64 x86 webassembly riscv --system-libs --libfiles)"
+	LDFLAGS="$LDFLAGS -lstdc++ -ldl $($LLVM_CONFIG --libs core native passes arm aarch64 x86 webassembly riscv mips --system-libs --libfiles)"
 	# Copy libLLVM*.so into current directory for linking
 	# NOTE: This is needed by the Linux release pipeline!
 	# cp $(readlink -f $($LLVM_CONFIG --libfiles)) ./
@@ -172,7 +177,16 @@ build_odin() {
 }
 
 run_demo() {
-	./odin run examples/demo -vet -strict-style -- Hellope World
+	host_target=
+	case "$OS_ARCH" in
+	arm64|aarch64) host_target=AArch64 ;;
+	x86_64|amd64) host_target=X86 ;;
+	esac
+	if [ -n "$host_target" ] && $LLVM_CONFIG --targets-built | grep -qw "$host_target"; then
+		./odin run examples/demo -vet -strict-style -- Hellope World
+	else
+		printf "Skipping native demo: LLVM does not include the %s target.\n" "${host_target:-host}"
+	fi
 }
 
 if [ $# -eq 0 ]; then

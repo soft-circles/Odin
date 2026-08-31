@@ -11,6 +11,7 @@ archs = [
 	("wasm32",    "js_wasm32",     "wasm32-js-js",        [], []),
 	("wasm64p32", "js_wasm64p32",  "wasm32-js-js",        [], []),
 	("riscv64",   "linux_riscv64", "riscv64-linux-gnu",   [], []),
+	("mips32be",  "freestanding_mips32be", "mips64-unknown-elf", [], []),
 ];
 
 SEEKING_CPUS     = 0
