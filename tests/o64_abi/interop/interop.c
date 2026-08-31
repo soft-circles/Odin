@@ -137,10 +137,13 @@ int main(void) {
 	int failures = 0;
 
 	debug_init_emulog();
+	console_init();
+	printf("Odin O64 ABI hardware test\n\n");
 
 #define CHECK(label, condition) do { \
 	if (!(condition)) { \
 		debugf("FAIL: " label "\n"); \
+		printf("FAIL: " label "\n"); \
 		failures++; \
 	} \
 } while (0)
@@ -181,10 +184,13 @@ int main(void) {
 
 #undef CHECK
 
-	if (failures == 0)
+	if (failures == 0) {
 		debugf("PASS: Odin O64 ABI 23/23\n");
-	else
+		printf("PASS: Odin O64 ABI 23/23\n");
+	} else {
 		debugf("FAIL: Odin O64 ABI\n");
+		printf("FAIL: Odin O64 ABI (%d/23 failed)\n", failures);
+	}
 
 	keep_reference_entries();
 	for (;;) {}
