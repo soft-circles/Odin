@@ -113,6 +113,19 @@ jobs:
           echo "/usr/lib/llvm-20/bin" >> $GITHUB_PATH
       - name: Build Odin
         run: ./build_odin.sh release
+      - name: N64 quick validation
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python3 tests/n64_validation/test_validation_contract.py
+          python3 tests/n64_validate.py quick
+      - name: Retain N64 validation logs
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: n64-quick-validation-${{ github.run_id }}
+          path: .n64-validation-artifacts/
+          if-no-files-found: error
+          retention-days: 14
       - name: Odin version
         run: ./odin version
       - name: Odin report

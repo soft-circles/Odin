@@ -74,6 +74,9 @@ artifacts/
 *.svclog
 *.scc
 
+# N64 quick/full validation logs and clean fixture copies.
+/.n64-validation-artifacts/
+
 # Chutzpah Test files
 _Chutzpah*
 
