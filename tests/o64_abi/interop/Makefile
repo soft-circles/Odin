@@ -3,6 +3,7 @@ SOURCE_DIR := .
 ELF := $(BUILD_DIR)/interop.elf
 ROM := interop.z64
 ODIN ?= ../../../odin
+SDK_VALIDATOR := ../validate_sdk.py
 
 all: $(ROM)
 
@@ -12,7 +13,12 @@ endif
 
 include $(N64_INST)/include/n64.mk
 
+validate-sdk:
+	python3 $(SDK_VALIDATOR) "$(N64_INST)"
+
 $(ELF): $(BUILD_DIR)/interop.o $(BUILD_DIR)/odin_side.o
+
+$(BUILD_DIR)/interop.o $(BUILD_DIR)/odin_side.o: | validate-sdk
 
 $(ROM): N64_ROM_TITLE = "Odin O64 ABI"
 
@@ -33,4 +39,4 @@ check: $(ELF)
 clean:
 	rm -rf $(BUILD_DIR) *.z64
 
-.PHONY: all check clean
+.PHONY: all check clean validate-sdk

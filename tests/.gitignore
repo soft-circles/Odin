@@ -20,3 +20,20 @@
 # Ignore documentation-related files.
 /documentation/verify/
 /documentation/all.odin-doc
+
+# Generated local and N64/O64 test output. Keep these after the broad
+# extension-based un-ignore rules above so build products stay ignored.
+.DS_Store
+__pycache__/
+*.py[cod]
+*.ll
+*.o
+*.a
+*.elf
+*.elf.stripped
+*.map
+*.sym
+*.dfs
+*.z64
+*.candidate.png
+*.diff.png

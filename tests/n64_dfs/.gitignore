@@ -1,0 +1,6 @@
+/build/
+/.odin-n64-build-*/
+/*.ll
+/*.z64
+/*.candidate.png
+/*.diff.png
