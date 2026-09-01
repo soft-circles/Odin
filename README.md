@@ -58,6 +58,11 @@ main :: proc() {
 
 Instructions for downloading and installing the Odin compiler and libraries.
 
+#### [Nintendo 64 Builds](N64_BUILD.md)
+
+Build an Odin project directly into a configured `.z64` ROM using the
+integrated libdragon pipeline.
+
 #### [Nightly Builds](https://odin-lang.org/docs/nightly/)
 
 Get the latest nightly builds of Odin.
