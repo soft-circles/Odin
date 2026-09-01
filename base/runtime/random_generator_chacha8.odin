@@ -48,6 +48,12 @@ Default_Random_State :: struct {
 	_seeded: bool,
 }
 
+when ODIN_OS == .N64 {
+	// N64 is currently single-threaded and has no TLS runtime.
+	@(private="file")
+	n64_default_random_state: Default_Random_State
+}
+
 @(require_results)
 default_random_generator :: proc "contextless" (state: ^Default_Random_State = nil) -> Random_Generator {
 	return {
@@ -57,10 +63,14 @@ default_random_generator :: proc "contextless" (state: ^Default_Random_State = n
 }
 
 default_random_generator_proc :: proc(data: rawptr, mode: Random_Generator_Mode, p: []byte) {
-	@(thread_local)
-	state: Default_Random_State
-
-	r: ^Default_Random_State = &state
+	r: ^Default_Random_State
+	when ODIN_OS == .N64 {
+		r = &n64_default_random_state
+	} else {
+		@(thread_local)
+		state: Default_Random_State
+		r = &state
+	}
 	if data != nil {
 		r = cast(^Default_Random_State)data
 	}

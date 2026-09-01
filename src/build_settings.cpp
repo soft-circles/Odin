@@ -24,6 +24,7 @@ enum TargetOsKind : u16 {
 	TargetOs_wasi,
 	TargetOs_js,
 	TargetOs_orca,
+	TargetOs_n64,
 
 	TargetOs_freestanding,
 
@@ -42,6 +43,7 @@ gb_global String target_os_names[TargetOs_COUNT] = {
 	str_lit("wasi"),
 	str_lit("js"),
 	str_lit("orca"),
+	str_lit("n64"),
 
 	str_lit("freestanding"),
 };
@@ -520,6 +522,16 @@ struct BuildContext {
 	String out_filepath;
 	String resource_filepath;
 	String pdb_filepath;
+	String n64_inst;
+	bool   n64_inst_given;
+	String n64_title;
+	String n64_region;
+	String n64_save_type;
+	String n64_controllers[4];
+	String n64_assets;
+	String n64_metadata;
+	bool   n64_rtc;
+	bool   n64_rom_options_given;
 
 	u64 vet_flags;
 	u32 sanitizer_flags;
@@ -914,6 +926,14 @@ gb_global TargetMetrics target_freestanding_mips32be = {
 	TargetABI_O64,
 };
 
+gb_global TargetMetrics target_n64 = {
+	TargetOs_n64,
+	TargetArch_mips32be,
+	4, 4, 8, 8,
+	str_lit("mips64-unknown-elf"),
+	TargetABI_O64,
+};
+
 
 struct NamedTargetMetrics {
 	String name;
@@ -960,6 +980,8 @@ gb_global NamedTargetMetrics named_targets[] = {
 
 	{ str_lit("freestanding_riscv64"), &target_freestanding_riscv64 },
 	{ str_lit("freestanding_mips32be"), &target_freestanding_mips32be },
+
+	{ str_lit("n64"), &target_n64 },
 };
 
 gb_global NamedTargetMetrics *selected_target_metrics;
@@ -1867,6 +1889,10 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 	bc->max_align         = metrics->max_align;
 	bc->max_simd_align    = metrics->max_simd_align;
 	bc->link_flags        = str_lit(" ");
+	if (bc->metrics.os == TargetOs_n64) {
+		// Libdragon's initial N64 runtime is deliberately single-threaded and has no TLS runtime.
+		bc->no_thread_local = true;
+	}
 
 	#if defined(DEFAULT_TO_THREADED_CHECKER)
 	bc->threaded_checker = true;
@@ -2285,6 +2311,7 @@ gb_internal String infer_object_extension_from_build_context() {
 		default:
 		case TargetOs_darwin:
 		case TargetOs_linux:
+		case TargetOs_n64:
 
 		case TargetOs_freestanding:
 			switch (build_context.metrics.abi) {
@@ -2405,7 +2432,9 @@ gb_internal bool init_build_paths(String init_filename) {
 		output_extension = make_string(nullptr, 0);
 		String const single_file_extension = str_lit(".odin");
 
-		if (selected_subtarget == Subtarget_Android) {
+		if (build_context.metrics.os == TargetOs_n64) {
+			output_extension = STR_LIT("z64");
+		} else if (selected_subtarget == Subtarget_Android) {
 			// NOTE(bill): It's always shared!
 			output_extension = STR_LIT("so");
 		} else if (build_context.metrics.os == TargetOs_windows) {
@@ -2468,6 +2497,15 @@ gb_internal bool init_build_paths(String init_filename) {
 		} else if (build_context.build_mode == BuildMode_Assembly) {
 			// Both directory or filename prefix allowed
 
+		} else if (build_context.metrics.os == TargetOs_n64) {
+			if (output_is_directory) {
+				gb_printf_err("N64 ROM output path %.*s is a directory.\n", LIT(output_file));
+				return false;
+			} else if (bc->build_paths[BuildPath_Output].ext.len > 0 &&
+			           !str_eq_ignore_case(bc->build_paths[BuildPath_Output].ext, STR_LIT("z64"))) {
+				gb_printf_err("N64 ROM output path %.*s must use the .z64 extension.\n", LIT(output_file));
+				return false;
+			}
 		} else if (build_context.metrics.os == TargetOs_windows) {
 			if (output_is_directory) {
 				gb_printf_err("Output path %.*s is a directory.\n", LIT(output_file));
@@ -2579,7 +2617,10 @@ gb_internal bool init_build_paths(String init_filename) {
 
 	// Do we have an extension? We might not if the output filename was supplied.
 	if (bc->build_paths[BuildPath_Output].ext.len == 0) {
-		if (build_context.metrics.os == TargetOs_windows || is_arch_wasm() || build_context.build_mode != BuildMode_Executable) {
+		if (build_context.metrics.os == TargetOs_windows ||
+		    build_context.metrics.os == TargetOs_n64 ||
+		    is_arch_wasm() ||
+		    build_context.build_mode != BuildMode_Executable) {
 
 			// NOTE(Jeroen): If build mode is LLVM_IR and a custom output was set
 			if (!output_should_be_directory) {

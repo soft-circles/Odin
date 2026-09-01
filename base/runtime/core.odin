@@ -608,6 +608,7 @@ Raw_Quaternion256_Vector_Scalar :: struct {vector: [3]f64, scalar: f64}
 		WASI,
 		JS,
 		Orca,
+		N64,
 		Freestanding,
 	}
 */
@@ -676,6 +677,7 @@ ALL_ODIN_OS_TYPES :: Odin_OS_Types{
 	.WASI,
 	.JS,
 	.Orca,
+	.N64,
 	.Freestanding,
 }
 
@@ -727,7 +729,7 @@ Odin_Optimization_Mode :: type_of(ODIN_OPTIMIZATION_MODE)
 /////////////////////////////
 
 // IMPORTANT NOTE(bill): Do not call this unless you want to explicitly set up the entry point and how it gets called
-// This is probably only useful for freestanding targets
+// This is probably only useful for freestanding targets and platform runtimes with custom entry points
 foreign {
 	@(link_name="__$startup_runtime")
 	_startup_runtime :: proc "odin" () ---
