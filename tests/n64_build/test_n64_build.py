@@ -11,12 +11,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import sys
 
 
 HERE = Path(__file__).resolve().parent
 ODIN_ROOT = HERE.parents[1]
 ODIN = Path(os.environ.get("ODIN", ODIN_ROOT / "odin")).resolve()
-PINNED_LIBDRAGON_COMMIT = "c79a52b42ac790e06e797aede43914dd8754cd5f"
+sys.path.insert(0, str(HERE.parent))
+from n64_pins import LIBDRAGON_COMMIT as PINNED_LIBDRAGON_COMMIT
 REQUIRED_SDK_FILES = (
 	"include/n64.mk",
 	"mips64-elf/include/libdragon.version",
@@ -329,6 +331,8 @@ class N64EndToEndBuildTests(unittest.TestCase):
 	def setUpClass(cls):
 		if not ODIN.is_file():
 			raise unittest.SkipTest(f"Odin compiler not found: {ODIN}")
+		if os.environ.get("N64_VALIDATION_MODE") == "quick":
+			raise unittest.SkipTest("end-to-end SDK builds are disabled in quick validation")
 		cls.sdk = configured_sdk()
 		if cls.sdk is None or not (cls.sdk / "include/n64.mk").is_file():
 			raise unittest.SkipTest("set N64_INST to run N64 end-to-end build tests")

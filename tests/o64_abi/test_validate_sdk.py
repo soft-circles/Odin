@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,19 +38,26 @@ class ValidateSdkTests(unittest.TestCase):
 	def test_accepts_the_clean_pinned_sdk(self):
 		temporary, root = self.create_sdk()
 		self.addCleanup(temporary.cleanup)
-		provenance = validate_sdk.validate_sdk(root)
+		empty_sha256 = hashlib.sha256(b"").hexdigest()
+		provenance = validate_sdk.validate_sdk(root, expected_makefile_sha256=empty_sha256)
 		self.assertEqual(provenance.libdragon["hash"], validate_sdk.LIBDRAGON_COMMIT)
 
 	def test_rejects_a_different_libdragon_commit(self):
 		temporary, root = self.create_sdk(libdragon_commit="0" * 40)
 		self.addCleanup(temporary.cleanup)
 		with self.assertRaisesRegex(validate_sdk.ValidationError, "libdragon SDK mismatch"):
-			validate_sdk.validate_sdk(root)
+			validate_sdk.validate_sdk(root, expected_makefile_sha256=hashlib.sha256(b"").hexdigest())
 
 	def test_rejects_dirty_libdragon_provenance(self):
 		temporary, root = self.create_sdk(dirty=True)
 		self.addCleanup(temporary.cleanup)
 		with self.assertRaisesRegex(validate_sdk.ValidationError, "must be clean"):
+			validate_sdk.validate_sdk(root, expected_makefile_sha256=hashlib.sha256(b"").hexdigest())
+
+	def test_rejects_a_modified_n64_makefile(self):
+		temporary, root = self.create_sdk()
+		self.addCleanup(temporary.cleanup)
+		with self.assertRaisesRegex(validate_sdk.ValidationError, "n64.mk SHA-256"):
 			validate_sdk.validate_sdk(root)
 
 

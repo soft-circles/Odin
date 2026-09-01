@@ -4402,7 +4402,7 @@ int main(int arg_count, char const **arg_ptr) {
 	if (!init_build_paths(init_filename)) {
 		return 1;
 	}
-	if (!n64_prepare_build()) {
+	if (!n64_prepare_build_from_context()) {
 		return 1;
 	}
 
