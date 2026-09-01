@@ -532,7 +532,12 @@ gb_internal LLVMValueRef lb_big_int_to_llvm(lbModule *m, Type *original_type, Bi
 	                     &val);
 	GB_ASSERT(err == MP_OKAY);
 
-	if (!is_type_endian_little(original_type)) {
+	// LLVMConstIntOfArbitraryPrecision consumes host-order integer words and
+	// applies the target data layout itself. Only explicit endian-qualified
+	// integers whose byte order differs from the target need their value bytes
+	// swapped here; platform integers must keep their numeric value on big-endian
+	// targets too.
+	if (is_type_different_to_arch_endianness(original_type)) {
 		for (size_t i = 0; i < sz/2; i++) {
 			u8 tmp = rop[i];
 			rop[i] = rop[sz-1-i];

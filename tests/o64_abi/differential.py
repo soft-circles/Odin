@@ -150,6 +150,7 @@ def main():
 				failures.append(f"{name}: call-state differs")
 		print(f"  {'ok  ' if matches else 'DIFF'} {name}")
 
+	print(f"\n{len(call_stack_bytes) - len(failures)}/{len(call_stack_bytes)} call-state probes match")
 	if failures:
 		print("\nCall-state failures:")
 		for failure in failures:
