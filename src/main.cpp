@@ -391,6 +391,14 @@ enum BuildFlagKind {
 	BuildFlag_BuildMode,
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
+	BuildFlag_N64Inst,
+	BuildFlag_N64Title,
+	BuildFlag_N64Region,
+	BuildFlag_N64SaveType,
+	BuildFlag_N64RTC,
+	BuildFlag_N64Controllers,
+	BuildFlag_N64Assets,
+	BuildFlag_N64Metadata,
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
@@ -629,6 +637,85 @@ gb_internal void did_you_mean_flag(String flag) {
 	gb_printf_err("Unknown flag: '%.*s'\n", LIT(flag));
 }
 
+gb_internal bool n64_title_is_valid(String const &title) {
+	if (title.len == 0 || title.len > 20) {
+		return false;
+	}
+	for (isize index = 0; index < title.len; index += 1) {
+		u8 c = title[index];
+		if (!gb_char_is_alphanumeric(c) && c != ' ' && c != '-' && c != '_' && c != '.' && c != '!') {
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal String n64_canonical_save_type(String const &value) {
+	String choices[] = {
+		STR_LIT("none"), STR_LIT("eeprom4k"), STR_LIT("eeprom16k"),
+		STR_LIT("sram256k"), STR_LIT("sram768k"), STR_LIT("sram1m"), STR_LIT("flashram"),
+	};
+	for (String const &choice : choices) {
+		if (str_eq_ignore_case(value, choice)) {
+			return choice;
+		}
+	}
+	return {};
+}
+
+gb_internal String n64_canonical_controller(String const &value) {
+	String choices[] = {
+		STR_LIT("n64"), STR_LIT("n64,pak=rumble"), STR_LIT("n64,pak=controller"),
+		STR_LIT("n64,pak=transfer"), STR_LIT("none"), STR_LIT("mouse"), STR_LIT("vru"),
+		STR_LIT("gamecube"), STR_LIT("randnetkeyboard"), STR_LIT("gamecubekeyboard"),
+	};
+	for (String const &choice : choices) {
+		if (str_eq_ignore_case(value, choice)) {
+			return choice;
+		}
+	}
+	return {};
+}
+
+gb_internal bool n64_parse_controllers(String const &value, String controllers[4]) {
+	if (value.len == 0 || value[0] == ';' || value[value.len-1] == ';' || string_contains_string(value, STR_LIT(";;"))) {
+		return false;
+	}
+	String_Iterator iterator = {value, 0};
+	String declaration = {};
+	isize count = 0;
+	while (string_split_iterator_next(&iterator, ';', &declaration)) {
+		declaration = string_trim_whitespace(declaration);
+		if (count >= 4 || declaration.len == 0) {
+			return false;
+		}
+		String canonical = n64_canonical_controller(declaration);
+		if (canonical.len == 0) {
+			return false;
+		}
+		controllers[count++] = canonical;
+	}
+	return count > 0;
+}
+
+gb_internal bool n64_parse_existing_path(String const &option, String const &value, bool expect_directory, String *result) {
+	String path = string_trim_whitespace(value);
+	if (!is_build_flag_path_valid(path)) {
+		gb_printf_err("Invalid %.*s path, got %.*s\n", LIT(option), LIT(path));
+		return false;
+	}
+	String fullpath = path_to_full_path(permanent_allocator(), path);
+	bool exists = gb_file_exists(alloc_cstring(temporary_allocator(), fullpath));
+	bool is_directory = exists && path_is_directory(fullpath);
+	if (!exists || is_directory != expect_directory) {
+		gb_printf_err("%.*s must name an existing %s, got %.*s\n",
+		              LIT(option), expect_directory ? "directory" : "file", LIT(fullpath));
+		return false;
+	}
+	*result = fullpath;
+	return true;
+}
+
 gb_internal bool parse_build_flags(Array<String> args) {
 	auto build_flags = array_make<BuildFlag>(heap_allocator(), 0, BuildFlag_COUNT);
 	add_flag(&build_flags, BuildFlag_Help,                    str_lit("help"),                      BuildFlagParam_None,    Command_all);
@@ -652,6 +739,14 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
+	add_flag(&build_flags, BuildFlag_N64Inst,                 str_lit("n64-inst"),                  BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Title,                str_lit("n64-title"),                 BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Region,               str_lit("n64-region"),                BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64SaveType,             str_lit("n64-save-type"),             BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64RTC,                  str_lit("n64-rtc"),                   BuildFlagParam_None,    Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Controllers,          str_lit("n64-controllers"),           BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Assets,               str_lit("n64-assets"),                BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Metadata,             str_lit("n64-metadata"),              BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
@@ -1259,6 +1354,89 @@ gb_internal bool parse_build_flags(Array<String> args) {
 
 							break;
 						}
+
+						case BuildFlag_N64Inst: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String path = string_trim_whitespace(value.value_string);
+							if (is_build_flag_path_valid(path)) {
+								build_context.n64_inst = path_to_full_path(permanent_allocator(), path);
+								build_context.n64_inst_given = true;
+							} else {
+								gb_printf_err("Invalid -n64-inst path, got %.*s\n", LIT(path));
+								bad_flags = true;
+							}
+							break;
+						}
+						case BuildFlag_N64Title: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String title = string_trim_whitespace(value.value_string);
+							if (!n64_title_is_valid(title)) {
+								gb_printf_err("Invalid -n64-title value '%.*s': expected 1-20 characters using letters, digits, spaces, '-', '_', '.', or '!'\n", LIT(title));
+								bad_flags = true;
+							} else {
+								build_context.n64_title = copy_string(permanent_allocator(), title);
+								build_context.n64_rom_options_given = true;
+							}
+							break;
+						}
+						case BuildFlag_N64Region: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String region = string_trim_whitespace(value.value_string);
+							if (region.len != 1 || !gb_char_is_alpha(region[0])) {
+								gb_printf_err("Invalid -n64-region value '%.*s': expected one ASCII region letter such as E, J, or P\n", LIT(region));
+								bad_flags = true;
+							} else {
+								u8 *text = gb_alloc_array(permanent_allocator(), u8, 2);
+								text[0] = cast(u8)gb_char_to_upper(cast(char)region[0]);
+								text[1] = 0;
+								build_context.n64_region = make_string(text, 1);
+								build_context.n64_rom_options_given = true;
+							}
+							break;
+						}
+						case BuildFlag_N64SaveType: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String save_type = n64_canonical_save_type(string_trim_whitespace(value.value_string));
+							if (save_type.len == 0) {
+								gb_printf_err("Invalid -n64-save-type value '%.*s': expected none, eeprom4k, eeprom16k, sram256k, sram768k, sram1m, or flashram\n", LIT(value.value_string));
+								bad_flags = true;
+							} else {
+								build_context.n64_save_type = save_type;
+								build_context.n64_rom_options_given = true;
+							}
+							break;
+						}
+						case BuildFlag_N64RTC:
+							build_context.n64_rtc = true;
+							build_context.n64_rom_options_given = true;
+							break;
+						case BuildFlag_N64Controllers: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (!n64_parse_controllers(value.value_string, build_context.n64_controllers)) {
+								gb_printf_err("Invalid -n64-controllers value '%.*s': expected 1-4 semicolon-separated controller declarations\n", LIT(value.value_string));
+								gb_printf_err("Valid declarations: n64, n64,pak=rumble, n64,pak=controller, n64,pak=transfer, none, mouse, vru, gamecube, randnetkeyboard, gamecubekeyboard\n");
+								bad_flags = true;
+							} else {
+								build_context.n64_rom_options_given = true;
+							}
+							break;
+						}
+						case BuildFlag_N64Assets:
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (n64_parse_existing_path(STR_LIT("-n64-assets"), value.value_string, true, &build_context.n64_assets)) {
+								build_context.n64_rom_options_given = true;
+							} else {
+								bad_flags = true;
+							}
+							break;
+						case BuildFlag_N64Metadata:
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (n64_parse_existing_path(STR_LIT("-n64-metadata"), value.value_string, false, &build_context.n64_metadata)) {
+								build_context.n64_rom_options_given = true;
+							} else {
+								bad_flags = true;
+							}
+							break;
 
 						case BuildFlag_Subtarget:
 							if (selected_target_metrics == nullptr) {
@@ -3145,6 +3323,33 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Sets the file name of the outputted executable.");
 			print_usage_line(2, "Example: -out:foo.exe");
 		}
+
+		if (print_flag("-n64-inst:<directory>")) {
+			print_usage_line(2, "Sets the installed libdragon SDK root for -target:n64.");
+			print_usage_line(2, "Takes precedence over the N64_INST environment variable.");
+		}
+		if (print_flag("-n64-title:<string>")) {
+			print_usage_line(2, "Sets the 1-20 character N64 ROM title.");
+		}
+		if (print_flag("-n64-region:<letter>")) {
+			print_usage_line(2, "Sets the one-letter N64 ROM region code, for example E, J, or P.");
+		}
+		if (print_flag("-n64-save-type:<string>")) {
+			print_usage_line(2, "Declares the cartridge save type: none, eeprom4k, eeprom16k, sram256k, sram768k, sram1m, or flashram.");
+		}
+		if (print_flag("-n64-rtc")) {
+			print_usage_line(2, "Declares Joybus real-time clock support in the ROM header.");
+		}
+		if (print_flag("-n64-controllers:<string>")) {
+			print_usage_line(2, "Declares 1-4 controller ports separated by semicolons.");
+			print_usage_line(2, "Example: -n64-controllers:\"n64,pak=rumble;none;none;none\"");
+		}
+		if (print_flag("-n64-assets:<directory>")) {
+			print_usage_line(2, "Embeds a raw directory as a libdragon DFS image.");
+		}
+		if (print_flag("-n64-metadata:<file>")) {
+			print_usage_line(2, "Passes a libdragon-compatible metadata INI file to n64metadata.");
+		}
 	}
 
 	if (doc) {
@@ -4195,6 +4400,9 @@ int main(int arg_count, char const **arg_ptr) {
 
 	// Set and check build paths...
 	if (!init_build_paths(init_filename)) {
+		return 1;
+	}
+	if (!n64_prepare_build()) {
 		return 1;
 	}
 
