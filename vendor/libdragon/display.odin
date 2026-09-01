@@ -47,12 +47,14 @@ filter_options_t :: enum c.int {
 }
 
 // The pinned SDK defines surface_t concretely in surface.h. This narrow binding
-// intentionally keeps it opaque because the exposed calls only pass pointers and
-// do not access its fields.
+// intentionally keeps it opaque because the exposed calls only pass pointers
+// and do not access its fields. Never allocate or inspect surface_t in Odin.
 surface_t :: struct {}
 
 @(default_calling_convention="c")
 foreign lib {
+	// Initialize direct display once before acquiring surfaces. Do not call this
+	// while the console owns display state.
 	display_init :: proc(
 		res: resolution_t,
 		bit: bitdepth_t,
@@ -60,7 +62,10 @@ foreign lib {
 		gamma: gamma_t,
 		filters: filter_options_t,
 	) ---
+	// Acquire one libdragon-owned surface for the next frame. A nil result means
+	// no surface is currently available.
 	display_get  :: proc() -> ^surface_t ---
+	// Submit the same surface returned by display_get after drawing is complete.
 	display_show :: proc(surf: ^surface_t) ---
 }
 

@@ -1,5 +1,9 @@
 # Pinned libdragon binding ABI probe
 
+See the [`vendor:libdragon` guide](../../../vendor/libdragon/README.md) for the
+supported raw surface, lifecycle rules, and the policy that requires this probe
+for every new concrete crossing type.
+
 This fixture gates the concrete tracer-facing Odin declarations against the
 installed libdragon SDK at commit
 `c79a52b42ac790e06e797aede43914dd8754cd5f`.

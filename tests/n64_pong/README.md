@@ -1,5 +1,10 @@
 # Odin N64 Pong v0.1
 
+This is the canonical visible quickstart linked from
+[`N64_BUILD.md`](../../N64_BUILD.md). That guide owns SDK setup, general build
+options, loading, and packaging diagnostics. The
+[`vendor:libdragon` guide](../../vendor/libdragon/README.md) owns raw API rules.
+
 This is a small, no-external-asset Pong game built directly on the raw
 `vendor:libdragon` binding. The left paddle is controlled from port 1 and the
 right paddle is CPU-controlled. The sample exercises direct display graphics,
@@ -14,41 +19,19 @@ The N64 target supplies the hidden C-ABI entry point and runtime setup. The
 application is ordinary Odin source: it has no C entry point, project Makefile,
 or asset-build step.
 
-## SDK configuration and build
+## Fixture build
 
-Use the libdragon SDK pinned for N64 v0.1 at revision
-`c79a52b42ac790e06e797aede43914dd8754cd5f`. Configure its installed root in
-either of these ways:
-
-```sh
-export N64_INST=/path/to/n64_toolchain
-```
-
-or pass it for one build:
-
-```sh
-odin build . -target:n64 -n64-inst:/path/to/n64_toolchain \
-  -out:n64_pong.z64
-```
-
-The `-n64-inst:<path>` option takes precedence over `N64_INST`. If neither is
-set, Odin reports how to configure the SDK; it does not search for or install
-one automatically.
-
-With `N64_INST` set, build from this directory with one Odin-owned command:
+With the pinned libdragon SDK
+`c79a52b42ac790e06e797aede43914dd8754cd5f` configured through the main guide,
+build from this directory:
 
 ```sh
 odin build . -target:n64 -out:n64_pong.z64
 ```
 
-The result is the big-endian N64 ROM `n64_pong.z64`. The build does not require
-an application-maintained Makefile or a manually invoked libdragon tool. The
-directory remains a clean sample: only `pong.odin` is application source; the
-README, playtest record, headless script, and golden image are documentation or
-test inputs and are not part of the ROM build graph.
-
-The integrated ROM build currently requires a POSIX host and GNU make at
-`/usr/bin/make`; it does not support Windows hosts.
+The result is `n64_pong.z64`. Only `pong.odin` is application source; the
+README, playtest record, headless script, and golden image are fixture inputs,
+not part of the ROM graph.
 
 ## Controls
 
@@ -140,32 +123,14 @@ are covered across the automated controller test and the
 Analogue3D/SummerCart64 playtest. See `PLAYTEST.md` for the scoped manual
 results.
 
-## Debugging and retained intermediates
-
-Add `-show-system-calls` to show Odin's libdragon packaging invocation and the
-verbose commands run by the generated build graph:
-
-```sh
-odin build . -target:n64 -out:n64_pong.z64 -show-system-calls
-```
+## Fixture diagnosis
 
 The game writes structured progress and failure markers through libdragon's
 debug channel. A headless failure includes the captured log, making the first
 missing PASS marker or `ODIN_N64_PONG_FAIL:v1:<reason>` the best place to begin.
-
-Add `-keep-temp-files` when link or packaging inspection is needed:
-
-```sh
-odin build . -target:n64 -out:n64_pong.z64 \
-  -show-system-calls -keep-temp-files
-```
-
-Odin prints `Retained N64 build intermediates: <directory>`. That directory is
-created beside the output as `.odin-n64-build-*` and retains the generated
-`Makefile`, staged Odin and foreign `.o`/`.a` inputs, and the `build` directory's
-ELF, map, symbol file, and stripped ELF. Successful builds remove this staging
-directory unless `-keep-temp-files` is present; failed N64 packaging builds
-retain it and print its location.
+Use the main guide's
+[inspection flags](../../N64_BUILD.md#load-and-debug-a-rom) for the generated
+link and package graph.
 
 The upstream-Ares and Analogue3D/SummerCart64 checks are independent release
 gates. Their evidence is recorded in [PLAYTEST.md](PLAYTEST.md); an automated

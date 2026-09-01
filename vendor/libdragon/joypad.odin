@@ -49,8 +49,11 @@ joypad_inputs_t :: struct #packed {
 
 @(default_calling_convention="c")
 foreign lib {
+	// Initialize the joypad subsystem once before polling.
 	joypad_init       :: proc() ---
+	// Refresh current inputs once per input cycle before reading ports.
 	joypad_poll       :: proc() ---
+	// Read a port only after the current cycle's joypad_poll.
 	joypad_get_inputs :: proc(port: joypad_port_t) -> joypad_inputs_t ---
 }
 

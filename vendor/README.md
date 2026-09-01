@@ -8,6 +8,17 @@ These packages and their associated binary files are curated and maintained by t
 
 Presently, the `vendor:` collection comprises the following packages:
 
+## libdragon
+
+[`vendor:libdragon`](libdragon) is the pinned, intentionally narrow raw binding
+used by Odin's Nintendo 64 target. It currently covers basic debug logging,
+display/CPU graphics, joypads, timing, console lifecycle, and DragonFS; it is
+not a complete libdragon binding.
+
+See the [binding guide](libdragon/README.md) for compatibility, type, lifecycle,
+and ABI rules, and the [N64 build guide](../N64_BUILD.md) for SDK setup and ROM
+packaging.
+
 ## cgltf
 
 [cgltf](https://github.com/jkuhlmann/cgltf) is a [glTF2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) loader and writer.

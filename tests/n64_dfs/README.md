@@ -1,5 +1,10 @@
 # Odin N64 DFS and metadata v0.2 sample
 
+Use [`N64_BUILD.md`](../../N64_BUILD.md) for SDK installation, ROM options,
+DragonFS, metadata staging, emulator loading, and retained intermediates. The
+raw filesystem calls are documented in the
+[`vendor:libdragon` guide](../../vendor/libdragon/README.md#dragonfs).
+
 This Odin-only sample is the Milestone 5 end-to-end fixture. Its ordinary
 `main :: proc()` mounts the DragonFS image from the ROM package, opens
 `message.txt` through the raw `vendor:libdragon` binding, validates its exact
@@ -19,20 +24,11 @@ manifest in this directory.
 `VALIDATION.md` records the accepted artifact hashes and final automated and
 manual gate results.
 
-## SDK configuration and one-command build
+## Fixture build
 
-Use the libdragon SDK pinned at revision
-`c79a52b42ac790e06e797aede43914dd8754cd5f`. Either export its installed root:
-
-```sh
-export N64_INST=/path/to/n64_toolchain
-```
-
-or add `-n64-inst:/path/to/n64_toolchain` to the command below. The explicit
-option takes precedence over `N64_INST`; Odin does not search for or install an
-SDK automatically.
-
-From this directory, build the configured ROM with one Odin-owned command:
+With the pinned libdragon SDK
+`c79a52b42ac790e06e797aede43914dd8754cd5f` configured as described by the main
+guide, build from this directory:
 
 ```sh
 odin build . -target:n64 -out:n64_dfs.z64 \
@@ -44,10 +40,8 @@ odin build . -target:n64 -out:n64_dfs.z64 \
   -n64-metadata:metadata.ini
 ```
 
-This fixture deliberately omits `-n64-rtc`, which means RTC is disabled. The
-bare `-n64-rtc` flag enables it. Region is one ASCII letter and controller
-declarations are semicolon-separated; commas remain available within a single
-controller declaration for attachments.
+This fixture deliberately omits `-n64-rtc`, so the reviewed artifact has RTC
+disabled.
 
 The expected runtime asset is exactly 22 bytes, including its final newline:
 
@@ -107,10 +101,9 @@ pinned SDK tools to confirm all of the following on the same candidate ROM:
 - the DragonFS image containing the exact `assets/message.txt` bytes;
 - the pinned `libdragon.version` and `toolchain.version` rompak payloads.
 
-Use `-keep-temp-files -show-system-calls` on the build command when those
-artifacts or invocations need inspection. Odin prints the retained staging
-directory; successful builds otherwise remove it, while failed packaging builds
-retain it for diagnosis.
+Use the main guide's
+[inspection flags](../../N64_BUILD.md#load-and-debug-a-rom) when these
+fixture-specific package assertions need retained inputs.
 
 Run the checked-in verifier against that retained DFS image and the final ROM:
 

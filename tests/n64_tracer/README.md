@@ -1,5 +1,9 @@
 # Odin N64 entry/runtime tracer
 
+Use [`N64_BUILD.md`](../../N64_BUILD.md) for SDK setup, ordinary builds,
+emulator loading, and packaging diagnosis. The raw calls are documented by the
+[`vendor:libdragon` guide](../../vendor/libdragon/README.md).
+
 This Milestone 3 ROM fixture is an Odin-only application with an ordinary
 `main :: proc()`. The N64 target supplies the hidden C-ABI entry bridge; there
 is no application C entry point or project Makefile.
@@ -23,31 +27,23 @@ requires the reviewed deterministic 640x240 angrylion frame hash
 The displayed scene is intentionally unchanged from Milestone 1, so the
 checked-in `tracer.golden.png` remains the reviewed reference.
 
-Build the ROM with one Odin-owned command from this directory:
+With the pinned SDK configured through the main guide, build from this
+directory:
 
 ```sh
 N64_INST=/path/to/n64_toolchain odin build . -target:n64 -out:n64_tracer.z64
 ```
 
-The explicit SDK option takes precedence over the environment:
-
-```sh
-odin build . -target:n64 -n64-inst:/path/to/n64_toolchain \
-  -out:n64_tracer.z64
-```
-
-Use `-keep-temp-files` to retain the generated Makefile, Odin objects, ELF,
-map, symbols, and stripped ELF. Use `-show-system-calls` to display the
-libdragon packaging invocation. Run the headless gate with:
+Run the headless gate with:
 
 ```sh
 /path/to/ares-test tracer.test.js n64_tracer.z64 --timeout 30
 ```
 
-The authoritative automated runner is the plan's pinned Ubuntu/AMD64
-`ares-test`. On Apple Silicon, use the documented Linux/AMD64 Docker-emulation
-path. Native macOS Ares is an interactive visual check, not the automated
-oracle.
+The authoritative automated runner is the coordination lock's pinned
+Ubuntu/AMD64 `ares-test`. On Apple Silicon, use the documented Linux/AMD64
+Docker-emulation path. Native macOS Ares is an interactive visual check, not
+the automated oracle.
 
 The final 2026-08-31 software validation used `ares-test` commit
 `09008b610a16c375f793d0e124a366227bc4839c` in its Linux/AMD64 image. It
