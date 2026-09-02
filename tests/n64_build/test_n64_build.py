@@ -442,13 +442,13 @@ class N64EndToEndBuildTests(unittest.TestCase):
 				self.assertNotEqual(result.returncode, 0, result.stdout)
 				self.assertIn(diagnostic, result.stdout)
 
-	def test_tracer_build_handles_spaced_paths_and_retains_the_packaging_graph(self):
-		app = self.root / "odin tracer source"
+	def test_runtime_build_handles_spaced_paths_and_retains_the_packaging_graph(self):
+		app = self.root / "odin runtime source"
 		app.mkdir()
-		shutil.copy2(ODIN_ROOT / "tests/n64_tracer/tracer.odin", app / "tracer.odin")
+		shutil.copy2(ODIN_ROOT / "tests/n64_runtime/runtime.odin", app / "runtime.odin")
 		sdk_alias = self.root / "libdragon sdk"
 		sdk_alias.symlink_to(self.sdk, target_is_directory=True)
-		output = self.root / "rom output" / "tracer result.z64"
+		output = self.root / "rom output" / "runtime result.z64"
 		output.parent.mkdir()
 
 		result = run_build(
@@ -478,15 +478,15 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		headless_runner = os.environ.get("ARES_TEST")
 		if headless_runner:
 			headless = subprocess.run(
-				[headless_runner, str(ODIN_ROOT / "tests/n64_tracer/tracer.test.js"), str(output), "--timeout", "30"],
+				[headless_runner, str(ODIN_ROOT / "tests/n64_runtime/runtime.test.js"), str(output), "--timeout", "30"],
 				text=True,
 				stdout=subprocess.PIPE,
 				stderr=subprocess.STDOUT,
 				check=False,
 			)
 			self.assertEqual(headless.returncode, 0, headless.stdout)
-			self.assertIn("ODIN_N64_TRACER_PASS:v2", headless.stdout)
-			self.assertIn("13B30B82C8227FAA1DE66FBC058C2F6E5B980118096CE6B090A342D868DDB79F", headless.stdout)
+			self.assertIn("runtime: ordered startup", headless.stdout)
+			self.assertIn("ODIN_N64_RUNTIME_CLEANUP:v2", headless.stdout)
 
 	def test_metadata_and_raw_assets_follow_the_generated_n64_make_graph(self):
 		app = create_app(self.root, "metadata and dfs app")
@@ -564,11 +564,11 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertTrue(dfs.is_file(), result.stdout)
 		self.assertIn(asset_payload, dfs.read_bytes())
 
-	def test_pong_builds_from_a_clean_odin_only_directory(self):
-		app = self.root / "clean pong sample"
+	def test_runtime_builds_from_a_clean_odin_only_directory(self):
+		app = self.root / "clean runtime sample"
 		app.mkdir()
-		shutil.copy2(ODIN_ROOT / "tests/n64_pong/pong.odin", app / "pong.odin")
-		output = app / "pong.z64"
+		shutil.copy2(ODIN_ROOT / "tests/n64_runtime/runtime.odin", app / "runtime.odin")
+		output = app / "runtime.z64"
 
 		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
 
@@ -582,7 +582,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			path.name for path in app.iterdir()
 			if path.is_file() and path != output
 		}
-		self.assertEqual(application_files, {"pong.odin"})
+		self.assertEqual(application_files, {"runtime.odin"})
 
 	def test_extensionless_explicit_output_gains_z64_extension(self):
 		app = create_app(self.root, "extensionless output app")

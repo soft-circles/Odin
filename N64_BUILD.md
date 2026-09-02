@@ -12,7 +12,7 @@ bridge and runtime, then drives a validated libdragon SDK to link and package
 the ROM. Projects do not need a C entry point, Makefile, or manifest.
 
 For the narrow raw libdragon API, see
-[`vendor/libdragon/README.md`](vendor/libdragon/README.md). Maintainers should
+[Odin64's project-local binding](https://github.com/soft-circles/Odin64/blob/main/libdragon/README.md). Maintainers should
 also read [`N64_MAINTAINERS.md`](N64_MAINTAINERS.md).
 
 ## Supported hosts
@@ -40,8 +40,8 @@ substitute for building this checkout.
 
 First install the ordinary Odin source-build prerequisites described by the
 [Odin installation guide](https://odin-lang.org/docs/install/). The N64 target
-also requires the matching MIPS O64 LLVM fork. For v0.2.1, build the pinned
-LLVM revision used by the coordination lock:
+also requires the matching MIPS O64 LLVM fork. Reuse a compatible existing LLVM installation when available. Only if no such
+installation exists, build the pinned LLVM revision used by Odin64's lock:
 
 ```sh
 git clone https://github.com/soft-circles/llvm-project.git llvm-project
@@ -117,20 +117,9 @@ download, or update the SDK automatically.
 
 ## Visible quickstart
 
-The canonical quickstart is the checked-in Odin-only Pong sample. From the
-Odin repository root, after building the compiler and configuring `N64_INST`:
-
-```sh
-cd tests/n64_pong
-../../odin build . -target:n64
-```
-
-This creates `n64_pong.z64` in that directory. Load it in a current N64
-emulator or on a flash cartridge; the left paddle uses port 1, A serves, and
-Start resets the match. The application source is
-[`tests/n64_pong/pong.odin`](tests/n64_pong/pong.odin), and its fixture-specific
-controls and evidence are in
-[`tests/n64_pong/README.md`](tests/n64_pong/README.md).
+The canonical visible quickstart is [Odin64 Pong](https://github.com/soft-circles/Odin64/tree/main/examples/pong).
+Bindings and application examples are owned by that independent repository, not
+Odin's vendor collection. Follow its collection-mapped build instructions.
 
 For a new package outside the repository, the minimum shape is:
 
@@ -161,56 +150,12 @@ odin build . -target:n64 -out:demo
 # Produces demo.z64.
 ```
 
-## First display, input, and debug loop
+## Project-local libraries
 
-Import the raw package as `vendor:libdragon`. This compact loop uses the same
-ordering as the canonical Pong and tracer programs: initialize logging and
-joypads once, initialize display once, poll input before reading it, acquire a
-display surface, draw, and submit that same surface.
-
-```odin
-package my_game
-
-import ld "vendor:libdragon"
-
-main :: proc() {
-	_ = ld.debug_init_emulog()
-	ld.debugf("Odin N64 started\n")
-	ld.joypad_init()
-	ld.display_init(
-		ld.RESOLUTION_320x240,
-		.DEPTH_16_BPP,
-		2,
-		.GAMMA_NONE,
-		.FILTERS_DISABLED,
-	)
-
-	for {
-		ld.joypad_poll()
-		input := ld.joypad_get_inputs(.JOYPAD_PORT_1)
-		frame := ld.display_get()
-		if frame == nil {
-			continue
-		}
-		background := ld.graphics_make_color(8, 16, 32, 255)
-		if input.btn.raw & ld.JOYPAD_BUTTON_A != 0 {
-			background = ld.graphics_make_color(24, 112, 72, 255)
-		}
-		ld.graphics_fill_screen(frame, background)
-		ld.graphics_set_default_font()
-		ld.graphics_set_color(
-			ld.graphics_make_color(255, 255, 255, 255),
-			background,
-		)
-		ld.graphics_draw_text(frame, 28, 36, "ODIN ON N64 - HOLD A")
-		ld.display_show(frame)
-	}
-}
-```
-
-The raw package is intentionally incomplete. Its full supported inventory,
-type rules, and lifecycle requirements are documented in the
-[binding guide](vendor/libdragon/README.md).
+Odin64 owns display/input/debug examples and the raw libdragon package.
+Its applications import `odin64:libdragon` and supply an explicit
+`-collection:odin64=/absolute/path/to/Odin64` mapping to build, check, doc,
+and editor invocations. Odin itself does not install this project package.
 
 ## ROM configuration options
 
@@ -264,19 +209,20 @@ therefore do not accept ROM configuration options.
 
 ## Full configured build
 
-The DFS fixture combines raw assets and metadata with explicit header settings
-and is the canonical configured build example:
+A project containing its own `assets/` directory and `metadata.ini` can build with:
 
 ```sh
-cd tests/n64_dfs
-../../odin build . -target:n64 -out:n64_dfs.z64 \
-  -n64-title:"Odin DFS v0.2" \
+odin build . -target:n64 -out:game.z64 \
+  -n64-title:"My Game" \
   -n64-region:E \
   -n64-save-type:none \
   -n64-controllers:"n64;none;none;none" \
   -n64-assets:assets \
   -n64-metadata:metadata.ini
 ```
+
+See the [Odin64 DragonFS example](https://github.com/soft-circles/Odin64/tree/main/examples/dragonfs)
+for a complete application with its project collection mapping.
 
 Omit any setting the project does not need. The example deliberately omits
 `-n64-rtc`, so RTC remains disabled.
@@ -302,29 +248,9 @@ odin build . -target:n64 -n64-assets:assets
 
 Odin requires the SDK's `mkdfs` tool only when this option is present. It
 converts the complete directory into one DragonFS image and embeds it in the
-ROM. At runtime, mount the image, open a root-relative path, read it, and close
-the handle:
-
-```odin
-import "core:c"
-import ld "vendor:libdragon"
-
-if ld.dfs_init(ld.DFS_DEFAULT_LOCATION) == ld.DFS_ESUCCESS {
-	handle := ld.dfs_open("message.txt")
-	if handle >= 0 {
-		size := ld.dfs_size(u32(handle))
-		buffer: [256]byte
-		if size >= 0 && size <= c.int(len(buffer)) {
-			read := ld.dfs_read(rawptr(&buffer[0]), 1, size, u32(handle))
-			_ = read
-		}
-		_ = ld.dfs_close(u32(handle))
-	}
-}
-```
-
-See [`tests/n64_dfs/dfs.odin`](tests/n64_dfs/dfs.odin) for checked error
-handling and exact content validation.
+ROM. Runtime filesystem access is a project concern; the
+[Odin64 DragonFS example](https://github.com/soft-circles/Odin64/tree/main/examples/dragonfs)
+shows checked mount/open/read/close behavior.
 
 ## Add extended metadata
 
@@ -381,8 +307,7 @@ default, support aligned grow/shrink resize, and are reclaimed together with
 ordinary replaceable Odin allocator values.
 
 The current runtime is single-threaded and has no TLS runtime. Callback,
-interrupt, timer, thread, and TLS context propagation are not supported. The
-raw binding does not expose those callback-oriented subsystems.
+interrupt, timer, thread, and TLS context propagation are not supported.
 
 ## Load and debug a ROM
 
@@ -423,7 +348,7 @@ replace an existing output.
 | `missing required file` or `missing required executable tool` | Reinstall the pinned SDK into the selected root; do not assemble roots from unrelated installations. |
 | `libdragon SDK mismatch` for the revision or clean state | Check out the pinned commit in a clean libdragon tree and rerun `make install tools-install`. |
 | `pinned n64.mk SHA-256` mismatch | Restore `n64.mk` from the pinned checkout and reinstall it. |
-| Toolchain provenance warning | Confirm the host/binutils/GCC/newlib difference is intentional; release qualification uses the versions recorded by the coordination lock. |
+| Toolchain provenance warning | Confirm the host/binutils/GCC/newlib difference is intentional; release qualification uses the versions recorded by the Odin64 compatibility lock. |
 | `GNU make is required at /usr/bin/make` | Install GNU make so that exact path exists, or use a supported host image. |
 | `-n64-assets requires ... mkdfs` | Install the pinned libdragon host tools into the selected SDK. |
 | `-n64-metadata requires ... n64metadata` | Install the pinned libdragon host tools into the selected SDK. |
@@ -444,8 +369,6 @@ are supported.
   path are not.
 - `odin run -target:n64` and `odin test -target:n64` are not implemented.
 - The runtime does not support threads, TLS, or callback-context installation.
-- The raw binding is narrow: there is no RDPQ, sprite/texture, audio, save-game,
-  interrupt, timer, or broad libdragon surface.
 - Odin validates and drives the SDK but does not install or update it.
 - Asset conversion beyond raw DragonFS directory packaging remains an external
   project concern.
@@ -459,21 +382,15 @@ suite without an SDK or emulator:
 python3 tests/n64_validate.py quick
 ```
 
-Maintainers use `python3 odin/tests/n64_validate.py full` from the coordination
-workspace on Ubuntu/AMD64. Full setup, strict dependency behavior, retained
-logs, and focused commands are documented in
-[`N64_MAINTAINERS.md`](N64_MAINTAINERS.md#validation-layers).
+The compiler-only full suite additionally exercises public ROM builds,
+O64 interop and the [standalone runtime probe](tests/n64_runtime):
 
-- Runtime, allocator, debug, display, input, and timing tracer:
-  [`tests/n64_tracer`](tests/n64_tracer)
-- Playable Pong quickstart: [`tests/n64_pong`](tests/n64_pong)
-- DragonFS and metadata sample: [`tests/n64_dfs`](tests/n64_dfs)
-- Raw binding C/Odin ABI probe:
-  [`tests/o64_abi/libdragon_bindings`](tests/o64_abi/libdragon_bindings)
-- Integrated public-build tests: [`tests/n64_build`](tests/n64_build)
-- O64 baseline and runner setup: [`tests/o64_abi`](tests/o64_abi)
-- DFS accepted validation ledger:
-  [`tests/n64_dfs/VALIDATION.md`](tests/n64_dfs/VALIDATION.md)
-- Pong and DFS manual records:
-  [`tests/n64_pong/PLAYTEST.md`](tests/n64_pong/PLAYTEST.md) and
-  [`tests/n64_dfs/PLAYTEST.md`](tests/n64_dfs/PLAYTEST.md)
+```sh
+N64_INST=/absolute/sdk ARES_TEST=/absolute/ares-test python3 tests/n64_validate.py full
+```
+
+It requires explicit tools and never builds LLVM. Cross-repository qualification,
+binding ABI checks, and canonical framebuffer goldens belong to
+[Odin64 validation](https://github.com/soft-circles/Odin64#verify).
+See [validation layers](N64_MAINTAINERS.md#validation-layers),
+[public-build tests](tests/n64_build) and [compiler ABI tests](tests/o64_abi).

@@ -10,15 +10,7 @@ For additional example code, see the [examples](https://github.com/odin-lang/exa
 
 ## Nintendo 64
 
-The N64 programs live with the integration fixtures that build and verify the
-same source; they are not duplicated under `examples`:
-
-- [Pong](../tests/n64_pong) is the visible, playable quickstart.
-- [Runtime tracer](../tests/n64_tracer) covers startup, allocators, debug output,
-  display, input, and elapsed time.
-- [DragonFS and metadata](../tests/n64_dfs) packages and reads a raw asset and
-  renders a deterministic success panel.
-
-Start with the [N64 build guide](../N64_BUILD.md). The
-[`vendor:libdragon` guide](../vendor/libdragon/README.md) documents the raw API
-used by these programs.
+The [Odin64 repository](https://github.com/soft-circles/Odin64/tree/main/examples)
+owns canonical Pong and DragonFS examples and project-local libdragon bindings.
+Start with this compiler's [N64 build guide](../N64_BUILD.md); compiler-only
+lifecycle coverage is in [tests/n64_runtime](../tests/n64_runtime).

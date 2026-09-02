@@ -16,14 +16,9 @@ DOCUMENTS = (
 	"N64_MAINTAINERS.md",
 	"examples/README.md",
 	"vendor/README.md",
-	"vendor/libdragon/README.md",
 	"tests/n64_build/README.md",
-	"tests/n64_console/README.md",
-	"tests/n64_dfs/README.md",
-	"tests/n64_pong/README.md",
-	"tests/n64_tracer/README.md",
+	"tests/n64_runtime/README.md",
 	"tests/o64_abi/README.md",
-	"tests/o64_abi/libdragon_bindings/README.md",
 )
 LINK_PATTERN = re.compile(r"!?\[[^]]+\]\(([^)]+)\)")
 HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)

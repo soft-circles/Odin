@@ -22,25 +22,16 @@ CONSTANT_PATTERN = re.compile(
 )
 LIBDRAGON_DOCUMENTS = (
 	"N64_BUILD.md",
-	"vendor/libdragon/README.md",
-	"vendor/libdragon/libdragon.odin",
-	"tests/n64_dfs/README.md",
-	"tests/n64_pong/README.md",
 	"tests/o64_abi/README.md",
-	"tests/o64_abi/libdragon_bindings/README.md",
 )
-ARES_DOCUMENTS = (
-	"tests/n64_dfs/README.md",
-	"tests/n64_pong/README.md",
-	"tests/n64_tracer/README.md",
-)
+ARES_DOCUMENTS = ()  # Runner integration pins belong to Odin64.
 
 
 def discover_lock() -> Path | None:
 	configured = os.environ.get("ODIN_N64_TOOLCHAIN_LOCK")
 	if configured:
 		return Path(configured).expanduser().resolve()
-	candidate = ODIN_ROOT.parent / "toolchain.lock.toml"
+	candidate = ODIN_ROOT.parent.parent / "toolchain.lock.toml"
 	return candidate if candidate.is_file() else None
 
 

@@ -7,17 +7,15 @@ libdragon fixture accepts only SDK commit
 
 ## Regression gates
 
-Run the first command from the workspace's `test` directory and the remaining
-commands from the LLVM/Odin workspace root:
+From the Odin64 workspace, run the LLVM differential through its driver.
+From this Odin repository, use:
 
 ```sh
-(cd test && python3 compare.py)
-python3 llvm-project/llvm/utils/o64-abi-differential.py
-python3 odin/tests/o64_abi/differential.py
-N64_INST=/path/to/n64_toolchain make -C odin/tests/o64_abi/interop clean all check
+python3 tests/o64_abi/differential.py
+N64_INST=/path/to/n64_toolchain make -C tests/o64_abi/interop clean all check
 ```
 
-The expected summaries are 49/49 argument locations, 43/43 LLVM/GCC execution
+The historical expected summaries are 49/49 argument locations, 43/43 LLVM/GCC execution
 differentials, 19/19 focused Odin/GCC leaf probes plus 7/7 call-state probes,
 and 23/23 linked Odin/GCC/libdragon probes. The Milestone 0 accepted ROM
 SHA-256 was:
@@ -36,16 +34,9 @@ d42a9772d84f81a0935fda616b9ca00aa850bfda4a82a0c9e74a3100aeee47e1
 
 ## Exact libdragon binding gate
 
-The `libdragon_bindings` fixture adds C and Odin layout assertions plus 23
-linked runtime calls for `resolution_t`, `joypad_buttons_t`,
-`joypad_inputs_t`, and C `_Bool`. From the Odin repository root:
-
-```sh
-N64_INST=/path/to/n64_toolchain \
-  make -C tests/o64_abi/libdragon_bindings clean all check-layout
-N64_INST=/path/to/n64_toolchain ARES_TEST=/path/to/ares-test \
-  make -C tests/o64_abi/libdragon_bindings check
-```
+Binding layout and transport gates moved to
+[Odin64 tests/abi/libdragon](https://github.com/soft-circles/Odin64/tree/main/tests/abi/libdragon).
+They are not required for standalone compiler validation.
 
 ## Headless ROM gate
 

@@ -1,23 +1,41 @@
 #+feature global-context
 
-package n64_tracer
+package n64_runtime
 
 import "base:runtime"
-import ld "vendor:libdragon"
+import "core:c"
+
+// Fixture-local logging only; this compiler test has no Odin64 dependency.
+foreign import dragon "system:dragon"
+@(default_calling_convention="c")
+foreign dragon {
+	debug_init_emulog :: proc() -> c.bool ---
+	debugf :: proc(msg: cstring, #c_vararg args: ..any) ---
+}
 
 #assert(ODIN_OS == .N64)
 
-READY_SENTINEL       :: "ODIN_N64_TRACER_READY:v2\n"
-ORDERING_SENTINEL    :: "ODIN_N64_TRACER_CHECK:v2:ORDERING:PASS\n"
-GENERAL_SENTINEL     :: "ODIN_N64_TRACER_CHECK:v2:GENERAL_ALLOCATOR:PASS\n"
-TEMP_SENTINEL        :: "ODIN_N64_TRACER_CHECK:v2:TEMP_ALLOCATOR:PASS\n"
-REPLACE_SENTINEL     :: "ODIN_N64_TRACER_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS\n"
-MAIN_RETURN_SENTINEL :: "ODIN_N64_TRACER_MAIN_RETURN:v2\n"
-CLEANUP_SENTINEL     :: "ODIN_N64_TRACER_CLEANUP:v2\n"
-PASS_SENTINEL        :: "ODIN_N64_TRACER_PASS:v2\n"
+main :: proc() {
+	_ = debug_init_emulog()
+	debugf("ODIN_N64_RUNTIME_CHECK:v2:MAIN_REACHED:PASS\n")
+	if !verify_runtime_ordering() || !verify_general_allocator() ||
+	   !verify_temp_allocator() || !verify_allocator_replaceability() {
+		return
+	}
+	debugf(PASS_SENTINEL)
+	runtime_phase = 3
+	main_returned = true
+	debugf(MAIN_RETURN_SENTINEL)
+}
 
-INPUT_TIMEOUT_MS :: u64(10_000)
-DISPLAY_HOLD_MS  :: u64(2_000)
+ORDERING_SENTINEL    :: "ODIN_N64_RUNTIME_CHECK:v2:ORDERING:PASS\n"
+GENERAL_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:GENERAL_ALLOCATOR:PASS\n"
+TEMP_SENTINEL        :: "ODIN_N64_RUNTIME_CHECK:v2:TEMP_ALLOCATOR:PASS\n"
+REPLACE_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS\n"
+MAIN_RETURN_SENTINEL :: "ODIN_N64_RUNTIME_MAIN_RETURN:v2\n"
+CLEANUP_SENTINEL     :: "ODIN_N64_RUNTIME_CLEANUP:v2\n"
+PASS_SENTINEL        :: "ODIN_N64_RUNTIME_PASS:v2\n"
+
 OOM_SIZE         :: 64 * 1024 * 1024
 GLOBAL_MAGIC     :: u32(0x4f44_494e)
 
@@ -131,34 +149,34 @@ initialize_runtime_probe :: proc() {
 @(fini)
 finalize_runtime_probe :: proc "contextless" () {
 	if main_returned && runtime_phase == 3 {
-		ld.debugf(CLEANUP_SENTINEL)
+		debugf(CLEANUP_SENTINEL)
 	} else {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:CLEANUP_ORDER\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:CLEANUP_ORDER\n")
 	}
 }
 
 @(private="file")
 verify_runtime_ordering :: proc() -> bool {
 	if runtime_phase != 2 || global_initialized != GLOBAL_MAGIC {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:STARTUP_ORDER\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:STARTUP_ORDER\n")
 		return false
 	}
 	if !bytes_have_pattern(init_general_memory, 32, 0x20) ||
 	   !bytes_have_pattern(init_temp_memory, 32, 0x40) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:INIT_ALLOCATION\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:INIT_ALLOCATION\n")
 		return false
 	}
 	if runtime.mem_free(init_general_memory) != .None {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:INIT_GENERAL_FREE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:INIT_GENERAL_FREE\n")
 		return false
 	}
 	init_general_memory = nil
 	if runtime.mem_free_all(context.temp_allocator) != .None {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:INIT_TEMP_RESET\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:INIT_TEMP_RESET\n")
 		return false
 	}
 	init_temp_memory = nil
-	ld.debugf(ORDERING_SENTINEL)
+	debugf(ORDERING_SENTINEL)
 	return true
 }
 
@@ -166,7 +184,7 @@ verify_runtime_ordering :: proc() -> bool {
 verify_general_allocator :: proc() -> bool {
 	p, err := alloc(32, 64)
 	if err != .None || p == nil || uintptr(p) & 63 != 0 || !bytes_are_zero(p, 32) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_ALLOC_ALIGN_ZERO\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_ALLOC_ALIGN_ZERO\n")
 		return false
 	}
 	fill_bytes(p, 32, 0x60)
@@ -174,7 +192,7 @@ verify_general_allocator :: proc() -> bool {
 	grown, grow_err := resize(p, 32, 96, 64)
 	if grow_err != .None || grown == nil || uintptr(grown) & 63 != 0 ||
 	   !bytes_have_pattern(grown, 32, 0x60) || !bytes_are_zero(rawptr(uintptr(grown)+32), 64) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_RESIZE_GROW\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_RESIZE_GROW\n")
 		if grown != nil {
 			_ = runtime.mem_free(grown)
 		} else {
@@ -186,7 +204,7 @@ verify_general_allocator :: proc() -> bool {
 	shrunk, shrink_err := resize(grown, 96, 16, 64)
 	if shrink_err != .None || shrunk == nil || uintptr(shrunk) & 63 != 0 ||
 	   !bytes_have_pattern(shrunk, 16, 0x60) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_RESIZE_SHRINK\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_RESIZE_SHRINK\n")
 		if shrunk != nil {
 			_ = runtime.mem_free(shrunk)
 		} else {
@@ -198,7 +216,7 @@ verify_general_allocator :: proc() -> bool {
 	failed_resize, failed_resize_err := resize(shrunk, 16, OOM_SIZE, 64)
 	if failed_resize != nil || failed_resize_err != .Out_Of_Memory ||
 	   !bytes_have_pattern(shrunk, 16, 0x60) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_FAILED_RESIZE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_FAILED_RESIZE\n")
 		if failed_resize != nil {
 			_ = runtime.mem_free(failed_resize)
 		} else {
@@ -209,7 +227,7 @@ verify_general_allocator :: proc() -> bool {
 
 	oom, oom_err := alloc(OOM_SIZE, 16)
 	if oom != nil || oom_err != .Out_Of_Memory {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_OOM\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_OOM\n")
 		if oom != nil {
 			_ = runtime.mem_free(oom)
 		}
@@ -218,10 +236,10 @@ verify_general_allocator :: proc() -> bool {
 	}
 
 	if runtime.mem_free(shrunk) != .None {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_FREE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_FREE\n")
 		return false
 	}
-	ld.debugf(GENERAL_SENTINEL)
+	debugf(GENERAL_SENTINEL)
 	return true
 }
 
@@ -230,7 +248,7 @@ verify_temp_allocator :: proc() -> bool {
 	temp := context.temp_allocator
 	first, first_err := alloc(64, 32, temp)
 	if first_err != .None || first == nil || uintptr(first) & 31 != 0 || !bytes_are_zero(first, 64) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_ALLOC_ALIGN_ZERO\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_ALLOC_ALIGN_ZERO\n")
 		return false
 	}
 	fill_bytes(first, 64, 0x80)
@@ -238,44 +256,44 @@ verify_temp_allocator :: proc() -> bool {
 	grown, grow_err := resize(first, 64, 128, 32, temp)
 	if grow_err != .None || grown != first || uintptr(grown) & 31 != 0 ||
 	   !bytes_have_pattern(grown, 64, 0x80) || !bytes_are_zero(rawptr(uintptr(grown)+64), 64) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_RESIZE_GROW\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_RESIZE_GROW\n")
 		return false
 	}
 
 	shrunk, shrink_err := resize(grown, 128, 32, 32, temp)
 	if shrink_err != .None || shrunk != grown || uintptr(shrunk) & 31 != 0 ||
 	   !bytes_have_pattern(shrunk, 32, 0x80) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_RESIZE_SHRINK\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_RESIZE_SHRINK\n")
 		return false
 	}
 
 	failed_resize, failed_resize_err := resize(shrunk, 32, OOM_SIZE, 32, temp)
 	if failed_resize != nil || failed_resize_err != .Out_Of_Memory ||
 	   !bytes_have_pattern(shrunk, 32, 0x80) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_FAILED_RESIZE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_FAILED_RESIZE\n")
 		return false
 	}
 
 	if runtime.mem_free_all(temp) != .None {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_RESET\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_RESET\n")
 		return false
 	}
 	second, second_err := alloc(64, 32, temp)
 	if second_err != .None || second != first || !bytes_are_zero(second, 64) {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_RESET_REUSE_ZERO\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_RESET_REUSE_ZERO\n")
 		return false
 	}
 
 	temp_oom, temp_oom_err := alloc(OOM_SIZE, 16, temp)
 	if temp_oom != nil || temp_oom_err != .Out_Of_Memory {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_OOM\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_OOM\n")
 		return false
 	}
 	if runtime.mem_free_all(temp) != .None {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_FINAL_RESET\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_FINAL_RESET\n")
 		return false
 	}
-	ld.debugf(TEMP_SENTINEL)
+	debugf(TEMP_SENTINEL)
 	return true
 }
 
@@ -321,7 +339,7 @@ verify_allocator_replaceability :: proc() -> bool {
 	}
 	context.allocator = general_state.backing
 	if !general_ok || general_state.calls != 2 {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:GENERAL_REPLACE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_REPLACE\n")
 		return false
 	}
 
@@ -337,86 +355,10 @@ verify_allocator_replaceability :: proc() -> bool {
 	}
 	context.temp_allocator = temp_state.backing
 	if !temp_ok || temp_state.calls != 2 {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:TEMP_REPLACE\n")
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:TEMP_REPLACE\n")
 		return false
 	}
 
-	ld.debugf(REPLACE_SENTINEL)
+	debugf(REPLACE_SENTINEL)
 	return true
-}
-
-@(private="file")
-wait_for_a_press :: proc "contextless" (started_ms, timeout_ms: u64) -> (elapsed_ms: u64, pressed: bool) {
-	for {
-		ld.joypad_poll()
-		inputs := ld.joypad_get_inputs(.JOYPAD_PORT_1)
-		now_ms := ld.get_ticks_ms()
-		elapsed_ms = now_ms - started_ms
-		if inputs.btn.raw & ld.JOYPAD_BUTTON_A != 0 {
-			return elapsed_ms, true
-		}
-		if elapsed_ms >= timeout_ms {
-			return elapsed_ms, false
-		}
-	}
-}
-
-@(private="file")
-wait_elapsed_ms :: proc "contextless" (duration_ms: u64) {
-	started_ms := ld.get_ticks_ms()
-	for ld.get_ticks_ms() - started_ms < duration_ms {}
-}
-
-@(private="file")
-draw_tracer_frame :: proc "contextless" (frame: ^ld.surface_t) {
-	background := ld.graphics_make_color(12, 20, 40, 255)
-	border := ld.graphics_make_color(240, 200, 48, 255)
-	accent := ld.graphics_make_color(48, 208, 112, 255)
-	text := ld.graphics_make_color(255, 255, 255, 255)
-
-	ld.graphics_fill_screen(frame, background)
-	ld.graphics_draw_box(frame, 24, 24, 272, 192, border)
-	ld.graphics_draw_box(frame, 28, 28, 264, 184, background)
-	ld.graphics_draw_box(frame, 48, 136, 224, 32, accent)
-	ld.graphics_set_default_font()
-	ld.graphics_set_color(text, background)
-	ld.graphics_draw_text(frame, 56, 64, "ODIN N64 TRACER")
-	ld.graphics_draw_text(frame, 56, 88, "DISPLAY  JOYPAD")
-	ld.graphics_draw_text(frame, 56, 112, "TICKS    PASS")
-}
-
-main :: proc() {
-	_ = ld.debug_init_emulog()
-	ld.debugf("ODIN_N64_TRACER_CHECK:v2:MAIN_REACHED:PASS\n")
-
-	if !verify_runtime_ordering() ||
-	   !verify_general_allocator() ||
-	   !verify_temp_allocator() ||
-	   !verify_allocator_replaceability() {
-		return
-	}
-
-	ld.joypad_init()
-	ld.display_init(ld.RESOLUTION_320x240, .DEPTH_16_BPP, 2, .GAMMA_NONE, .FILTERS_DISABLED)
-	frame := ld.display_get()
-	if frame == nil {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:DISPLAY_GET\n")
-		return
-	}
-	draw_tracer_frame(frame)
-	ld.display_show(frame)
-	ld.debugf(READY_SENTINEL)
-
-	started_ms := ld.get_ticks_ms()
-	_, pressed := wait_for_a_press(started_ms, INPUT_TIMEOUT_MS)
-	if !pressed {
-		ld.debugf("ODIN_N64_TRACER_FAIL:v2:INPUT_TIMEOUT\n")
-		return
-	}
-	ld.debugf(PASS_SENTINEL)
-	wait_elapsed_ms(DISPLAY_HOLD_MS)
-
-	runtime_phase = 3
-	main_returned = true
-	ld.debugf(MAIN_RETURN_SENTINEL)
 }

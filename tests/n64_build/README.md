@@ -26,14 +26,14 @@ tools. The end-to-end tests use `N64_INST` when it is set, otherwise they use
 `~/n64_toolchain` when that directory exists. Set `ODIN` to select a compiler
 binary other than the repository's `odin` executable.
 
-The end-to-end tracer test deliberately puts the source, SDK alias, output,
+The end-to-end runtime probe test deliberately puts the source, SDK alias, output,
 and retained intermediates beneath paths containing spaces. It builds the
-existing Odin-only tracer with a single `odin build . -target:n64` invocation,
+existing Odin-only runtime probe with a single `odin build . -target:n64` invocation,
 checks the requested `.z64` and ROM byte order, and verifies that
 `-keep-temp-files` retained the generated packaging graph and link artifacts.
 When `ARES_TEST` names a compatible `ares-test` executable, the same test also
-runs the generated tracer ROM through the pinned headless script and checks its
-functional sentinel and framebuffer hash.
+runs the generated runtime probe ROM through the pinned headless script and checks its
+ordered startup/allocator/cleanup sentinels.
 An additional link test supplies both a prebuilt foreign object and archive and
 checks that the integrated path carries them into libdragon's static link.
 The [canonical option table](../../N64_BUILD.md#rom-configuration-options) and

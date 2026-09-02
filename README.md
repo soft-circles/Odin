@@ -63,10 +63,10 @@ Instructions for downloading and installing the Odin compiler and libraries.
 Build an Odin project directly into a configured `.z64` ROM using the
 integrated libdragon pipeline.
 
-#### [Nintendo 64 Raw libdragon Binding](vendor/libdragon/README.md)
+#### [Odin64 Bindings and Examples](https://github.com/soft-circles/Odin64)
 
-Use the pinned, intentionally narrow `vendor:libdragon` package for display,
-input, debug logging, timing, console lifecycle, and DragonFS.
+Use the independent project-local `odin64:libdragon` package and canonical
+examples with an explicit `odin64` collection mapping.
 
 #### [Nintendo 64 Maintainer Guide](N64_MAINTAINERS.md)
 
