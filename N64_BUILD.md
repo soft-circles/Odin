@@ -32,6 +32,44 @@ Object, assembly, and LLVM IR output can still be requested for the N64 target
 without running the ROM packager. Executable builds are the supported
 project-facing path described here.
 
+## Build this Odin compiler
+
+The N64 target is developed on this repository's `n64` branch. An upstream
+Odin release or nightly does not contain this branch's N64 target and is not a
+substitute for building this checkout.
+
+First install the ordinary Odin source-build prerequisites described by the
+[Odin installation guide](https://odin-lang.org/docs/install/). The N64 target
+also requires the matching MIPS O64 LLVM fork. For v0.2.1, build the pinned
+LLVM revision used by the coordination lock:
+
+```sh
+git clone https://github.com/soft-circles/llvm-project.git llvm-project
+git -C llvm-project checkout --detach ff570ff21ae6f2b1343084273d8bc3ad3a3d3cf4
+
+cmake -S llvm-project/llvm -B llvm-build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_PROJECTS=clang \
+  -DLLVM_TARGETS_TO_BUILD=Mips \
+  -DLLVM_ENABLE_ASSERTIONS=ON
+cmake --build llvm-build --target llvm-config clang
+```
+
+Then build this Odin checkout from its repository root, selecting the
+`llvm-config` produced above:
+
+```sh
+LLVM_CONFIG=/absolute/path/to/llvm-build/bin/llvm-config \
+  ./build_odin.sh release
+./odin version
+```
+
+The build script supports LLVM 17 through 22, but release reproduction uses
+the exact fork revision above. If `build_odin.sh` reports that no supported
+`llvm-config` was found, check the absolute `LLVM_CONFIG` path rather than
+falling back to an unrelated host LLVM installation. The resulting `./odin`
+binary is the compiler used by the commands below.
+
 ## Install the pinned libdragon SDK
 
 The required libdragon revision is
