@@ -306,9 +306,10 @@ into a skip.
 The job rebuilds the compiler, repeats quick validation, validates the SDK,
 runs the public-build suite, both LLVM/GCC and Odin/GCC O64 differentials, the
 linked ABI ROM, raw binding layout/runtime, and console lifecycle. It then
-builds tracer, Pong, and DFS from clean copied fixtures, checks every accepted
-ROM SHA-256 from the coordination lock, and runs all three reviewed framebuffer
-goldens. Focused commands and failure interpretation remain documented in:
+builds tracer, Pong, and DFS from clean copied fixtures, checks each ROM
+SHA-256 against the selected accepted or candidate identity source, and runs
+all three reviewed framebuffer goldens. Focused commands and failure
+interpretation remain documented in:
 
 - [`tests/n64_build/README.md`](tests/n64_build/README.md)
 - [`tests/o64_abi/README.md`](tests/o64_abi/README.md)

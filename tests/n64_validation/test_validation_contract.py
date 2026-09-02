@@ -103,6 +103,22 @@ class N64ValidationContractTests(unittest.TestCase):
 				command = stages_by_name[f"build {fixture} from clean sample copy"].command
 				self.assertEqual(command.count("-source-code-locations:filename"), 1, command)
 
+	def test_full_make_fixtures_are_tracked(self):
+		for relative in (
+			"tests/o64_abi/libdragon_bindings/Makefile",
+			"tests/n64_console/Makefile",
+		):
+			with self.subTest(fixture=relative):
+				result = subprocess.run(
+					["git", "ls-files", "--error-unmatch", relative],
+					cwd=ODIN_ROOT,
+					text=True,
+					stdout=subprocess.PIPE,
+					stderr=subprocess.STDOUT,
+					check=False,
+				)
+				self.assertEqual(result.returncode, 0, result.stdout)
+
 	def test_accepted_mode_uses_accepted_artifacts_unchanged(self):
 		accepted = {
 			"tracer_rom_sha256": "1" * 64,

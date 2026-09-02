@@ -10,6 +10,11 @@
 # binaries on the UNIX-like platforms.
 !*.*
 
+# Keep extensionless Makefile entry points used by authoritative validation.
+!/n64_console/Makefile
+!/o64_abi/interop/Makefile
+!/o64_abi/libdragon_bindings/Makefile
+
 # But remember to ignore executables with an extension.
 *.exe
 *.bin
