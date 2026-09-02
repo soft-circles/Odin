@@ -24,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.11+ is required in CI
 
 ODIN_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+GIT_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
@@ -45,10 +47,32 @@ class FullDependencies:
 
 
 @dataclass(frozen=True)
+class CandidateManifest:
+	path: Path
+	sha256: str
+	odin_commit: str
+	rom_hashes: dict[str, str]
+
+
+@dataclass(frozen=True)
+class RomIdentities:
+	label: str
+	hashes: dict[str, str]
+	candidate_manifest: CandidateManifest | None = None
+
+
+@dataclass(frozen=True)
+class RetainedCandidateManifest:
+	path: Path
+	sha256: str
+
+
+@dataclass(frozen=True)
 class FullValidation:
 	dependencies: FullDependencies
 	artifacts: Path
 	fixtures: dict[str, Path]
+	rom_identities: RomIdentities
 
 
 @dataclass(frozen=True)
@@ -58,6 +82,12 @@ class IdentityInputs:
 	runner: Path | None = None
 	runner_source: Path | None = None
 	container_identity: str | None = None
+	rom_identity_source: str | None = None
+	candidate_manifest: RetainedCandidateManifest | None = None
+
+
+class CandidateManifestError(ValueError):
+	pass
 
 
 def workspace_root() -> Path | None:
@@ -112,6 +142,115 @@ def load_lock(root: Path) -> dict:
 		if current is not None and value:
 			current[value.group(1)] = value.group(2)
 	return sections
+
+
+def require_manifest_value(manifest: dict, name: str, expected: object) -> None:
+	if name not in manifest:
+		raise CandidateManifestError(f"candidate manifest is missing {name}")
+	if type(manifest[name]) is not type(expected) or manifest[name] != expected:
+		raise CandidateManifestError(f"candidate manifest {name} must be {expected!r}")
+
+
+def require_lowercase_hash(values: dict, name: str, location: str) -> str:
+	if name not in values:
+		raise CandidateManifestError(f"candidate manifest is missing {location}.{name}")
+	value = values[name]
+	if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+		raise CandidateManifestError(
+			f"candidate manifest {location}.{name} must be 64 lowercase hexadecimal characters"
+		)
+	return value
+
+
+def parse_candidate_manifest(contents: bytes) -> dict:
+	try:
+		text = contents.decode("utf-8")
+	except UnicodeDecodeError as error:
+		raise CandidateManifestError(f"candidate manifest is not UTF-8: {error}") from error
+	if tomllib is not None:
+		try:
+			return tomllib.loads(text)
+		except tomllib.TOMLDecodeError as error:
+			raise CandidateManifestError(f"invalid TOML: {error}") from error
+
+	manifest: dict[str, object] = {}
+	current = manifest
+	for line_number, raw_line in enumerate(text.splitlines(), 1):
+		line = raw_line.strip()
+		if not line or line.startswith("#"):
+			continue
+		if line == "[roms]":
+			if "roms" in manifest:
+				raise CandidateManifestError("candidate manifest repeats [roms]")
+			current = {}
+			manifest["roms"] = current
+			continue
+		integer = re.fullmatch(r"([A-Za-z0-9_]+)\s*=\s*([0-9]+)", line)
+		string = re.fullmatch(r'([A-Za-z0-9_]+)\s*=\s*"([^"\\]*)"', line)
+		if integer:
+			name, value = integer.groups()
+			parsed: object = int(value)
+		elif string:
+			name, parsed = string.groups()
+		else:
+			raise CandidateManifestError(f"unsupported TOML on line {line_number}: {raw_line}")
+		if name in current:
+			raise CandidateManifestError(f"candidate manifest repeats {name}")
+		current[name] = parsed
+	return manifest
+
+
+def load_candidate_manifest(path: Path, checked_out_odin_commit: str) -> CandidateManifest:
+	if not path.is_absolute():
+		raise CandidateManifestError(f"candidate manifest path must be absolute: {path}")
+	path = path.resolve()
+	try:
+		contents = path.read_bytes()
+	except OSError as error:
+		raise CandidateManifestError(f"cannot read candidate manifest {path}: {error}") from error
+	try:
+		manifest = parse_candidate_manifest(contents)
+	except CandidateManifestError as error:
+		raise CandidateManifestError(f"cannot parse candidate manifest {path}: {error}") from error
+
+	require_manifest_value(manifest, "schema", 1)
+	require_manifest_value(manifest, "release", "0.2.1")
+	if "odin_commit" not in manifest:
+		raise CandidateManifestError("candidate manifest is missing odin_commit")
+	odin_commit = manifest["odin_commit"]
+	if not isinstance(odin_commit, str) or GIT_COMMIT_PATTERN.fullmatch(odin_commit) is None:
+		raise CandidateManifestError("candidate manifest odin_commit must be a 40-character lowercase Git commit")
+	if odin_commit != checked_out_odin_commit:
+		raise CandidateManifestError(
+			f"candidate manifest Odin commit is {odin_commit}, but the checked-out Odin HEAD is {checked_out_odin_commit}"
+		)
+
+	roms = manifest.get("roms")
+	if not isinstance(roms, dict):
+		raise CandidateManifestError("candidate manifest is missing [roms]")
+	rom_hashes = {
+		"tracer_rom_sha256": require_lowercase_hash(roms, "tracer_sha256", "roms"),
+		"pong_rom_sha256": require_lowercase_hash(roms, "pong_sha256", "roms"),
+		"dfs_rom_sha256": require_lowercase_hash(roms, "dfs_sha256", "roms"),
+	}
+	return CandidateManifest(path, hashlib.sha256(contents).hexdigest(), odin_commit, rom_hashes)
+
+
+def accepted_rom_identities(lock: dict) -> RomIdentities:
+	return RomIdentities("accepted", lock["accepted_artifacts"])
+
+
+def candidate_rom_identities(manifest: CandidateManifest) -> RomIdentities:
+	return RomIdentities("candidate", manifest.rom_hashes, manifest)
+
+
+def retain_candidate_manifest(manifest: CandidateManifest, artifacts: Path) -> RetainedCandidateManifest:
+	destination = artifacts / "candidate-manifest.toml"
+	shutil.copy2(manifest.path, destination)
+	retained_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+	if retained_sha256 != manifest.sha256:
+		raise CandidateManifestError("retained candidate manifest differs from the validated input")
+	return RetainedCandidateManifest(destination, retained_sha256)
 
 
 def resolve_executable(value: str) -> Path | None:
@@ -250,7 +389,7 @@ def full_stages(validation: FullValidation) -> list[Stage]:
 	tracer = validation.fixtures["tracer"]
 	pong = validation.fixtures["pong"]
 	dfs = validation.fixtures["dfs"]
-	accepted = validation.dependencies.lock["accepted_artifacts"]
+	expected_hashes = validation.rom_identities.hashes
 	stages = [Stage("build compiler from tested tree", ("./build_odin.sh", "release"))]
 	stages.extend(quick_stages(root / "toolchain.lock.toml"))
 	stages.extend([
@@ -280,25 +419,31 @@ def full_stages(validation: FullValidation) -> list[Stage]:
 		),
 		Stage(
 			"build tracer from clean sample copy",
-			(str(ODIN_ROOT / "odin"), "build", ".", "-target:n64", "-out:n64_tracer.z64", "-keep-temp-files"),
+			(
+				str(ODIN_ROOT / "odin"), "build", ".", "-target:n64", "-out:n64_tracer.z64",
+				"-source-code-locations:filename", "-keep-temp-files",
+			),
 			cwd=tracer,
 			environment=common_environment,
 		),
 		Stage(
 			"tracer ROM identity",
-			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_tracer.z64", accepted["tracer_rom_sha256"]),
+			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_tracer.z64", expected_hashes["tracer_rom_sha256"]),
 			cwd=tracer,
 		),
 		Stage("tracer golden", (str(runner), "tracer.test.js", "n64_tracer.z64", "--timeout", "30"), cwd=tracer),
 		Stage(
 			"build Pong from clean sample copy",
-			(str(ODIN_ROOT / "odin"), "build", ".", "-target:n64", "-out:n64_pong.z64", "-keep-temp-files"),
+			(
+				str(ODIN_ROOT / "odin"), "build", ".", "-target:n64", "-out:n64_pong.z64",
+				"-source-code-locations:filename", "-keep-temp-files",
+			),
 			cwd=pong,
 			environment=common_environment,
 		),
 		Stage(
 			"Pong ROM identity",
-			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_pong.z64", accepted["pong_rom_sha256"]),
+			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_pong.z64", expected_hashes["pong_rom_sha256"]),
 			cwd=pong,
 		),
 		Stage("Pong golden", (str(runner), "pong.test.js", "n64_pong.z64", "--timeout", "30"), cwd=pong),
@@ -308,14 +453,14 @@ def full_stages(validation: FullValidation) -> list[Stage]:
 				str(ODIN_ROOT / "odin"), "build", ".", "-target:n64", "-out:n64_dfs.z64",
 				"-n64-title:Odin DFS v0.2", "-n64-region:E", "-n64-save-type:none",
 				"-n64-controllers:n64;none;none;none", "-n64-assets:assets",
-				"-n64-metadata:metadata.ini", "-keep-temp-files",
+				"-n64-metadata:metadata.ini", "-source-code-locations:filename", "-keep-temp-files",
 			),
 			cwd=dfs,
 			environment=common_environment,
 		),
 		Stage(
 			"DFS ROM identity",
-			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_dfs.z64", accepted["dfs_rom_sha256"]),
+			(PYTHON, str(ODIN_ROOT / "tests/n64_validation/check_sha256.py"), "n64_dfs.z64", expected_hashes["dfs_rom_sha256"]),
 			cwd=dfs,
 		),
 		Stage("DFS golden", (str(runner), "dfs.test.js", "n64_dfs.z64", "--timeout", "30"), cwd=dfs),
@@ -373,6 +518,13 @@ def write_identity_manifest(path: Path, mode: str, inputs: IdentityInputs) -> No
 		}
 	if inputs.container_identity is not None:
 		manifest["container_identity"] = inputs.container_identity
+	if inputs.rom_identity_source is not None:
+		manifest["rom_identity_source"] = inputs.rom_identity_source
+	if inputs.candidate_manifest is not None:
+		manifest["candidate_manifest"] = {
+			"path": str(inputs.candidate_manifest.path),
+			"sha256": inputs.candidate_manifest.sha256,
+		}
 	path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -413,7 +565,16 @@ def main() -> int:
 	parser.add_argument("mode", choices=("quick", "full"))
 	parser.add_argument("--list", action="store_true", help="list stages without running preflight or commands")
 	parser.add_argument("--artifacts", type=Path, help="directory for stage logs and full fixture copies")
+	parser.add_argument(
+		"--candidate-manifest",
+		type=Path,
+		help="absolute path to proposed full-mode ROM identities; omit to use accepted_artifacts",
+	)
 	args = parser.parse_args()
+	if args.candidate_manifest is not None and args.mode != "full":
+		parser.error("--candidate-manifest is only valid with full mode")
+	if args.candidate_manifest is not None and not args.candidate_manifest.is_absolute():
+		parser.error("--candidate-manifest must be an absolute path")
 
 	root: Path | None = workspace_root()
 	sdk: Path | None = None
@@ -421,6 +582,8 @@ def main() -> int:
 	runner_source: Path | None = None
 	container_identity: str | None = None
 	artifacts: Path | None = None
+	rom_identities: RomIdentities | None = None
+	retained_candidate_manifest: RetainedCandidateManifest | None = None
 	if not args.list:
 		artifact_base = args.artifacts or Path(
 			os.environ.get("N64_VALIDATION_ARTIFACTS", ODIN_ROOT / ".n64-validation-artifacts")
@@ -452,6 +615,13 @@ def main() -> int:
 			Stage("DFS golden", ()),
 		]
 	else:
+		if args.candidate_manifest is not None:
+			try:
+				odin_commit = git_output(ODIN_ROOT, "rev-parse", "HEAD")
+				candidate_manifest = load_candidate_manifest(args.candidate_manifest, odin_commit)
+			except (CandidateManifestError, subprocess.CalledProcessError) as error:
+				parser.error(str(error))
+			rom_identities = candidate_rom_identities(candidate_manifest)
 		dependencies = full_preflight()
 		root = dependencies.root
 		sdk = dependencies.sdk
@@ -459,7 +629,20 @@ def main() -> int:
 		runner_source = dependencies.runner_source
 		container_identity = dependencies.container_identity
 		assert artifacts is not None
-		validation = FullValidation(dependencies, artifacts, prepare_full_fixtures(artifacts))
+		if rom_identities is None:
+			rom_identities = accepted_rom_identities(dependencies.lock)
+		else:
+			assert rom_identities.candidate_manifest is not None
+			artifacts.mkdir(parents=True, exist_ok=True)
+			try:
+				retained_candidate_manifest = retain_candidate_manifest(
+					rom_identities.candidate_manifest, artifacts
+				)
+			except (CandidateManifestError, OSError) as error:
+				parser.error(f"cannot retain candidate manifest: {error}")
+		validation = FullValidation(
+			dependencies, artifacts, prepare_full_fixtures(artifacts), rom_identities
+		)
 		stages = full_stages(validation)
 
 	if args.list:
@@ -472,8 +655,14 @@ def main() -> int:
 
 	assert artifacts is not None
 	artifacts.mkdir(parents=True, exist_ok=True)
-	identity = IdentityInputs(root, sdk, runner, runner_source, container_identity)
+	identity = IdentityInputs(
+		root, sdk, runner, runner_source, container_identity,
+		rom_identities.label if rom_identities is not None else None,
+		retained_candidate_manifest,
+	)
 	write_identity_manifest(artifacts / "identity.json", args.mode, identity)
+	if rom_identities is not None:
+		print(f"N64 full validation ROM identities: {rom_identities.label}")
 	print(f"N64 {args.mode} validation artifacts: {artifacts}")
 	result = run_stages(stages, artifacts)
 	if result == 0:

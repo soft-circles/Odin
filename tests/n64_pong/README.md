@@ -33,6 +33,13 @@ The result is `n64_pong.z64`. Only `pong.odin` is application source; the
 README, playtest record, headless script, and golden image are fixture inputs,
 not part of the ROM graph.
 
+This ordinary fixture command intentionally retains Odin's default
+source-location behavior. Release qualification builds a clean fixture copy
+from the exact committed Odin candidate with
+`-source-code-locations:filename`. During qualification, the commit-bound
+candidate manifest supplies the proposed v0.2.1 candidate identity. The
+historical hash below is not a current accepted v0.2.1 ROM identity.
+
 ## Controls
 
 - D-pad Up/Down or the analog stick moves the left paddle.
@@ -86,9 +93,9 @@ Upstream Ares is for interactive play and visual debugging, not the automated
 oracle. The v148 release has a CPU-framebuffer race described below; use the
 verified post-fix nightly for this sample's interactive visual gate.
 
-## Milestone 4 release candidate
+## Historical v0.2 Milestone 4 evidence
 
-The software-complete candidate built on 2026-08-31 has these identities:
+The v0.2 software-complete candidate built on 2026-08-31 had these identities:
 
 - ROM SHA-256: `2259c158e6d1782196b9ed151554ee3c48379246920e09a65f736ca859c5782a`
 - Controller-driven raw RGB SHA-256:
@@ -106,7 +113,7 @@ same CPU-framebuffer race was reproduced in the untouched official libdragon
 isolating it from the Odin game. Adding synchronization
 reduced but did not eliminate the flicker; triple buffering, 32 bpp, and
 resampling also did not fix it. This is an upstream Ares issue, not a change to
-the accepted Pong ROM or display configuration. The
+the historical v0.2 Pong ROM or display configuration. The
 [official fix](https://github.com/ares-emulator/ares/commit/31526ded9196b046b0b5ce1769f14335eba9cc33)
 is commit `31526ded9196b046b0b5ce1769f14335eba9cc33`.
 

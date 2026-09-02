@@ -21,8 +21,8 @@ The build consumes two explicit inputs:
 There is no C entry point, application Makefile, converted asset, or project
 manifest in this directory.
 
-`VALIDATION.md` records the accepted artifact hashes and final automated and
-manual gate results.
+`VALIDATION.md` records the historical v0.2 artifact hashes and the automated
+and manual gate results that accepted them for that release.
 
 ## Fixture build
 
@@ -39,6 +39,13 @@ odin build . -target:n64 -out:n64_dfs.z64 \
   -n64-assets:assets \
   -n64-metadata:metadata.ini
 ```
+
+This ordinary fixture command intentionally retains Odin's default
+source-location behavior. Release qualification builds a clean fixture copy
+from the exact committed Odin candidate with
+`-source-code-locations:filename`. During qualification, the commit-bound
+candidate manifest supplies the proposed v0.2.1 candidate identity. The
+historical hash below is not a current accepted v0.2.1 ROM identity.
 
 This fixture deliberately omits `-n64-rtc`, so the reviewed artifact has RTC
 disabled.
@@ -65,7 +72,7 @@ frame submission, readiness, and final PASS, and rejects every
 reviewed `dfs.golden.png` pixel-for-pixel and writes `dfs.diff.png` on a visual
 mismatch.
 
-The reviewed `dfs.golden.png` was promoted from the accepted candidate only
+The reviewed `dfs.golden.png` was promoted from the accepted v0.2 candidate only
 after the same release-candidate ROM passed the pinned headless runner,
 official upstream Ares, Analogue3D, and SummerCart64 gates. The normal gate is
 therefore expected to pass pixel-for-pixel.
@@ -117,7 +124,7 @@ The verifier rejects the wrong byte order, header values, rompak layout,
 DragonFS image, SDK-version payloads, metadata ZIP structure, or localized INI
 content.
 
-The accepted release candidate is `n64_dfs.z64` with SHA-256
+The historical v0.2 release candidate was `n64_dfs.z64` with SHA-256
 `09299b4c7d1b236ddbd0128409aa991f3ca2cbfefc8579e87cdcd0a8404b579c`.
 Its reviewed framebuffer has raw RGB SHA-256
 `b3c012ba911d27fe55875dd209a56ea17542e341881a0ce42edc06ec0c1e88ef`

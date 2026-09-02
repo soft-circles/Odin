@@ -229,6 +229,33 @@ root. Use `--list` to inspect the stages without running them.
 The individual fixture commands remain supported. Use the first failed stage's
 log and fixture README for focused diagnosis.
 
+### Source locations in release ROMs
+
+Ordinary user builds retain Odin's default source-location behavior. The
+project-facing and fixture build commands therefore do not add a
+`-source-code-locations` option, and this release does not change the compiler's
+default.
+
+Release qualification has a narrower reproducibility requirement. The full
+validation layer explicitly builds the tracer, Pong, and DFS fixtures with
+`-source-code-locations:filename` so source locations cannot make their ROM
+bytes depend on the absolute checkout path. Derive candidate hashes only from
+those path-independent builds of an exact committed Odin candidate, and record
+the Odin commit plus all three hashes in the candidate manifest. The manifest
+is the source of candidate identities during qualification; only fully
+qualified and promoted values become accepted identities in the coordination
+lock.
+
+Run candidate qualification with an absolute manifest path:
+
+```sh
+python3 odin/tests/n64_validate.py full \
+  --candidate-manifest /absolute/path/to/v0.2.1-candidate.toml
+```
+
+Without `--candidate-manifest`, full validation uses the accepted identities in
+the coordination lock.
+
 ### Quick: no SDK or emulator required
 
 Build the compiler, then run from the Odin repository root:

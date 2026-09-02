@@ -34,6 +34,13 @@ directory:
 N64_INST=/path/to/n64_toolchain odin build . -target:n64 -out:n64_tracer.z64
 ```
 
+This ordinary fixture command intentionally retains Odin's default
+source-location behavior. Release qualification builds a clean fixture copy
+from the exact committed Odin candidate with
+`-source-code-locations:filename`. During qualification, the commit-bound
+candidate manifest supplies the proposed v0.2.1 candidate identity. The
+historical hashes below are not current accepted v0.2.1 ROM identities.
+
 Run the headless gate with:
 
 ```sh
@@ -45,20 +52,23 @@ Ubuntu/AMD64 `ares-test`. On Apple Silicon, use the documented Linux/AMD64
 Docker-emulation path. Native macOS Ares is an interactive visual check, not
 the automated oracle.
 
-The final 2026-08-31 software validation used `ares-test` commit
+## Historical v0.2 evidence
+
+The 2026-08-31 v0.2 software validation used `ares-test` commit
 `09008b610a16c375f793d0e124a366227bc4839c` in its Linux/AMD64 image. It
 observed every ordered runtime/allocator sentinel, libdragon's EMUX exit
 request, and framebuffer hash
 `13B30B82C8227FAA1DE66FBC058C2F6E5B980118096CE6B090A342D868DDB79F`.
 Upstream macOS Ares v148 also loaded the same ROM and visibly rendered the
-reviewed tracer frame. The final ROM SHA-256 is
+reviewed tracer frame. That historical ROM's SHA-256 is
 `d2939a7e6ca5b2cfc5aace448917eb74f0679191efd01a9ae72fad39431534c7`.
 
 This exact ROM subsequently passed its Analogue3D/SummerCart64 hardware
 validation on 2026-08-31. Together with the headless and upstream-Ares results,
 that completes the Milestone 2 acceptance gates.
 
-Milestone 3 rebuilt the same tracer from a clean directory containing only
-`tracer.odin` with `odin build . -target:n64`. The integrated ROM passed the
-same pinned headless runner and framebuffer oracle. Its SHA-256 is
+The v0.2 Milestone 3 run rebuilt the same tracer from a clean directory
+containing only `tracer.odin` with `odin build . -target:n64`. The integrated
+ROM passed the same pinned headless runner and framebuffer oracle. That
+historical v0.2 ROM's SHA-256 is
 `50bdcc3d0fa9729fe72597a58e292c38261ee508466a4d1acab5e03eb60b8dd2`.
