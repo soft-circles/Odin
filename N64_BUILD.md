@@ -15,6 +15,8 @@ For the narrow raw libdragon API, see
 [Odin64's project-local binding](https://github.com/soft-circles/Odin64/blob/main/libdragon/README.md). Maintainers should
 also read [`N64_MAINTAINERS.md`](N64_MAINTAINERS.md).
 
+For separate checked RSP queue commands, see [Handwritten RSP assembly](RSP_ASSEMBLY.md).
+
 ## Supported hosts
 
 The integrated executable-ROM pipeline requires a POSIX host and GNU make at

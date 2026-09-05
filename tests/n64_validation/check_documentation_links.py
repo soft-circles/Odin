@@ -13,6 +13,7 @@ ODIN_ROOT = Path(__file__).resolve().parents[2]
 DOCUMENTS = (
 	"README.md",
 	"N64_BUILD.md",
+	"RSP_ASSEMBLY.md",
 	"N64_MAINTAINERS.md",
 	"examples/README.md",
 	"vendor/README.md",

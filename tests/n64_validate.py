@@ -33,6 +33,7 @@ def quick_stages(lock_path: Path | None = None) -> list[Stage]:
         Stage("N64 build-module boundary", (PYTHON, "tests/n64_build/test_n64_module.py")),
         Stage("N64 public options and failure paths", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("SDK validator unit tests", (PYTHON, "tests/o64_abi/test_validate_sdk.py")),
+        Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
     ]
 

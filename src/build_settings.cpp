@@ -213,6 +213,7 @@ enum BuildModeKind {
 	BuildMode_Object,
 	BuildMode_Assembly,
 	BuildMode_LLVM_IR,
+	BuildMode_RSP_Assembly,
 
 	BuildMode_COUNT,
 };
@@ -520,6 +521,7 @@ struct BuildContext {
 	                           // BuildPath enum contains the indices of paths we know *before* the work starts.
 
 	String out_filepath;
+	String rsp_entry;
 	String resource_filepath;
 	String pdb_filepath;
 	String n64_inst;
@@ -2464,7 +2466,7 @@ gb_internal bool init_build_paths(String init_filename) {
 		}
 	} else if (build_context.build_mode == BuildMode_Object) {
 		output_extension = infer_object_extension_from_build_context();
-	} else if (build_context.build_mode == BuildMode_Assembly) {
+	} else if (build_context.build_mode == BuildMode_Assembly || build_context.build_mode == BuildMode_RSP_Assembly) {
 		// By default use a .S asm extension.
 		output_extension = STR_LIT("S");
 	} else if (build_context.build_mode == BuildMode_LLVM_IR) {

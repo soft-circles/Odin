@@ -2880,7 +2880,8 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 		asm_instructions = slice_from_array(instructions);
 	}
 
-	if (build_context.metrics.arch == TargetArch_amd64 ||
+	if (build_context.build_mode == BuildMode_RSP_Assembly ||
+	    build_context.metrics.arch == TargetArch_amd64 ||
 	    build_context.metrics.arch == TargetArch_riscv64) {
 	    	// okay
 	} else {
@@ -6802,6 +6803,10 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 
 			syntax_error(node, "Only declarations are allowed at file scope, got %.*s", LIT(ast_strings[node->kind]));
 		} else if (node->kind == Ast_ImportDecl) {
+			if (build_context.build_mode == BuildMode_RSP_Assembly) {
+				error(node, "Imports are not supported in an RSP source unit");
+				continue;
+			}
 			ast_node(id, ImportDecl, node);
 
 			String original_string = string_trim_whitespace(string_value_from_token(f, id->relpath));
@@ -7563,7 +7568,7 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 
 	{ // Add these packages serially and then process them parallel
 		TokenPos init_pos = {};
-		{
+		if (build_context.build_mode != BuildMode_RSP_Assembly) {
 			bool ok = false;
 			String s = get_fullpath_base_collection(permanent_allocator(), str_lit("runtime"), &ok);
 			if (!ok) {

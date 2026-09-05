@@ -71,6 +71,7 @@ gb_global Timings global_timings = {0};
 #include "asm_tables.cpp"
 
 #include "parser.cpp"
+#include "rsp_asm.cpp"
 #include "checker.cpp"
 #include "docs.cpp"
 
@@ -389,6 +390,7 @@ enum BuildFlagKind {
 	BuildFlag_Collection,
 	BuildFlag_Define,
 	BuildFlag_BuildMode,
+	BuildFlag_RspEntry,
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
 	BuildFlag_N64Inst,
@@ -736,6 +738,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_KeepTempFiles,           str_lit("keep-temp-files"),           BuildFlagParam_None,    Command__does_build | Command_strip_semicolon);
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
+	add_flag(&build_flags, BuildFlag_RspEntry, str_lit("rsp-entry"), BuildFlagParam_String, Command_build);
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
@@ -1477,6 +1480,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							}
 							break;
 
+						case BuildFlag_RspEntry:
+							build_context.rsp_entry = value.value_string;
+							break;
 						case BuildFlag_BuildMode: {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String str = value.value_string;
@@ -1499,6 +1505,8 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								build_context.build_mode = BuildMode_Assembly;
 							} else if (str == "llvm" || str == "llvm-ir") {
 								build_context.build_mode = BuildMode_LLVM_IR;
+							} else if (str == "rsp-asm") {
+								build_context.build_mode = BuildMode_RSP_Assembly;
 							} else if (str == "test") {
 								build_context.build_mode   = BuildMode_Executable;
 								build_context.command_kind = Command_test;
@@ -1511,6 +1519,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("\texe\n");
 								gb_printf_err("\tasm, assembly, assembler\n");
 								gb_printf_err("\tllvm, llvm-ir\n");
+								gb_printf_err("\trsp-asm\n");
 								gb_printf_err("\ttest\n");
 								bad_flags = true;
 								break;
@@ -2997,6 +3006,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-build-mode:assembly    Builds as an assembly file.");
 				print_usage_line(3, "-build-mode:assembler   Builds as an assembly file.");
 				print_usage_line(3, "-build-mode:asm         Builds as an assembly file.");
+				print_usage_line(3, "-build-mode:rsp-asm     Emits a checked queue overlay; requires -rsp-entry:<template> and -out:rsp*.S.");
 				print_usage_line(3, "-build-mode:llvm-ir     Builds as an LLVM IR file.");
 				print_usage_line(3, "-build-mode:llvm        Builds as an LLVM IR file.");
 		}
@@ -4369,7 +4379,16 @@ int main(int arg_count, char const **arg_ptr) {
 			get_fullpath_relative(heap_allocator(), odin_root_dir(), str_lit("shared"), nullptr));
 	}
 
-	init_build_context(selected_target_metrics ? selected_target_metrics->metrics : nullptr, selected_subtarget);
+	if (build_context.rsp_entry.len && build_context.build_mode != BuildMode_RSP_Assembly) {
+		gb_printf_err("-rsp-entry requires -build-mode:rsp-asm\n");
+		return 1;
+	}
+	if (build_context.build_mode == BuildMode_RSP_Assembly) {
+		build_context.no_entry_point = true;
+		init_build_context(&target_freestanding_mips32be, Subtarget_Default);
+	} else {
+		init_build_context(selected_target_metrics ? selected_target_metrics->metrics : nullptr, selected_subtarget);
+	}
 	// if (build_context.word_size == 4 && build_context.metrics.os != TargetOs_js) {
 	// 	print_usage_line(0, "%.*s 32-bit is not yet supported for this platform", LIT(args[0]));
 	// 	return 1;
@@ -4532,7 +4551,7 @@ int main(int arg_count, char const **arg_ptr) {
 	defer (thread_pool_destroy(&global_thread_pool));
 
 	TIME_SECTION("init universal");
-	init_universal();
+	if (build_context.build_mode != BuildMode_RSP_Assembly) init_universal();
 	// TODO(bill): prevent compiling without a linker
 
 	Parser * parser  = permanent_alloc_item<Parser>();
@@ -4540,7 +4559,7 @@ int main(int arg_count, char const **arg_ptr) {
 	bool failed_to_cache_parsing = false;
 
 	TIME_SECTION("init asm tables");
-	init_asm_tables(build_context.metrics.ptr_size);
+	if (build_context.build_mode != BuildMode_RSP_Assembly) init_asm_tables(build_context.metrics.ptr_size);
 
 	MAIN_TIME_SECTION("parse files");
 
@@ -4559,6 +4578,12 @@ int main(int arg_count, char const **arg_ptr) {
 	if (any_errors()) {
 		print_all_errors();
 		return 1;
+	}
+
+	if (build_context.build_mode == BuildMode_RSP_Assembly) {
+		bool ok = rsp_emit_artifact(parser, build_context.rsp_entry, build_context.out_filepath);
+		if (any_errors()) print_all_errors();
+		return ok && !any_errors() ? 0 : 1;
 	}
 
 	checker->parser = parser;

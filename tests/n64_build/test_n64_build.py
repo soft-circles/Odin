@@ -345,7 +345,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 	def test_foreign_objects_and_archives_are_preserved_for_libdragon_linking(self):
 		app = self.root / "foreign inputs"
 		app.mkdir()
-		(app / "object.c").write_text("int object_value(void) { return 20; }\n", encoding="utf-8")
+		(app / "object.c").write_text("int object_data = 20; int object_value(int *p) { return *p; }\n", encoding="utf-8")
 		(app / "archive.c").write_text("int archive_value(void) { return 22; }\n", encoding="utf-8")
 		compiler = self.sdk / "bin/mips64-elf-gcc"
 		archiver = self.sdk / "bin/mips64-elf-ar"
@@ -375,10 +375,10 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			"package foreign_inputs\n\n"
 			"foreign import object_lib \"object.o\"\n"
 			"foreign import archive_lib \"helpers.a\"\n\n"
-			"foreign object_lib { object_value :: proc \"c\" () -> i32 --- }\n"
+			"foreign object_lib { object_data: i32; object_value :: proc \"c\" (p: ^i32) -> i32 --- }\n"
 			"foreign archive_lib { archive_value :: proc \"c\" () -> i32 --- }\n\n"
 			"main :: proc() {\n"
-			"\tif object_value() + archive_value() == -1 {\n"
+			"\tif object_value(&object_data) + archive_value() == -1 {\n"
 			"\t\tunreachable()\n"
 			"\t}\n"
 			"}\n",
@@ -386,7 +386,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		)
 
 		output = app / "foreign-inputs.z64"
-		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
+		result = run_build(app, "-o:speed", f"-n64-inst:{self.sdk}", f"-out:{output}")
 
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
