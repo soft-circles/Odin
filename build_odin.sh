@@ -130,7 +130,7 @@ NetBSD)
 	;;
 Linux)
 	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ -ldl $($LLVM_CONFIG --libs core native passes arm aarch64 x86 webassembly riscv mips --system-libs --libfiles)"
+	LDFLAGS="$LDFLAGS -lstdc++ -ldl $($LLVM_CONFIG --libs core passes all-targets --system-libs --libfiles)"
 	# Copy libLLVM*.so into current directory for linking
 	# NOTE: This is needed by the Linux release pipeline!
 	# cp $(readlink -f $($LLVM_CONFIG --libfiles)) ./
