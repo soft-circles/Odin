@@ -17,6 +17,7 @@ command :: asm() {
 }
 """
 SCALAR = (ROOT / "tests/rsp_asm/scalar.odin").read_text()
+VECTOR = (ROOT / "tests/rsp_asm/vector.odin").read_text()
 
 class RspArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -81,6 +82,173 @@ class RspArtifactTests(unittest.TestCase):
         self.assertIn("ori $20, $0, %lo(rspq_scratch)", text)
         self.assertIn("sw $0, 12($20)", text)
         self.assertIn("j DMAOut", text)
+
+    def test_vectors_initialize_from_queue_zero_and_xor(self):
+        body = "vxor %v01, %v00, %v00; vxor %v31, %v01, %v00; "
+        result = self.build(MINIMAL.replace("jr %ra", body + "jr %ra"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("vxor $v01, $v00, $v00", self.output.read_text())
+        self.assertIn("vxor $v31, $v01, $v00", self.output.read_text())
+
+    def test_element_transfers_define_only_the_selected_element(self):
+        for element in range(8):
+            with self.subTest(element=element):
+                body = f"mtc2 %a0, %v01.e{element}; nop; nop; mfc2 %r2, %v01.e{element}; nop; nop; "
+                source = MINIMAL.replace("jr %ra", body + "jr %ra")
+                result = self.build(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn(f"mtc2 $4, $v01.e{element}", self.output.read_text())
+                self.assertIn(f"mfc2 $2, $v01.e{element}", self.output.read_text())
+                self.assert_rejected(source.replace(f"mfc2 %r2, %v01.e{element}",
+                    f"mfc2 %r2, %v01.e{(element+1)%8}"), "read before definition")
+                self.assert_rejected(source.replace("jr %ra", "vxor %v02, %v01, %v00; jr %ra"),
+                                     "read before definition")
+
+    def test_vector_command_initializes_scratch_and_tail_transfers(self):
+        result = self.build(VECTOR)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        text = self.output.read_text()
+        self.assertIn("andi $3, $3, 65535", text)
+        self.assertIn("sw $0, 12($20)", text)
+        self.assertIn("j DMAOut", text)
+        for line, instruction in enumerate(VECTOR.splitlines(), 1):
+            if instruction.startswith("\t"):
+                self.assertIn(f"#line {line} ", text)
+
+    def test_vector_register_classes_selectors_and_arity_fail_closed(self):
+        for reg in range(32):
+            body = f"vxor %v{reg:02d}, %v00, %v00; jr %ra"
+            result = self.build(MINIMAL.replace("jr %ra", body))
+            self.assertEqual(result.returncode, 0, result.stdout)
+        for instruction in (
+                "vxor %v01, %v00", "vxor %v01, %v00, %v00, %v00",
+                "mtc2 %a0", "mfc2 %r2", "mtc2 %a0, %v01.e0, 0", "mfc2 %r2, %v00.e0, 0",
+                "mtc2 %v01.e0, %a0", "mfc2 %v01.e0, %a0",
+                "mtc2 %v00, %v01.e0", "mfc2 %v01, %v00.e0",
+                "mtc2 %a0.e0, %v01.e0", "mfc2 %r2.e0, %v00.e0",
+                "mtc2 %r32, %v01.e0", "mfc2 %v0, %v00.e0", "mtc2 %v1, %v01.e0"):
+            self.assert_rejected(MINIMAL.replace("jr %ra", instruction + "; jr %ra"))
+        for reg in ("r0", "r31", "v0", "v1", "v001", "v32", "v99", "V01", "vzero"):
+            for body in (f"vxor %{reg}, %v00, %v00", f"vxor %v01, %{reg}, %v00",
+                         f"vxor %v01, %v00, %{reg}", f"mtc2 %a0, %{reg}.e0",
+                         f"mfc2 %r2, %{reg}.e0"):
+                self.assert_rejected(MINIMAL.replace("jr %ra", body + "; jr %ra"), "vector register")
+        for selector in ("", ".e8", ".e15", ".e99", ".e01", ".e_1", ".e-1", ".-1",
+                         ".b0", ".b1", ".b14", ".b15", ".v", ".q0", ".h0", "[0]", ".0"):
+            for op, gpr in (("mtc2", "a0"), ("mfc2", "r2")):
+                self.assert_rejected(MINIMAL.replace("jr %ra", f"{op} %{gpr}, %v00{selector}; jr %ra"))
+        for position in range(3):
+            for selector in ("e0", "e7", "b0", "b15", "v", "q0", "h0"):
+                operands = ["%v00"] * 3
+                operands[position] += f".{selector}"
+                self.assert_rejected(MINIMAL.replace("jr %ra", "vxor " + ", ".join(operands) + "; jr %ra"),
+                                     "whole-vector")
+
+    def test_vector_effects_and_unsupported_hidden_state_fail_closed(self):
+        for source in (VECTOR.replace("vxor %v01, %v00, %v00", ""),
+                       VECTOR.replace("vxor %v02, %v00, %v00", "")):
+            self.assert_rejected(source, "read before definition")
+        for reg in ("gp", "r28", "ra", "r31", "sp", "r29"):
+            self.assert_rejected(MINIMAL.replace("jr %ra", f"mfc2 %{reg}, %v00.e0; jr %ra"))
+        for instruction in ("mtc2 %r2, %v01.e0", "mfc2 %zero, %v01.e0",
+                            "vxor %v01, %v01, %v01", "vxor %v01, %v00, %v02",
+                            "vadd %v01, %v00, %v00", "vaddc %v01, %v00, %v00",
+                            "vsub %v01, %v00, %v00", "vsubc %v01, %v00, %v00",
+                            "vch %v01, %v00, %v00", "vcl %v01, %v00, %v00", "vmrg %v01, %v00, %v00",
+                            "vrcp %v01.e0, %v00.e0", "vrcph %v01.e0, %v00.e0", "vrsq %v01.e0, %v00.e0",
+                            "vmacf %v01, %v00, %v00", "vsar %v01, %v00, %v00.e0",
+                            "cfc2 %r2, %r0", "ctc2 %r2, %r0", "lqv %v01, [%r0]"):
+            self.assert_rejected(MINIMAL.replace("jr %ra", instruction + "; jr %ra"))
+        # Eight independently written elements suffice for a whole-vector read.
+        body = "; ".join(f"mtc2 %a0, %v01.e{element}" for element in range(8))
+        result = self.build(MINIMAL.replace("jr %ra", body + "; nop; nop; vxor %v01, %v01, %v00; jr %ra"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_vector_constants_truncate_sign_extend_and_preserve_other_elements(self):
+        # DMA's constant extent and physical-address contracts expose value tracking
+        # through the CLI, without inspecting checker state.
+        for literal, after, accepted in (("0x1234000f", "", True), ("0x800f", "", False),
+                ("0x800f", "andi %t0, %t0, 15;", True), ("7", "", True)):
+            body = f"li %r2, {literal}; mtc2 %r2, %v01.e7; nop; nop; mfc2 %t0, %v01.e7; nop; nop; {after}"
+            source = SCALAR.replace("li %t0, 15", body)
+            if accepted:
+                result = self.build(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            else:
+                self.assert_rejected(source, "byte count")
+        # MFC2 must sign-extend 0x8000: 32768 would be a valid physical address,
+        # but the actual 0xffff8000 must be rejected by DMA's 24-bit bound.
+        source = SCALAR.replace("move %s0, %a3",
+            "li %r2, 0x8000; mtc2 %r2, %v00.e0; nop; nop; mfc2 %s0, %v00.e0; nop; nop;")
+        self.assert_rejected(source, "physical RDRAM")
+        # v00 is writable, and updating e7 must preserve its other zero elements.
+        setup = "li %r2, 15; mtc2 %r2, %v00.e7; nop; nop; vxor %v00, %v00, %v01; nop; nop; "
+        source = SCALAR.replace("li %t0, 15", "vxor %v01, %v00, %v00; nop; nop; " + setup +
+            "mfc2 %t0, %v00.e7; nop; nop; mfc2 %s0, %v00.e6; nop; nop;")
+        result = self.build(source)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        # Vector transfers must not preserve the provenance of a scratch pointer.
+        self.assert_rejected(SCALAR.replace("sw %r2, [%s4]",
+            "mtc2 %s4, %v01.e0; nop; nop; mfc2 %s4, %v01.e0; nop; nop; sw %r2, [%s4]"),
+            "statically known address")
+
+    def assert_sdk_command_matches_reference(self, sdk, source, reference_name):
+        result = self.build(source)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for flags in ((), ("-DNDEBUG",), ("-DRSPQ_PROFILE=1",)):
+            with self.subTest(flags=flags):
+                elf, reference = self.path/"command.elf", self.path/"reference.elf"
+                obj, ref_obj = self.path/"command.o", self.path/"reference.o"
+                for source, linked, unlinked in ((self.output, elf, obj),
+                        (ROOT/"tests/rsp_asm"/reference_name, reference, ref_obj)):
+                    self.run_tool(self.sdk_command(sdk, source, linked, *flags))
+                    self.run_tool(self.sdk_command(sdk, source, unlinked, "-c", *flags))
+                for section in (".text", ".data"):
+                    self.assertEqual(self.sdk_section(sdk, obj, section), self.sdk_section(sdk, ref_obj, section))
+                    self.assertEqual(self.sdk_section(sdk, elf, section), self.sdk_section(sdk, reference, section))
+                relocations = [self.sdk_relocations(sdk, artifact) for artifact in (obj, ref_obj)]
+                self.assertEqual(*relocations)
+                self.assertTrue(any("R_MIPS_LO16" in line and ".bss" in line for line in relocations[0]))
+                self.assertIn("There are no relocations", self.run_tool([str(sdk/"bin/mips64-elf-readelf"), "-r", str(elf)]))
+                symbols = self.sdk_symbols(sdk, elf)
+                reference_symbols = self.sdk_symbols(sdk, reference)
+                scratch = symbols["rspq_scratch"]
+                self.assertEqual(scratch, reference_symbols["rspq_scratch"])
+                self.assertEqual(scratch % 16, 0)
+                self.assertGreaterEqual(scratch, symbols["_data_end"])
+                self.assertLessEqual(scratch + 16, 0xa4001000)
+                self.assertLessEqual(symbols["_text_end"], 0xa4002000)
+                self.assertEqual(self.sdk_section_size(sdk, elf, ".bss"), 16)
+
+    def test_sdk_vector_words_relocations_and_scratch_bounds(self):
+        self.assert_sdk_command_matches_reference(self.sdk(), VECTOR, "vector-reference.S")
+
+    def test_sdk_vector_transfer_element_bit_placement_and_register_boundaries(self):
+        sdk = self.sdk()
+        # Reviewed COP2 words: transfer byte selector is 2*lane in bits 10:7,
+        # not the arithmetic broadcast selector in bits 24:21. e7 means byte 14.
+        transfers = [
+            ("e0", "4884f800", "4802f800"), ("e1", "4884f900", "4802f900"),
+            ("e2", "4884fa00", "4802fa00"), ("e3", "4884fb00", "4802fb00"),
+            ("e4", "4884fc00", "4802fc00"), ("e5", "4884fd00", "4802fd00"),
+            ("e6", "4884fe00", "4802fe00"), ("e7", "4884ff00", "4802ff00"),
+        ]
+        body = "vxor %v31, %v00, %v00; nop; nop; vxor %v00, %v31, %v31; nop; nop; "
+        expected = "4a0007ec 00000000 00000000 4a1ff82c 00000000 00000000 "
+        for element, mtc2, mfc2 in transfers:
+            body += f"mtc2 %a0, %v31.{element}; nop; nop; mfc2 %r2, %v31.{element}; nop; nop; "
+            expected += f"{mtc2} 00000000 00000000 {mfc2} 00000000 00000000 "
+        # Scalar r31 and vector v00 test the other transfer register endpoints.
+        body += "mtc2 %r31, %v00.e7; nop; nop; mfc2 %r0, %v00.e7; nop; nop; "
+        expected += "489f0700 00000000 00000000 48000700 00000000 00000000 03e00008 00000000"
+        result = self.build(MINIMAL.replace("jr %ra", body + "jr %ra"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        elf = self.path/"vectors.elf"
+        self.run_tool(self.sdk_command(sdk, self.output, elf))
+        symbols = self.sdk_symbols(sdk, elf)
+        offset = symbols["rsp_command"] - symbols["_text_start"]
+        code = self.sdk_section(sdk, elf, ".text")[offset:]
+        self.assertEqual(code, bytes.fromhex(expected))
 
     def test_word_loads_and_constant_scratch_offsets(self):
         body = """la %t2, rspq_scratch
@@ -195,7 +363,6 @@ class RspArtifactTests(unittest.TestCase):
 
     def test_only_final_transfer_with_nop_delay_slot_is_supported(self):
         for body in ("jr %ra; ori %t0, %zero, 1;",
-                     "vxor %v01, %v00, %v00; jr %ra; nop;",
                      "j .done; nop; .done: jr %ra; nop;",
                      "jr %ra; nop; nop;", ".entry: jr %ra; nop;"):
             with self.subTest(body=body):
@@ -351,32 +518,7 @@ class RspArtifactTests(unittest.TestCase):
 
     def test_sdk_scalar_words_relocations_and_scratch_bounds(self):
         sdk = self.sdk()
-        result = self.build(SCALAR)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        for flags in ((), ("-DNDEBUG",), ("-DRSPQ_PROFILE=1",)):
-            with self.subTest(flags=flags):
-                elf, reference = self.path/"scalar.elf", self.path/"reference.elf"
-                obj, ref_obj = self.path/"scalar.o", self.path/"reference.o"
-                for source, linked, unlinked in ((self.output, elf, obj),
-                        (ROOT/"tests/rsp_asm/scalar-reference.S", reference, ref_obj)):
-                    self.run_tool(self.sdk_command(sdk, source, linked, *flags))
-                    self.run_tool(self.sdk_command(sdk, source, unlinked, "-c", *flags))
-                for section in (".text", ".data"):
-                    self.assertEqual(self.sdk_section(sdk, obj, section), self.sdk_section(sdk, ref_obj, section))
-                    self.assertEqual(self.sdk_section(sdk, elf, section), self.sdk_section(sdk, reference, section))
-                relocations = [self.sdk_relocations(sdk, artifact) for artifact in (obj, ref_obj)]
-                self.assertEqual(*relocations)
-                self.assertTrue(any("R_MIPS_LO16" in line and ".bss" in line for line in relocations[0]))
-                self.assertIn("There are no relocations", self.run_tool([str(sdk/"bin/mips64-elf-readelf"), "-r", str(elf)]))
-                symbols = self.sdk_symbols(sdk, elf)
-                reference_symbols = self.sdk_symbols(sdk, reference)
-                scratch = symbols["rspq_scratch"]
-                self.assertEqual(scratch, reference_symbols["rspq_scratch"])
-                self.assertEqual(scratch % 16, 0)
-                self.assertGreaterEqual(scratch, symbols["_data_end"])
-                self.assertLessEqual(scratch + 16, 0xa4001000)
-                self.assertLessEqual(symbols["_text_end"], 0xa4002000)
-                self.assertEqual(self.sdk_section_size(sdk, elf, ".bss"), 16)
+        self.assert_sdk_command_matches_reference(sdk, SCALAR, "scalar-reference.S")
         # Allocations include the SDK prefixes, header, saved state and padding.
         for source in (SCALAR.replace("scratch_bytes=16", "scratch_bytes=4096"),
                        MINIMAL.replace("jr %ra", "nop; " * 1024 + "jr %ra")):
