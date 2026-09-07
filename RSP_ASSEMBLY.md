@@ -35,48 +35,26 @@ other templates, CPU calls and captures are rejected. Integer constants support
 literals, references, parentheses, unary `+`, `-`, `~`, and binary `+`, `-`, `*`,
 `&`, `|`, `~` and `&~`. All declaration metadata is checked at its source location.
 `rspq_command_words` is required in 1–62, including the first word's low-24-bit
-payload. `rspq_scratch_bytes` defaults to zero; otherwise it is a multiple of 16
-and at most 4096. Actual available DMEM is smaller because the queue, header,
-empty saved state and alignment also occupy it; the SDK link and artifact check
-must pass before execution.
+payload. `rspq_scratch_bytes` defaults to zero and accepts an explicit compile-time zero.
+Nonzero scratch is unsupported in this minimal profile.
 
 ## Supported instructions
 
-- `addu`, `and`, `or`, `xor`: destination GPR and two source GPRs.
-- `addiu`: destination, source, signed-16 immediate; `andi` and `ori` use unsigned-16
-  immediates. `lui` takes destination and unsigned-16 immediate.
-- `li`: destination and a signed/unsigned 32-bit constant. Expands to one `ori` or
-  `addiu` when possible, otherwise `lui` followed by `ori`; only the destination is
-  written. `la destination, rspq_scratch` expands to one `ori` with a checked local
-  relocation, without using `at`.
-- `lw`/`sw`: GPR and `[base + displacement]`, with a signed-16 displacement. Memory
-  must derive from the declared scratch symbol. Alignment, bounds and initialized
-  scratch reads are checked. No scale, index register, segment or type decoration.
-- `vxor`: three whole vectors. Reads all elements of both sources, writes the full
-  destination and accumulator. No accumulator-reading or flag/divider operations
-  are supported.
-- `mtc2`/`mfc2`: scalar GPR, then vector with `.e0`–`.e7`. Transfers one 16-bit
-  element; `mfc2` sign-extends. Byte selectors and broadcast forms are rejected.
-- `beq`/`bne`: two GPRs and `.label`; `j .label`; `jr %ra`; `j DMAOut`; `nop`.
+The complete body must be exactly `jr %ra` followed by `nop`. `%r31` is the
+canonical spelling of the same queue return register. Both produce the words
+`0x03e00008` and `0x00000000`; the no-op explicitly occupies the delay slot.
+No other instructions, labels, meaningful delay slots, vector operations, memory
+accesses, scratch symbols, DMA helpers or assembly directives are accepted.
 
-Registers use `%r0`–`%r31` and `%v00`–`%v31`. Unambiguous GPR ABI aliases are
-accepted, including `%ra` and `%s8`/`%fp`. `%v0`/`%v1` are not scalar aliases.
-Stack-pointer use and writes to queue `gp`/`ra` are rejected regardless of spelling.
-Only declared input words (`a0`–`a3`), command byte count (`t7`), continuation state,
-architectural zero and queue vectors `v00`, `v30`, `v31` start defined.
+GPR names resolve as `%r0`–`%r31` or unambiguous ABI aliases (`zero`, `at`,
+`a0`–`a3`, `t0`–`t9`, `s0`–`s8`, `k0`, `k1`, `gp`, `sp`, `fp`, `ra`).
+Only register 31 is valid for the supported return. `%v0`/`%v1` are ambiguous
+and rejected, as are vector registers, unknown names and element selectors.
+Aliases cannot change a register's identity or bypass queue restrictions.
 
-Labels use `.name:`. Every transfer has an explicit one-instruction delay slot;
-a transfer or two-instruction pseudo in that slot is rejected. Effects occur on
-both conditional outcomes before their control-flow join. Branches cannot target
-slots or fall off the command. Loops are allowed; termination is not proven.
-Scheduling is explicit: the checker does not insert hardware dependency spacing.
-
-`DMAOut` is a tail transfer through the pinned synchronous helper. Initialize
-`t0` to byte length minus one, `t1` to pitch (ignored for this single-row profile),
-`s0` to the destination physical address, and `s4` to scratch. The transfer must
-be a known multiple of eight, aligned, within scratch, and fully initialized.
-The helper clobbers `t2`, `at` and `s4`, then returns through inherited `ra`.
-CPU code owns destination validation, cache discipline, lifetime and bounded waits.
+CPU compilation rejects RSP metadata even when the template body would be valid
+CPU assembly. A wrapped RSP object is imported as CPU data through the SDK;
+the template itself cannot be called or have its address taken from Odin.
 
 The generated wrapper includes the SDK queue first, preserves its boot entry,
 and emits one index-zero descriptor, terminator and nonempty SDK empty-state
@@ -90,6 +68,9 @@ Run the public CLI regression suite with:
 python3 tests/rsp_asm/test_rsp_asm.py
 ```
 
-SDK encoding tests require the installed SDK and use reviewed instruction bitfields.
-The scalar, vector and branch fixtures are compiler-owned source examples; the
-engine owns their ROM execution and independent reference comparison.
+SDK tests assemble and link the minimal command, compare its words and common
+sections against an independently authored reference, inspect the descriptor,
+terminator and saved-state layout, and package it through the SDK's `n64.mk` rule.
+Set `N64_INST` to select the SDK. Without an installed SDK these tests explicitly
+skip; full validation requires it. ROM execution qualification belongs to the
+Odin64 integration tickets.
