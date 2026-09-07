@@ -122,12 +122,16 @@ struct RspValue {
 };
 struct RspEffects {
 	RspValue registers[32] = {};
+	RspValue vectors[32][8] = {};
+	// Low, middle, high slices. No incoming accumulator definition is assumed.
+	RspValue accumulator[3][8] = {};
 	std::vector<RspValue> scratch;
 };
 static RspEffects rsp_live_inputs(i64 words, i64 scratch) {
 	RspEffects state;
 	state.scratch.resize(size_t(scratch/4));
 	state.registers[0] = {RspConstant, 0};
+	for (auto &element : state.vectors[0]) element = {RspConstant, 0};
 	for (int i = 0; i < 4 && i < words; i++) state.registers[4+i] = {RspUnknown, 0};
 	state.registers[15] = {RspConstant, words*4}; // SDK rspq_cmd_size (t7).
 	state.registers[28] = state.registers[31] = {RspUnknown, 0};
@@ -164,6 +168,95 @@ static RspValue rsp_binary_value(RspScalarOperation operation, RspValue left, Rs
 	if (operation == RspOr) return {RspConstant, a | b};
 	if (operation == RspXor) return {RspConstant, a ^ b};
 	return {RspUnknown, 0};
+}
+enum RspVectorMode { RspWholeVector, RspVectorElement };
+struct RspVectorOperand {
+	int reg = -1;
+	int element = -1;
+};
+static std::string rsp_vector_name(int reg) {
+	return std::string("$v") + (reg < 10 ? "0" : "") + std::to_string(reg);
+}
+static bool rsp_vector_operand(Ast *node, RspVectorMode mode, RspVectorOperand *operand) {
+	if (node->kind != Ast_AsmRegister) {
+		error(node, "Expected an explicit RSP vector register (v00..v31)"); return false;
+	}
+	auto name = rsp_string(node->AsmRegister.name.string);
+	for (int reg = 0; reg < 32; reg++) {
+		if ("$" + name == rsp_vector_name(reg)) { operand->reg = reg; break; }
+	}
+	if (operand->reg < 0) {
+		error(node, "Expected an explicit RSP vector register (v00..v31)"); return false;
+	}
+	auto selector = rsp_string(node->AsmRegister.flag.string);
+	if (mode == RspWholeVector) {
+		if (selector.empty()) return true;
+		error(node, "RSP whole-vector operand cannot have an element, byte or broadcast selector"); return false;
+	}
+	if (selector.size() == 2 && selector[0] == 'e' && selector[1] >= '0' && selector[1] <= '7') {
+		operand->element = selector[1] - '0';
+		return true;
+	}
+	error(node, "RSP vector transfer requires an element selector e0..e7 (not a byte or broadcast selector)");
+	return false;
+}
+static RspValue rsp_vector_read(RspEffects const &state, Ast *node, int reg, int element) {
+	auto value = state.vectors[reg][element];
+	if (value.kind == RspUndefined)
+		error(node, "RSP vector v%02d.e%d is read before definition", reg, element);
+	return value;
+}
+static void rsp_apply_vector_xor(RspEffects &state, Ast *node,
+                                 RspVectorOperand dest, RspVectorOperand left, RspVectorOperand right) {
+	auto operands = node->AsmInstruction.operands;
+	for (int element = 0; element < 8; element++) {
+		auto a = rsp_vector_read(state, operands[1], left.reg, element);
+		auto b = rsp_vector_read(state, operands[2], right.reg, element);
+		auto result = rsp_binary_value(RspXor, a, b);
+		state.vectors[dest.reg][element] = result;
+		// VXOR writes ACC_LO; it neither reads nor defines ACC_MID/ACC_HI.
+		state.accumulator[0][element] = result;
+	}
+}
+static bool rsp_vector_xor(RspEffects &state, Ast *node, std::ostringstream &out) {
+	auto operands = node->AsmInstruction.operands;
+	if (operands.count != 3) { error(node, "RSP vxor requires 3 whole-vector operands"); return false; }
+	RspVectorOperand dest, left, right;
+	if (!rsp_vector_operand(operands[0], RspWholeVector, &dest) ||
+	    !rsp_vector_operand(operands[1], RspWholeVector, &left) ||
+	    !rsp_vector_operand(operands[2], RspWholeVector, &right)) return false;
+	rsp_apply_vector_xor(state, node, dest, left, right);
+	out << "    vxor " << rsp_vector_name(dest.reg) << ", " << rsp_vector_name(left.reg)
+	    << ", " << rsp_vector_name(right.reg) << "\n";
+	return true;
+}
+static RspValue rsp_vector_insert_value(RspValue value) {
+	if (value.kind == RspConstant) return {RspConstant, value.value & 0xffff};
+	if (value.kind == RspUndefined) return value;
+	return {RspUnknown, 0}; // A partial scalar value loses scratch-address provenance.
+}
+static RspValue rsp_vector_extract_value(RspValue value) {
+	// MFC2 sign-extends the selected 16-bit element into a 32-bit GPR.
+	if (value.kind == RspConstant && (value.value & 0x8000)) value.value |= 0xffff0000;
+	return value;
+}
+static bool rsp_vector_transfer(RspEffects &state, Ast *node, std::ostringstream &out) {
+	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
+	auto operands = node->AsmInstruction.operands;
+	if (operands.count != 2) { error(node, "RSP %s requires a GPR and a vector element", name.c_str()); return false; }
+	int reg = rsp_gpr(operands[0]);
+	RspVectorOperand vector;
+	if (reg < 0 || !rsp_vector_operand(operands[1], RspVectorElement, &vector)) return false;
+	if (name == "mtc2") {
+		auto value = rsp_read(state, operands[0], reg);
+		state.vectors[vector.reg][vector.element] = rsp_vector_insert_value(value);
+	} else {
+		auto value = rsp_vector_read(state, operands[1], vector.reg, vector.element);
+		rsp_write(state, operands[0], reg, rsp_vector_extract_value(value));
+	}
+	out << "    " << name << " $" << reg << ", " << rsp_vector_name(vector.reg)
+	    << ".e" << vector.element << "\n";
+	return true;
 }
 enum RspScalarForm { RspRegisterBinary, RspImmediateBinary, RspUpper, RspLiteral, RspMove };
 struct RspScalarInstruction {
@@ -338,7 +431,7 @@ static bool rsp_check_body(RspUnit &unit, Ast *entry, i64 words, i64 scratch, st
 	auto state = rsp_live_inputs(words, scratch);
 	for (isize i = 0; i < instructions.count; i++) {
 		Ast *node = instructions[i];
-		if (node->kind != Ast_AsmInstruction) { error(node, "RSP labels and directives are unsupported in the scalar profile"); return false; }
+		if (node->kind != Ast_AsmInstruction) { error(node, "RSP labels and directives are unsupported in the straight-line profile"); return false; }
 		auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
 		auto operands = node->AsmInstruction.operands;
 		out << ".Lrsp_" << i << ":\n";
@@ -354,6 +447,10 @@ static bool rsp_check_body(RspUnit &unit, Ast *entry, i64 words, i64 scratch, st
 			if (!rsp_address(state, node, out)) return false;
 		} else if (name == "lw" || name == "sw") {
 			if (!rsp_memory(unit, state, node, out)) return false;
+		} else if (name == "vxor") {
+			if (!rsp_vector_xor(state, node, out)) return false;
+		} else if (name == "mtc2" || name == "mfc2") {
+			if (!rsp_vector_transfer(state, node, out)) return false;
 		} else if (!rsp_scalar(unit, state, node, out)) return false;
 	}
 	return true;
