@@ -79,16 +79,18 @@ explicit vectors. All scalar values are 32 bits; vector elements are 16 bits.
 | `mtc2 s, vt.eN` | Read the GPR and write its low 16 bits to exactly one vector element (`e0`–`e7`). |
 | `mfc2 d, vs.eN` | Read one defined vector element (`e0`–`e7`) and sign-extend it to the destination GPR. |
 | `nop` | No effects; may also separate instructions. |
-| `jr %ra` | Return through inherited `r31`; requires a final explicit `nop`. |
-| `j DMAOut` | Synchronous helper tail transfer under the contract below; requires a final explicit `nop`. |
+| `beq s, t, .label`, `bne s, t, .label` | Read both GPRs before the explicit delay slot, then branch on equality/inequality. |
+| `j .label` | Direct local jump after an explicit delay slot. |
+| `jr %ra` | Return through inherited `r31` after an explicit delay slot. |
+| `j DMAOut` | Synchronous helper tail transfer under the contract below, after an explicit delay slot. |
 
 `li` emits `addiu d, zero, constant` for -32768–32767, otherwise
 `ori d, zero, constant` for 0–65535, otherwise exactly two instructions:
 `lui d, upper16; ori d, d, lower16`. The upper/lower halves come from the
 validated 32-bit bit pattern. It writes only `d`, with no hidden `at` scratch.
 The other admitted instructions emit one real instruction each. The generated
-body disables assembler reordering, implicit `at` use and multi-instruction
-macro expansion. No invalid operand is truncated to fit an encoding.
+body disables assembler reordering, implicit `at` use, multi-instruction
+macro expansion and implicit alignment padding inside the command. No invalid operand is truncated to fit an encoding.
 
 GPR names resolve as `%r0`–`%r31` or unambiguous ABI aliases (`zero`, `at`,
 `a0`–`a3`, `t0`–`t9`, `s0`–`s8`, `k0`, `k1`, `gp`, `sp`, `fp`, `ra`).
@@ -129,7 +131,7 @@ contract. It is writable; later reads use its current contents. Other vectors
 must be initialized by authored instructions. A transfer defines only its selected
 element and preserves the others. Whole-vector XOR requires every source element
 to be defined, even for self-XOR; initialize from `%v00` or write all eight elements.
-A destination may overlap either source. Vector transfers discard scratch-address
+A destination may overlap either source. Vector transfers discard exact scratch-address
 provenance, and `mfc2` respects the same GPR write restrictions as scalar operations.
 
 XOR writes all eight low accumulator elements, without reading the accumulator
@@ -155,8 +157,9 @@ address must be 4-byte aligned and entirely inside the declared region. Numeric
 addresses, unknown bases and CPU symbols cannot substitute for scratch.
 Every word read by `lw` or DMA must have been initialized by an earlier `sw`.
 
-`j DMAOut` is the sole direct target. Its required inputs must be defined before
-the jump, with this restricted single-row transfer contract:
+`j DMAOut` is the sole external direct target. Its required inputs must be
+defined after the delay slot, before entering the helper, with this restricted
+single-row transfer contract:
 
 | Register | Requirement |
 | --- | --- |
@@ -168,17 +171,64 @@ the jump, with this restricted single-row transfer contract:
 
 The pinned helper destroys `at`/`r1` and `t2`/`r10`, adjusts `s4`, touches the
 DMA/status coprocessor state, waits for completion and returns through inherited
-`ra`. The checker marks those GPR results unknown and permits no authored code
-after the tail transfer and its no-op slot. No stack or alternate return address
+`ra`. The helper has no authored successor; other local paths may continue to code
+placed after the tail transfer and its slot. No stack or alternate return address
 is introduced. For a runtime RDRAM destination, alignment, bounds, lifetime and
 CPU cache ownership remain the caller's responsibility; emission does not prove
 general computed-address safety.
 
-Both return forms must end the command with an explicit `nop`. All scalar/vector work
-and helper setup precede the transfer. Meaningful slots, general branches, labels,
-arbitrary calls, indirect targets, halt/break completion, FPU operations,
-HI/LO multiply/divide, 64-bit operations and other COP0 operations are unsupported.
-Instruction scheduling remains explicit; no automatic scheduler is provided.
+## Local control flow and delay slots
+
+Declare a command-local label with `.name:` and refer to it as `.name`.
+Forward and backward references share one command scope; spelling a label like an
+SDK symbol does not expose that symbol. Bare identifiers, numeric targets, label
+arithmetic, duplicate or unresolved names, and targets outside the command or
+inside a delay slot are rejected. The only external target is `j DMAOut`.
+
+Every transfer requires a following instruction. The slot may use any admitted
+scalar or vector instruction, including a scratch load/store, provided it emits
+exactly one real instruction. A two-word `li`, another transfer, or a missing slot fails.
+Use `nop` when no work is needed. The branch condition is read before the slot;
+the slot's reads and writes happen on both outcomes before control transfers.
+A slot can therefore initialize a result used by both paths or finish DMA setup.
+
+The checker joins GPR and vector-element definitions, accumulator slices,
+constant values, scratch addresses and initialized words across all incoming
+paths, including loop backedges. A read must be defined on every path. Differing constants lose their exact value;
+differing scratch addresses cannot be used as a proven memory base. A known bad
+DMA destination on either path remains rejected after a join, including through
+arithmetic and vector extraction of the merged value. Known negative vector
+alternatives retain their invalid sign-extended DMA result at the join. Both
+branch outcomes are analyzed conservatively, even for a constant condition. Syntax and
+protected-register policies also apply to unreachable instructions. Reachable
+fallthrough beyond the command fails; every reachable exit must use queue return
+or the modeled DMA tail. A closed loop may compile: this analysis does **not**
+prove termination. Execution qualification requires the existing bounded runner.
+
+The [canonical branch fixture](tests/rsp_asm/branch.odin) uses the scalar fixture's
+four-word ABI and initializes all 16 output bytes. It emits `31, 0, 0, 0` when
+`x != y`, and `41, 0, 0, 0` when `x == y`. The equality branch's slot defines
+`r3 = 1`; both paths add it to their respective base result (30 or 40). Replacing
+that slot with `li %r3, 0` must reduce either result by one. The local jump's slot
+performs the unequal-path addition; the DMA slot supplies zero pitch.
+
+The engine's existing `tests/n64/rspq` `make check-branch` target consumes this
+source directly. Its canonical execution variants are:
+
+| x | y | Four expected big-endian output words |
+| --- | --- | --- |
+| `0x1234` | `0x00ff` | `31, 0, 0, 0` (untaken equality branch) |
+| `0xffff` | `1` | `31, 0, 0, 0` (untaken, separate destination) |
+| `0` | `0` | `41, 0, 0, 0` (taken, after a queue/overlay continuation) |
+
+These fixtures supply compiler inputs and independent expected results; engine
+bindings, DMA destination ownership, canaries and bounded execution remain in
+that runner. No vector support is required by this command.
+
+Arbitrary calls, branch-likely instructions, indirect targets other than `jr %ra`,
+halt/break completion, FPU operations, HI/LO multiply/divide, 64-bit
+operations and other COP0 operations are unsupported. Instruction scheduling
+remains explicit; no automatic scheduler is provided.
 
 ## Validation
 
@@ -198,7 +248,7 @@ Run the public CLI regression suite with:
 python3 tests/rsp_asm/test_rsp_asm.py
 ```
 
-SDK tests compare generated and independent scalar/vector command words,
+SDK tests compare generated and independent scalar/vector/branch command words,
 relocations, common sections and scratch alignment under default, release and
 profiling settings. The [vector oracle](tests/rsp_asm/vector-reference.S) records
 reviewed machine words independently of the emitter and rexcode. Transfer checks
@@ -207,5 +257,13 @@ In COP2 transfers, `eN` denotes byte offset `2*N` in bits 10:7; arithmetic broad
 selectors use a different field and are not accepted here.
 They check the minimal descriptor/empty-state layout and SDK wrapper rule,
 exercise every admitted scalar form, and reject linked IMEM/DMEM overflow.
+Local branch displacements are checked against the signed 16-bit word range
+using expanded instruction sizes. The artifact also carries source-located
+assembler assertions that keep the command entry at the aligned SDK overlay
+boundary and check local transfer range/alignment. SDK tests inspect the linked
+descriptor, resolved jump words,
+backward branch encoding and absence of relocations, and deliberately misalign
+or move targets/entries to verify rejection. The ISA displacement range exceeds
+physical IMEM: successful emission still requires the SDK linker budget check.
 Without an installed SDK these tests explicitly skip; full validation requires it.
 ROM execution qualification belongs to the Odin64 integration tickets.

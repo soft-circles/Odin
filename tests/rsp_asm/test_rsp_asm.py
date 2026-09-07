@@ -18,6 +18,7 @@ command :: asm() {
 """
 SCALAR = (ROOT / "tests/rsp_asm/scalar.odin").read_text()
 VECTOR = (ROOT / "tests/rsp_asm/vector.odin").read_text()
+BRANCH = (ROOT / "tests/rsp_asm/branch.odin").read_text()
 
 class RspArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -83,12 +84,14 @@ class RspArtifactTests(unittest.TestCase):
         self.assertIn("sw $0, 12($20)", text)
         self.assertIn("j DMAOut", text)
 
-    def test_vectors_initialize_from_queue_zero_and_xor(self):
-        body = "vxor %v01, %v00, %v00; vxor %v31, %v01, %v00; "
-        result = self.build(MINIMAL.replace("jr %ra", body + "jr %ra"))
+    def test_conditional_command_with_meaningful_slots(self):
+        result = self.build(BRANCH)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("vxor $v01, $v00, $v00", self.output.read_text())
-        self.assertIn("vxor $v31, $v01, $v00", self.output.read_text())
+        first = self.output.read_bytes()
+        self.assertIn(b"beq $5, $6, .Lrsp_", first)
+        self.assertIn(b"j DMAOut", first)
+        self.assertEqual(self.build(BRANCH).returncode, 0)
+        self.assertEqual(self.output.read_bytes(), first)
 
     def test_element_transfers_define_only_the_selected_element(self):
         for element in range(8):
@@ -104,6 +107,15 @@ class RspArtifactTests(unittest.TestCase):
                 self.assert_rejected(source.replace("jr %ra", "vxor %v02, %v01, %v00; jr %ra"),
                                      "read before definition")
 
+
+    def test_vectors_initialize_from_queue_zero_and_xor(self):
+        body = "vxor %v01, %v00, %v00; vxor %v31, %v01, %v00; "
+        result = self.build(MINIMAL.replace("jr %ra", body + "jr %ra"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("vxor $v01, $v00, $v00", self.output.read_text())
+        self.assertIn("vxor $v31, $v01, $v00", self.output.read_text())
+
+
     def test_vector_command_initializes_scratch_and_tail_transfers(self):
         result = self.build(VECTOR)
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -114,6 +126,7 @@ class RspArtifactTests(unittest.TestCase):
         for line, instruction in enumerate(VECTOR.splitlines(), 1):
             if instruction.startswith("\t"):
                 self.assertIn(f"#line {line} ", text)
+
 
     def test_vector_register_classes_selectors_and_arity_fail_closed(self):
         for reg in range(32):
@@ -144,6 +157,7 @@ class RspArtifactTests(unittest.TestCase):
                 self.assert_rejected(MINIMAL.replace("jr %ra", "vxor " + ", ".join(operands) + "; jr %ra"),
                                      "whole-vector")
 
+
     def test_vector_effects_and_unsupported_hidden_state_fail_closed(self):
         for source in (VECTOR.replace("vxor %v01, %v00, %v00", ""),
                        VECTOR.replace("vxor %v02, %v00, %v00", "")):
@@ -163,6 +177,7 @@ class RspArtifactTests(unittest.TestCase):
         body = "; ".join(f"mtc2 %a0, %v01.e{element}" for element in range(8))
         result = self.build(MINIMAL.replace("jr %ra", body + "; nop; nop; vxor %v01, %v01, %v00; jr %ra"))
         self.assertEqual(result.returncode, 0, result.stdout)
+
 
     def test_vector_constants_truncate_sign_extend_and_preserve_other_elements(self):
         # DMA's constant extent and physical-address contracts expose value tracking
@@ -192,36 +207,10 @@ class RspArtifactTests(unittest.TestCase):
             "mtc2 %s4, %v01.e0; nop; nop; mfc2 %s4, %v01.e0; nop; nop; sw %r2, [%s4]"),
             "statically known address")
 
-    def assert_sdk_command_matches_reference(self, sdk, source, reference_name):
-        result = self.build(source)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        for flags in ((), ("-DNDEBUG",), ("-DRSPQ_PROFILE=1",)):
-            with self.subTest(flags=flags):
-                elf, reference = self.path/"command.elf", self.path/"reference.elf"
-                obj, ref_obj = self.path/"command.o", self.path/"reference.o"
-                for source, linked, unlinked in ((self.output, elf, obj),
-                        (ROOT/"tests/rsp_asm"/reference_name, reference, ref_obj)):
-                    self.run_tool(self.sdk_command(sdk, source, linked, *flags))
-                    self.run_tool(self.sdk_command(sdk, source, unlinked, "-c", *flags))
-                for section in (".text", ".data"):
-                    self.assertEqual(self.sdk_section(sdk, obj, section), self.sdk_section(sdk, ref_obj, section))
-                    self.assertEqual(self.sdk_section(sdk, elf, section), self.sdk_section(sdk, reference, section))
-                relocations = [self.sdk_relocations(sdk, artifact) for artifact in (obj, ref_obj)]
-                self.assertEqual(*relocations)
-                self.assertTrue(any("R_MIPS_LO16" in line and ".bss" in line for line in relocations[0]))
-                self.assertIn("There are no relocations", self.run_tool([str(sdk/"bin/mips64-elf-readelf"), "-r", str(elf)]))
-                symbols = self.sdk_symbols(sdk, elf)
-                reference_symbols = self.sdk_symbols(sdk, reference)
-                scratch = symbols["rspq_scratch"]
-                self.assertEqual(scratch, reference_symbols["rspq_scratch"])
-                self.assertEqual(scratch % 16, 0)
-                self.assertGreaterEqual(scratch, symbols["_data_end"])
-                self.assertLessEqual(scratch + 16, 0xa4001000)
-                self.assertLessEqual(symbols["_text_end"], 0xa4002000)
-                self.assertEqual(self.sdk_section_size(sdk, elf, ".bss"), 16)
 
     def test_sdk_vector_words_relocations_and_scratch_bounds(self):
         self.assert_sdk_command_matches_reference(self.sdk(), VECTOR, "vector-reference.S")
+
 
     def test_sdk_vector_transfer_element_bit_placement_and_register_boundaries(self):
         sdk = self.sdk()
@@ -249,6 +238,7 @@ class RspArtifactTests(unittest.TestCase):
         offset = symbols["rsp_command"] - symbols["_text_start"]
         code = self.sdk_section(sdk, elf, ".text")[offset:]
         self.assertEqual(code, bytes.fromhex(expected))
+
 
     def test_word_loads_and_constant_scratch_offsets(self):
         body = """la %t2, rspq_scratch
@@ -355,21 +345,158 @@ class RspArtifactTests(unittest.TestCase):
         for transfer in ("jal DMAOut", "j DMAOutAsync", "j DMAExec", "j command", "jr %s0",
                          "j %s0", "halt", "break", "beq %a1, %a2, DMAOut"):
             self.assert_rejected(SCALAR.replace("j DMAOut", transfer))
-        self.assert_rejected(SCALAR.replace("j DMAOut\n\tnop", "j DMAOut\n\tli %t0, 15"), "delay slot")
+        self.assert_rejected(SCALAR.replace("j DMAOut\n\tnop", "j DMAOut\n\tli %t0, 16"), "byte count")
         # Initializing only the first half permits exactly that fixed DMA extent.
         half = SCALAR.replace("sw %zero, [%s4 + 8]", "").replace("sw %zero, [%s4 + 12]", "").replace("li %t0, 15", "li %t0, 7")
         result = self.build(half)
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_only_final_transfer_with_nop_delay_slot_is_supported(self):
-        for body in ("jr %ra; ori %t0, %zero, 1;",
-                     "j .done; nop; .done: jr %ra; nop;",
-                     "jr %ra; nop; nop;", ".entry: jr %ra; nop;"):
+    def command_body(self, body, scratch=0):
+        return MINIMAL.replace("words=1", f"words=1, rspq_scratch_bytes={scratch}").replace("jr %ra\n    nop", body)
+
+    def test_local_forward_backward_and_scoped_labels(self):
+        cases = (
+            "j .done; nop; .done: jr %ra; addiu %r2, %zero, 1",
+            ".entry: li %r2, 2; .loop: addiu %r2, %r2, -1; bne %r2, %zero, .loop; nop; jr %ra; nop",
+            "beq %a0, %zero, .done; li %r2, 1; addiu %r2, %r2, 1; .done: jr %ra; move %r3, %r2",
+            # A closed loop is safe at its exits; static checking does not prove termination.
+            ".loop: j .loop; nop",
+            # Local names cannot collide with wrapper symbols or unit constants.
+            "j .rspq_scratch; nop; .rspq_scratch: j .DMAOut; nop; .DMAOut: jr %ra; nop",
+        )
+        for body in cases:
             with self.subTest(body=body):
-                result = self.build("package overlay\n@(rspq_command_words=1)\ncommand :: asm() { " + body + " }\n")
-                self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn("command.odin", result.stdout)
-                self.assertFalse(self.output.exists())
+                result = self.build(self.command_body(body))
+                self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_labels_and_delayed_transfers_fail_closed(self):
+        cases = (
+            (".same: nop; .same: jr %ra; nop", "Duplicate RSP label"),
+            ("j .missing; nop", "Unresolved RSP label"),
+            ("beq %a0, %zero, .end; nop; jr %ra; nop; .end:", "outside the command"),
+            ("j rspq_scratch; nop", "scoped .label"),
+            ("j command; nop", "scoped .label"),
+            ("j 4; nop", "scoped .label"),
+            ("j (.done + 2); nop; .done: jr %ra; nop", None),
+            ("beq %a0, %zero, DMAOut; nop; jr %ra; nop", "scoped .label"),
+            ("jr %ra", "explicit delay slot"),
+            ("beq %a0, %zero, .entry; .entry:", "explicit delay slot"),
+            ("j .end; jr %ra; .end: jr %ra; nop", "delay slot"),
+            ("jr %ra; li %r2, 0x12345678", "multi-instruction expansion"),
+            ("j .slot; .slot: nop; jr %ra; nop", "target a delay slot"),
+            ("jal DMAOut; nop", "Unsupported"),
+            ("jalr %ra, %r2; nop", "Unsupported"),
+            ("jr %a0; nop", "inherited queue return"),
+            ("j %a0; nop", "scoped .label"),
+            ("nop", "fallthrough"),
+            (".loop: bne %a0, %zero, .loop; nop", "fallthrough"),
+            ("beql %a0, %zero, .done; nop; .done: jr %ra; nop", "Unsupported"),
+        )
+        for body, diagnostic in cases:
+            with self.subTest(body=body):
+                self.assert_rejected(self.command_body(body), diagnostic)
+
+    def test_delay_reads_precede_transfer_and_joins_require_all_definitions(self):
+        self.assert_rejected(self.command_body(
+            "beq %r2, %zero, .done; li %r2, 1; .done: jr %ra; nop"), "read before definition")
+        self.assert_rejected(self.command_body(
+            "beq %a0, %zero, .done; nop; li %r2, 1; .done: jr %ra; move %r3, %r2"), "read before definition")
+        self.assert_rejected(self.command_body(
+            "li %r2, 1; .loop: move %r3, %t0; li %t0, 1; bne %r2, %zero, .loop; nop; jr %ra; nop"), "read before definition")
+        for reg in ("gp", "r28", "ra", "r31", "sp", "r29"):
+            for body in (f"jr %ra; li %{reg}, 0",
+                         f"beq %a0, %zero, .done; nop; li %{reg}, 0; .done: jr %ra; nop",
+                         f"j .done; nop; li %{reg}, 0; .done: jr %ra; nop"):
+                with self.subTest(body=body):
+                    self.assert_rejected(self.command_body(body))
+        self.assert_rejected(self.command_body("jr %ra; move %r2, %sp"), "stack pointer")
+
+    def test_scratch_join_and_memory_delay_slots(self):
+        body = """la %s4, rspq_scratch
+    beq %a0, %zero, .other
+    sw %zero, [%s4]
+    li %r2, 1
+    j .join
+    sw %r2, [%s4 + 4]
+.other:
+    li %r2, 2
+    sw %r2, [%s4 + 4]
+.join:
+    lw %r3, [%s4 + 4]
+    jr %ra
+    lw %r2, [%s4]"""
+        result = self.build(self.command_body(body, 16))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assert_rejected(self.command_body(body.replace("sw %zero, [%s4]", "nop"), 16), "uninitialized scratch")
+        self.assert_rejected(self.command_body(body.replace("li %r2, 2\n    sw %r2, [%s4 + 4]", "nop"), 16), "uninitialized scratch")
+        self.assert_rejected(self.command_body(body.replace("li %r2, 2", "li %r2, 2; addiu %s4, %s4, 4"), 16), "statically known address")
+        # Backedges must not retain a constant scratch address from only the first iteration.
+        self.assert_rejected(self.command_body(
+            "la %s4, rspq_scratch; .loop: sw %zero, [%s4]; addiu %s4, %s4, 4; bne %a0, %zero, .loop; nop; jr %ra; nop", 16), "statically known address")
+
+    def test_dma_uses_post_slot_facts_on_every_path(self):
+        for source in (SCALAR.replace("li %t1, 0", "").replace("j DMAOut\n\tnop", "j DMAOut\n\tli %t1, 0"),
+                       SCALAR.replace("sw %zero, [%s4 + 12]", "").replace("j DMAOut\n\tnop", "j DMAOut\n\tsw %zero, [%s4 + 12]")):
+            result = self.build(source)
+            self.assertEqual(result.returncode, 0, result.stdout)
+        self.assert_rejected(BRANCH.replace("li %t1, 0", "li %t0, 7"), "read before definition")
+        self.assert_rejected(BRANCH.replace("li %t1, 0", "addiu %s4, %s4, 8"), "read before definition")
+        # Different defined values remain initialized, but are no longer a known DMA size.
+        source = SCALAR.replace("li %t0, 15", "beq %a1, %a2, .size; li %t0, 15; li %t0, 7; .size:")
+        self.assert_rejected(source, "constant single-row")
+
+    def test_dma_join_cannot_hide_a_known_invalid_destination(self):
+        for invalid in ("li %s0, 3", "li %s0, 0x80000000", "move %s0, %s4"):
+            for identity in ("nop", "ori %s0, %s0, 0", "addiu %s0, %s0, 0", "addu %s0, %zero, %s0"):
+                for delayed in (False, True):
+                    source = SCALAR.replace("move %s0, %a3",
+                        f"beq %a1, %a2, .address; move %s0, %a3; {invalid}; .address:")
+                    source = source.replace("j DMAOut\n\tnop", f"j DMAOut\n\t{identity}" if delayed else f"{identity}; j DMAOut\n\tnop")
+                    with self.subTest(invalid=invalid, identity=identity, delayed=delayed):
+                        self.assert_rejected(source, "physical RDRAM")
+
+    def test_vector_delay_slots_define_elements_on_both_outcomes(self):
+        body = "beq %a0, %zero, .done; mtc2 %a0, %v31.e7; nop; .done: nop; nop; mfc2 %r2, %v31.e7; jr %ra; nop"
+        result = self.build(self.command_body(body))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assert_rejected(self.command_body(body.replace("mfc2 %r2, %v31.e7", "vxor %v02, %v31, %v00")), "read before definition")
+        whole = body.replace("mtc2 %a0, %v31.e7", "vxor %v31, %v00, %v00").replace("mfc2 %r2, %v31.e7", "vxor %v02, %v31, %v00")
+        self.assertEqual(self.build(self.command_body(whole)).returncode, 0)
+        self.assert_rejected(self.command_body("beq %r2, %zero, .done; mfc2 %r2, %v00.e0; .done: jr %ra; nop"), "read before definition")
+        for reg in ("gp", "r28", "ra", "r31", "sp", "r29"):
+            self.assert_rejected(self.command_body(f"jr %ra; mfc2 %{reg}, %v00.e0"))
+
+    def test_vector_definitions_and_values_join_per_element(self):
+        body = "beq %a0, %zero, .other; nop; mtc2 %a0, %v01.e0; j .join; nop; .other: mtc2 %a0, %v01.e7; .join: nop; nop; jr %ra; mfc2 %r2, %v01.e0"
+        self.assert_rejected(self.command_body(body), "read before definition")
+        defined = body.replace("mtc2 %a0, %v01.e7", "mtc2 %a0, %v01.e0")
+        self.assertEqual(self.build(self.command_body(defined)).returncode, 0)
+        setup = "li %r2, 15; mtc2 %r2, %v01.e7; beq %a1, %a2, .size; nop; li %r2, 7; mtc2 %r2, %v01.e7; .size: nop; nop; mfc2 %t0, %v01.e7; nop; nop"
+        self.assert_rejected(SCALAR.replace("li %t0, 15", setup), "constant single-row")
+        self.assertEqual(self.build(SCALAR.replace("li %t0, 15", setup.replace("li %r2, 7", "li %r2, 15"))).returncode, 0)
+        loop = "vxor %v01, %v00, %v00; nop; nop; .loop: bne %a0, %zero, .loop; mtc2 %a0, %v01.e7; nop; nop; jr %ra; mfc2 %r2, %v01.e7"
+        self.assertEqual(self.build(self.command_body(loop)).returncode, 0)
+
+    def test_vector_transfer_does_not_erase_bad_dma_join_evidence(self):
+        source = SCALAR.replace("move %s0, %a3",
+            "beq %a1, %a2, .address; move %s0, %a3; li %s0, 3; .address: mtc2 %s0, %v01.e0; nop; nop; mfc2 %s0, %v01.e0; nop; nop")
+        self.assert_rejected(source, "physical RDRAM")
+
+    def test_vector_join_preserves_invalid_sign_extended_dma_destination(self):
+        for value, valid in ((0x8000, False), (0x7ff8, True)):
+            for delayed in (False, True):
+                setup = f"beq %a1, %a2, .other; nop; li %r2, {value}; mtc2 %r2, %v01.e0; j .joined; nop; .other: mtc2 %zero, %v01.e0; .joined: nop; nop"
+                source = SCALAR.replace("move %s0, %a3", setup)
+                if delayed:
+                    source = source.replace("j DMAOut\n\tnop", "j DMAOut\n\tmfc2 %s0, %v01.e0")
+                else:
+                    source = source.replace("j DMAOut", "mfc2 %s0, %v01.e0; nop; nop; j DMAOut")
+                with self.subTest(value=value, delayed=delayed):
+                    if valid:
+                        result = self.build(source)
+                        self.assertEqual(result.returncode, 0, result.stdout)
+                    else:
+                        self.assert_rejected(source, "physical RDRAM")
 
     def test_metadata_and_source_domain_fail_closed(self):
         cases = [
@@ -516,6 +643,34 @@ class RspArtifactTests(unittest.TestCase):
                 f"-I{sdk}/mips64-elf/include", f"-L{sdk}/mips64-elf/lib", "-nostartfiles",
                 "-Wl,-Trsp.ld", "-Wl,--gc-sections", *flags, str(source), "-o", str(target)]
 
+    def assert_sdk_command_matches_reference(self, sdk, source, reference_name):
+        result = self.build(source)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for flags in ((), ("-DNDEBUG",), ("-DRSPQ_PROFILE=1",)):
+            with self.subTest(flags=flags):
+                elf, reference = self.path/"scalar.elf", self.path/"reference.elf"
+                obj, ref_obj = self.path/"scalar.o", self.path/"reference.o"
+                for source, linked, unlinked in ((self.output, elf, obj),
+                        (ROOT/"tests/rsp_asm"/reference_name, reference, ref_obj)):
+                    self.run_tool(self.sdk_command(sdk, source, linked, *flags))
+                    self.run_tool(self.sdk_command(sdk, source, unlinked, "-c", *flags))
+                for section in (".text", ".data"):
+                    self.assertEqual(self.sdk_section(sdk, obj, section), self.sdk_section(sdk, ref_obj, section))
+                    self.assertEqual(self.sdk_section(sdk, elf, section), self.sdk_section(sdk, reference, section))
+                relocations = [self.sdk_relocations(sdk, artifact) for artifact in (obj, ref_obj)]
+                self.assertEqual(*relocations)
+                self.assertTrue(any("R_MIPS_LO16" in line and ".bss" in line for line in relocations[0]))
+                self.assertIn("There are no relocations", self.run_tool([str(sdk/"bin/mips64-elf-readelf"), "-r", str(elf)]))
+                symbols = self.sdk_symbols(sdk, elf)
+                reference_symbols = self.sdk_symbols(sdk, reference)
+                scratch = symbols["rspq_scratch"]
+                self.assertEqual(scratch, reference_symbols["rspq_scratch"])
+                self.assertEqual(scratch % 16, 0)
+                self.assertGreaterEqual(scratch, symbols["_data_end"])
+                self.assertLessEqual(scratch + 16, 0xa4001000)
+                self.assertLessEqual(symbols["_text_end"], 0xa4002000)
+                self.assertEqual(self.sdk_section_size(sdk, elf, ".bss"), 16)
+
     def test_sdk_scalar_words_relocations_and_scratch_bounds(self):
         sdk = self.sdk()
         self.assert_sdk_command_matches_reference(sdk, SCALAR, "scalar-reference.S")
@@ -527,6 +682,90 @@ class RspArtifactTests(unittest.TestCase):
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("will not fit in region", result.stdout)
+
+    def test_sdk_conditional_words_targets_and_relocations(self):
+        sdk = self.sdk()
+        self.assert_sdk_command_matches_reference(sdk, BRANCH, "branch-reference.S")
+        elf = self.path/"scalar.elf"
+        symbols = self.sdk_symbols(sdk, elf)
+        entry = symbols["rsp_command"]
+        offset = entry - symbols["_text_start"]
+        self.assertEqual(offset % 4, 0)
+        self.assertTrue(0 <= offset <= 4092)
+        words = struct.unpack(">16I", self.sdk_section(sdk, elf, ".text")[offset:offset+64])
+        self.assertEqual(words[1], 0x10a60003)  # BEQ: target is instruction 5.
+        self.assertEqual(words[2], 0x24030001)  # Meaningful slot: r3 = 1 on both paths.
+        self.assertEqual(words[3] >> 26, 2)    # J: target is instruction 7.
+        self.assertEqual((words[3] & 0x3ffffff) * 4, (entry+28) & 0xfffffff)
+        self.assertEqual(words[4], 0x00431021) # Jump slot adds the independently defined 1.
+        self.assertEqual((words[14] & 0x3ffffff) * 4, symbols["DMAOut"] & 0xfffffff)
+        self.assertEqual(words[15], 0x24090000)
+        data = self.sdk_section(sdk, elf, ".data")
+        table = symbols["_RSPQ_OVERLAY_COMMAND_TABLE"] - symbols["_data_start"]
+        descriptor, terminator = struct.unpack_from(">HH", data, table)
+        self.assertEqual(descriptor, (4 << 10) | (offset // 4))
+        self.assertEqual(terminator, 0)
+
+    def test_sdk_backward_branch_and_expanded_pseudo_offsets(self):
+        sdk = self.sdk()
+        body = "li %r2, 2; .loop: li %r3, 0x12345678; addiu %r2, %r2, -1; bne %r2, %zero, .loop; ori %r3, %zero, 7; jr %ra; nop"
+        result = self.build(self.command_body(body))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        elf = self.path/"backward.elf"
+        self.run_tool(self.sdk_command(sdk, self.output, elf))
+        symbols = self.sdk_symbols(sdk, elf)
+        offset = symbols["rsp_command"] - symbols["_text_start"]
+        expected = bytes.fromhex("24020002 3c031234 34635678 2442ffff 1440fffc 34030007 03e00008 00000000")
+        self.assertEqual(self.sdk_section(sdk, elf, ".text")[offset:offset+len(expected)], expected)
+
+    def test_sdk_vector_slots_keep_branch_and_transfer_word_positions(self):
+        sdk = self.sdk()
+        body = "beq %a0, %zero, .done; mtc2 %a0, %v01.e7; nop; .done: nop; nop; jr %ra; mfc2 %r2, %v01.e7"
+        result = self.build(self.command_body(body))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        elf = self.path/"vector-slots.elf"
+        self.run_tool(self.sdk_command(sdk, self.output, elf))
+        symbols = self.sdk_symbols(sdk, elf)
+        offset = symbols["rsp_command"] - symbols["_text_start"]
+        # BEQ skips one ordinary nop, MTC2/MFC2 use vector1 byte14 (element7).
+        expected = bytes.fromhex("10800002 48840f00 00000000 00000000 00000000 03e00008 48020f00")
+        self.assertEqual(self.sdk_section(sdk, elf, ".text")[offset:offset+len(expected)], expected)
+
+    def test_branch_displacement_limits_are_source_located(self):
+        # The ISA range is wider than IMEM. Frontend emission checks encodability;
+        # SDK linking separately enforces the physical 4 KiB budget.
+        for count, valid in ((32766, True), (32767, False)):
+            source = self.command_body("beq %a0, %zero, .end; nop; " + "nop\n" * count + ".end: jr %ra; nop")
+            if valid:
+                result = self.build(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            else:
+                self.assert_rejected(source, "branch displacement")
+        for count, valid in ((32767, True), (32768, False)):
+            source = self.command_body(".start: " + "nop\n" * count + "bne %a0, %zero, .start; nop; jr %ra; nop")
+            if valid:
+                result = self.build(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            else:
+                self.assert_rejected(source, "branch displacement")
+
+    def test_sdk_rejects_misaligned_targets_and_bad_entry_with_source_diagnostics(self):
+        sdk = self.sdk()
+        self.assertEqual(self.build(BRANCH).returncode, 0)
+        original = self.output.read_text()
+        mutations = (
+            original.replace(".Lrsp_5:", ".byte 0\n.Lrsp_5:"),
+            original.replace("rsp_command:\n", ".byte 0\nrsp_command:\n"),
+            original.replace("rsp_command:\n", ".space 4096\nrsp_command:\n"),
+        )
+        for source in mutations:
+            with self.subTest(source=source):
+                self.output.write_text(source)
+                result = subprocess.run(self.sdk_command(sdk, self.output, self.path/"bad.elf"),
+                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("command.odin:", result.stdout)
+                self.assertIn("RSP", result.stdout)
 
     def test_sdk_every_scalar_form_and_literal_expansion(self):
         sdk = self.sdk()
