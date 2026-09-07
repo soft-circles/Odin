@@ -1,4 +1,5 @@
 // Isolated queue-overlay domain: Odin AST and integers, no CPU checker or LLVM.
+#include <deque>
 #include <map>
 #include <set>
 #include <sstream>
@@ -119,7 +120,13 @@ enum RspValueKind { RspUndefined, RspUnknown, RspConstant, RspScratch };
 struct RspValue {
 	RspValueKind kind = RspUndefined;
 	i64 value = 0;
+	// A join must not disguise a known bad DMA destination as caller-owned input.
+	bool invalid_dma_address = false;
 };
+static bool rsp_invalid_dma_address(RspValue value) {
+	return value.invalid_dma_address || value.kind == RspScratch ||
+	       (value.kind == RspConstant && (value.value > 0xffffff || value.value % 8));
+}
 struct RspEffects {
 	RspValue registers[32] = {};
 	std::vector<RspValue> scratch;
@@ -157,7 +164,11 @@ static RspValue rsp_binary_value(RspScalarOperation operation, RspValue left, Rs
 			if (offset >= -4096 && offset <= 4096) return {RspScratch, offset};
 		}
 	}
-	if (left.kind != RspConstant || right.kind != RspConstant) return {RspUnknown, 0};
+	if (left.kind != RspConstant || right.kind != RspConstant) {
+		bool invalid_address = left.invalid_dma_address || right.invalid_dma_address ||
+		                       left.kind == RspScratch || right.kind == RspScratch;
+		return {RspUnknown, 0, invalid_address};
+	}
 	u32 a = u32(left.value), b = u32(right.value);
 	if (operation == RspAdd) return {RspConstant, u32(a+b)};
 	if (operation == RspAnd) return {RspConstant, a & b};
@@ -204,95 +215,208 @@ static RspValue rsp_materialize(RspScalarForm form, int dest, i64 immediate, std
 	}
 	return {RspConstant, bits};
 }
-static bool rsp_scalar(RspUnit &unit, RspEffects &state, Ast *node, std::ostringstream &out) {
-	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
-	auto operands = node->AsmInstruction.operands;
-	auto form = rsp_scalar_form(name);
-	if (!form) { error(node, "Unsupported RSP scalar instruction or transfer"); return false; }
-	if (operands.count != form->operands) { error(node, "RSP %s requires %d operands", name.c_str(), form->operands); return false; }
-	int dest = rsp_gpr(operands[0]);
-	RspValue result = {RspUnknown, 0};
-	if (form->form == RspLiteral || form->form == RspUpper) {
-		i64 immediate = 0;
-		if (!rsp_integer(unit, operands[1], form->minimum, form->maximum, &immediate)) return false;
-		result = rsp_materialize(form->form, dest, immediate, out);
-	} else {
-		int source = rsp_gpr(operands[1]);
-		auto left = rsp_read(state, operands[1], source);
-		if (form->form == RspMove) {
-			out << "    addu $" << dest << ", $" << source << ", $0\n";
-			result = left;
-		} else if (form->form == RspRegisterBinary) {
-			int other = rsp_gpr(operands[2]);
-			auto right = rsp_read(state, operands[2], other);
-			out << "    " << name << " $" << dest << ", $" << source << ", $" << other << "\n";
-			result = rsp_binary_value(form->operation, left, right);
-		} else {
-			i64 immediate = 0;
-			if (!rsp_integer(unit, operands[2], form->minimum, form->maximum, &immediate)) return false;
-			out << "    " << name << " $" << dest << ", $" << source << ", " << immediate << "\n";
-			result = rsp_binary_value(form->operation, left, {RspConstant, u32(immediate)});
-		}
-	}
-	rsp_write(state, operands[0], dest, result);
-	return true;
-}
-static bool rsp_address(RspEffects &state, Ast *node, std::ostringstream &out) {
-	auto operands = node->AsmInstruction.operands;
-	if (operands.count != 2) { error(node, "RSP la requires a destination and rspq_scratch"); return false; }
-	int dest = rsp_gpr(operands[0]);
-	if (operands[1]->kind != Ast_Ident || operands[1]->Ident.token.string != "rspq_scratch" || state.scratch.empty()) {
-		error(operands[1], "RSP la requires declared rspq_scratch; CPU addresses and other relocations are unsupported"); return false;
-	}
-	rsp_write(state, operands[0], dest, {RspScratch, 0});
-	out << "    ori $" << dest << ", $0, %lo(rspq_scratch)\n";
-	return true;
-}
-struct RspMemory {
-	int base = -1;
-	i64 displacement = 0;
-	size_t word = 0;
+// Decode once, then use the same instruction effects on ordinary and delayed paths.
+// Local labels index instructions, never CPU entities or assembler-supplied symbols.
+enum RspInstructionKind { RspScalar, RspAddress, RspLoad, RspStore, RspNop,
+                          RspEqual, RspNotEqual, RspJump, RspReturn, RspDma };
+struct RspInstruction {
+	Ast *node = nullptr;
+	RspInstructionKind kind = RspNop;
+	RspScalarInstruction const *scalar = nullptr;
+	int dest = -1, left = -1, right = -1;
+	i64 immediate = 0;
+	size_t target = 0;
+	size_t offset = 0;
+	int words = 1;
+	bool slot = false;
 };
-static bool rsp_memory_operand(RspUnit &unit, RspEffects const &state, Ast *node, RspMemory *memory) {
+struct RspProgram {
+	std::vector<RspInstruction> instructions;
+	std::map<std::string, size_t> labels;
+};
+static bool rsp_is_conditional(RspInstruction const &instruction) {
+	return instruction.kind == RspEqual || instruction.kind == RspNotEqual;
+}
+static bool rsp_is_transfer(RspInstruction const &instruction) {
+	return instruction.kind >= RspEqual;
+}
+static bool rsp_destination(Ast *node, int *reg) {
+	*reg = rsp_gpr(node);
+	if (*reg == 28 || *reg == 31) {
+		error(node, "RSP queue commands cannot modify gp/r28 or ra/r31"); return false;
+	}
+	return *reg >= 0 && *reg != 29;
+}
+static bool rsp_decode_memory(RspUnit &unit, Ast *node, RspInstruction *instruction) {
 	if (node->kind != Ast_AsmMemoryOperand) { error(node, "RSP word memory requires [base + constant]"); return false; }
 	auto &operand = node->AsmMemoryOperand;
 	if (operand.segment_override || operand.scale || operand.disp || operand.type) {
 		error(node, "RSP word memory has no segment, index, scale, extra displacement or type"); return false;
 	}
-	memory->base = rsp_gpr(operand.base);
-	auto base = rsp_read(state, operand.base, memory->base);
+	instruction->left = rsp_gpr(operand.base);
 	if (operand.index) {
 		bool subtract = operand.index_op.kind == Token_Sub;
-		if (!rsp_integer(unit, operand.index, subtract ? -32767 : -32768, subtract ? 32768 : 32767, &memory->displacement)) return false;
-		if (subtract) memory->displacement = -memory->displacement;
+		if (!rsp_integer(unit, operand.index, subtract ? -32767 : -32768, subtract ? 32768 : 32767, &instruction->immediate)) return false;
+		if (subtract) instruction->immediate = -instruction->immediate;
 	}
-	if (base.kind != RspScratch) {
-		error(node, "RSP word memory requires a statically known address within declared rspq_scratch"); return false;
+	return !any_errors();
+}
+static bool rsp_decode_instruction(RspUnit &unit, i64 scratch, RspInstruction *instruction) {
+	Ast *node = instruction->node;
+	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
+	auto operands = node->AsmInstruction.operands;
+	int count = 0;
+	if (name == "nop") instruction->kind = RspNop;
+	else if (name == "beq" || name == "bne") { instruction->kind = name == "beq" ? RspEqual : RspNotEqual; count = 3; }
+	else if (name == "j") { instruction->kind = RspJump; count = 1; }
+	else if (name == "jr") { instruction->kind = RspReturn; count = 1; }
+	else if (name == "la") { instruction->kind = RspAddress; count = 2; }
+	else if (name == "lw" || name == "sw") { instruction->kind = name == "lw" ? RspLoad : RspStore; count = 2; }
+	else {
+		instruction->scalar = rsp_scalar_form(name);
+		if (!instruction->scalar) { error(node, "Unsupported RSP scalar instruction or transfer"); return false; }
+		instruction->kind = RspScalar;
+		count = instruction->scalar->operands;
 	}
-	i64 offset = base.value + memory->displacement;
-	if (offset % 4) { error(node, "RSP word memory address must be 4-byte aligned"); return false; }
-	if (offset < 0 || offset + 4 > i64(state.scratch.size()*4)) {
-		error(node, "RSP word memory exceeds declared scratch"); return false;
+	if (operands.count != count) { error(node, "RSP %s requires %d operands", name.c_str(), count); return false; }
+	if (instruction->kind == RspNop) return true;
+	if (rsp_is_conditional(*instruction)) {
+		instruction->left = rsp_gpr(operands[0]);
+		instruction->right = rsp_gpr(operands[1]);
+		return !any_errors(); // Targets resolve after the complete local label inventory.
 	}
-	memory->word = size_t(offset/4);
+	if (instruction->kind == RspJump) {
+		if (operands[0]->kind == Ast_Ident && operands[0]->Ident.token.string == "DMAOut") instruction->kind = RspDma;
+		return true;
+	}
+	if (instruction->kind == RspReturn) {
+		if (rsp_gpr(operands[0]) != 31) { error(node, "RSP indirect transfer requires inherited queue return jr %%ra"); return false; }
+		return !any_errors();
+	}
+	if (instruction->kind == RspStore) instruction->dest = rsp_gpr(operands[0]);
+	else if (!rsp_destination(operands[0], &instruction->dest)) return false;
+	if (instruction->kind == RspLoad || instruction->kind == RspStore)
+		return rsp_decode_memory(unit, operands[1], instruction);
+	if (instruction->kind == RspAddress) {
+		if (!scratch || operands[1]->kind != Ast_Ident || operands[1]->Ident.token.string != "rspq_scratch") {
+			error(operands[1], "RSP la requires declared rspq_scratch; CPU addresses and other relocations are unsupported"); return false;
+		}
+		return true;
+	}
+	auto form = instruction->scalar;
+	if (form->form == RspLiteral || form->form == RspUpper) {
+		if (!rsp_integer(unit, operands[1], form->minimum, form->maximum, &instruction->immediate)) return false;
+		if (form->form == RspLiteral && (instruction->immediate < -32768 || instruction->immediate > 65535)) instruction->words = 2;
+	} else {
+		instruction->left = rsp_gpr(operands[1]);
+		if (form->form == RspRegisterBinary) instruction->right = rsp_gpr(operands[2]);
+		else if (form->form == RspImmediateBinary && !rsp_integer(unit, operands[2], form->minimum, form->maximum, &instruction->immediate)) return false;
+	}
+	return !any_errors();
+}
+static bool rsp_resolve_target(RspProgram const &program, RspInstruction *instruction) {
+	auto operands = instruction->node->AsmInstruction.operands;
+	Ast *target = operands[operands.count-1];
+	if (target->kind != Ast_AsmLabelDecl) {
+		error(target, "RSP branch target must be a scoped .label in this command (not scratch, CPU code or a helper)"); return false;
+	}
+	auto name = rsp_string(target->AsmLabelDecl.name->Ident.token.string);
+	auto found = program.labels.find(name);
+	if (found == program.labels.end()) { error(target, "Unresolved RSP label .%s", name.c_str()); return false; }
+	if (found->second == program.instructions.size()) { error(target, "RSP branch target is outside the command"); return false; }
+	instruction->target = found->second;
+	auto const &destination = program.instructions[instruction->target];
+	if (destination.slot) { error(target, "RSP branch cannot target a delay slot"); return false; }
+	i64 displacement = i64(destination.offset) - i64(instruction->offset + 4);
+	if (instruction->kind != RspJump && (displacement < -32768*4 || displacement > 32767*4)) {
+		error(target, "RSP branch displacement must fit a signed 16-bit word offset"); return false;
+	}
 	return true;
 }
-static bool rsp_memory(RspUnit &unit, RspEffects &state, Ast *node, std::ostringstream &out) {
-	auto operands = node->AsmInstruction.operands;
-	if (operands.count != 2) { error(node, "RSP lw/sw requires a GPR and [base + constant]"); return false; }
-	int reg = rsp_gpr(operands[0]);
-	RspMemory memory;
-	if (!rsp_memory_operand(unit, state, operands[1], &memory)) return false;
-	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
-	if (name == "sw") {
-		state.scratch[memory.word] = rsp_read(state, operands[0], reg);
-	} else {
-		auto value = state.scratch[memory.word];
-		if (value.kind == RspUndefined) { error(node, "RSP load reads uninitialized scratch"); return false; }
-		rsp_write(state, operands[0], reg, value);
+static bool rsp_collect_instructions(RspUnit &unit, Ast *entry, i64 scratch, RspProgram *program) {
+	size_t offset = 0;
+	for (auto node : entry->AsmTemplate.instructions) {
+		if (node->kind == Ast_AsmLabelDecl) {
+			auto name = rsp_string(node->AsmLabelDecl.name->Ident.token.string);
+			if (!program->labels.emplace(name, program->instructions.size()).second) {
+				error(node, "Duplicate RSP label .%s", name.c_str()); return false;
+			}
+			continue;
+		}
+		if (node->kind != Ast_AsmInstruction) { error(node, "RSP directives are unsupported"); return false; }
+		RspInstruction instruction;
+		instruction.node = node;
+		instruction.offset = offset;
+		if (!rsp_decode_instruction(unit, scratch, &instruction)) return false;
+		offset += size_t(instruction.words*4);
+		program->instructions.push_back(instruction);
 	}
-	out << "    " << name << " $" << reg << ", " << memory.displacement << "($" << memory.base << ")\n";
+	if (program->instructions.empty()) { error(entry, "RSP command requires an explicit queue continuation"); return false; }
 	return true;
+}
+static bool rsp_check_delay_slots(RspProgram &program) {
+	auto &instructions = program.instructions;
+	for (size_t i = 0; i < instructions.size(); i++) {
+		if (!rsp_is_transfer(instructions[i])) continue;
+		if (i+1 == instructions.size()) { error(instructions[i].node, "RSP transfer requires an explicit delay slot"); return false; }
+		auto &slot = instructions[i+1];
+		if (rsp_is_transfer(slot) || slot.words != 1) {
+			error(slot.node, "RSP delay slot must be one instruction with no transfer or multi-instruction expansion"); return false;
+		}
+		slot.slot = true;
+	}
+	return true;
+}
+static bool rsp_decode_program(RspUnit &unit, Ast *entry, i64 scratch, RspProgram *program) {
+	if (!rsp_collect_instructions(unit, entry, scratch, program) || !rsp_check_delay_slots(*program)) return false;
+	for (auto &instruction : program->instructions) {
+		if ((rsp_is_conditional(instruction) || instruction.kind == RspJump) &&
+		    !rsp_resolve_target(*program, &instruction)) return false;
+	}
+	return true;
+}
+static bool rsp_word_address(RspEffects const &state, RspInstruction const &instruction, size_t *word) {
+	auto base = rsp_read(state, instruction.node, instruction.left);
+	if (base.kind != RspScratch) {
+		error(instruction.node, "RSP word memory requires a statically known address within declared rspq_scratch"); return false;
+	}
+	i64 offset = base.value + instruction.immediate;
+	if (offset % 4) { error(instruction.node, "RSP word memory address must be 4-byte aligned"); return false; }
+	if (offset < 0 || offset + 4 > i64(state.scratch.size()*4)) {
+		error(instruction.node, "RSP word memory exceeds declared scratch"); return false;
+	}
+	*word = size_t(offset/4);
+	return true;
+}
+static bool rsp_apply_instruction(RspEffects &state, RspInstruction const &instruction) {
+	Ast *node = instruction.node;
+	RspValue result = {RspUnknown, 0};
+	if (instruction.kind == RspNop) return true;
+	if (instruction.kind == RspAddress) result = {RspScratch, 0};
+	else if (instruction.kind == RspLoad || instruction.kind == RspStore) {
+		size_t word = 0;
+		if (!rsp_word_address(state, instruction, &word)) return false;
+		if (instruction.kind == RspStore) {
+			state.scratch[word] = rsp_read(state, node, instruction.dest);
+			return !any_errors();
+		}
+		result = state.scratch[word];
+		if (result.kind == RspUndefined) { error(node, "RSP load reads uninitialized scratch"); return false; }
+	} else {
+		auto form = instruction.scalar;
+		if (form->form == RspUpper) result = {RspConstant, u32(instruction.immediate) << 16};
+		else if (form->form == RspLiteral) result = {RspConstant, u32(instruction.immediate)};
+		else {
+			auto left = rsp_read(state, node, instruction.left);
+			if (form->form == RspMove) result = left;
+			else {
+				auto right = form->form == RspRegisterBinary ? rsp_read(state, node, instruction.right) : RspValue{RspConstant, u32(instruction.immediate)};
+				result = rsp_binary_value(form->operation, left, right);
+			}
+		}
+	}
+	rsp_write(state, node, instruction.dest, result);
+	return !any_errors();
 }
 static bool rsp_dma_out(RspEffects &state, Ast *node) {
 	// Pinned rsp_dma.inc reads t1 even for height=1, then destroys at/t2 and adjusts s4.
@@ -305,7 +429,7 @@ static bool rsp_dma_out(RspEffects &state, Ast *node) {
 	    address.value + size.value + 1 > i64(state.scratch.size()*4)) {
 		error(node, "DMAOut requires an 8-byte-aligned extent within declared scratch in s4"); return false;
 	}
-	if (rdram.kind == RspScratch || (rdram.kind == RspConstant && (rdram.value > 0xffffff || rdram.value % 8))) {
+	if (rsp_invalid_dma_address(rdram)) {
 		error(node, "DMAOut s0 must be an aligned physical RDRAM address, not a scratch address"); return false;
 	}
 	for (i64 offset = address.value; offset < address.value + size.value + 1; offset += 4) {
@@ -316,46 +440,139 @@ static bool rsp_dma_out(RspEffects &state, Ast *node) {
 	state.registers[1] = state.registers[10] = state.registers[20] = {RspUnknown, 0};
 	return true;
 }
-static bool rsp_transfer(RspEffects &state, Ast *node, std::ostringstream &out) {
-	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
-	auto operands = node->AsmInstruction.operands;
-	if (name == "jr" && operands.count == 1 && rsp_gpr(operands[0]) == 31) {
-		rsp_read(state, operands[0], 31);
-		out << "    jr $31\n";
-		return true;
+// The meet only loses facts. Undefined on either path is undefined at the join;
+// differing defined values remain defined but lose constant/address provenance.
+static bool rsp_merge_value(RspValue *value, RspValue incoming) {
+	RspValue merged = *value;
+	if (value->kind == RspUndefined || incoming.kind == RspUndefined) merged = {};
+	else {
+		if (value->kind != incoming.kind || value->value != incoming.value) merged = {RspUnknown, 0};
+		merged.invalid_dma_address = rsp_invalid_dma_address(*value) || rsp_invalid_dma_address(incoming);
 	}
-	if (name == "j" && operands.count == 1 && operands[0]->kind == Ast_Ident && operands[0]->Ident.token.string == "DMAOut") {
-		if (!rsp_dma_out(state, node)) return false;
-		out << "    j DMAOut\n";
-		return true;
+	if (merged.kind == value->kind && merged.value == value->value && merged.invalid_dma_address == value->invalid_dma_address) return false;
+	*value = merged;
+	return true;
+}
+static bool rsp_merge_effects(RspEffects *state, RspEffects const &incoming) {
+	bool changed = false;
+	for (int reg = 0; reg < 32; reg++) changed |= rsp_merge_value(&state->registers[reg], incoming.registers[reg]);
+	for (size_t word = 0; word < state->scratch.size(); word++) changed |= rsp_merge_value(&state->scratch[word], incoming.scratch[word]);
+	return changed;
+}
+// Execute one ordinary instruction or one transfer-plus-slot unit. Terminal
+// transfers have no successors; both conditional outcomes receive the slot state.
+static bool rsp_execute_unit(RspProgram const &program, size_t index, RspEffects &state, std::vector<size_t> *successors) {
+	auto const &instructions = program.instructions;
+	auto const &instruction = instructions[index];
+	size_t next = index + 1;
+	if (rsp_is_transfer(instruction)) {
+		// The condition and inherited return address are read before the slot.
+		if (rsp_is_conditional(instruction)) {
+			rsp_read(state, instruction.node, instruction.left);
+			rsp_read(state, instruction.node, instruction.right);
+		} else if (instruction.kind == RspReturn) rsp_read(state, instruction.node, 31);
+		if (any_errors() || !rsp_apply_instruction(state, instructions[next])) return false;
+		next++;
+		// DMA helper inputs are consumed after the caller's delay instruction.
+		if (instruction.kind == RspDma) {
+			if (!rsp_dma_out(state, instruction.node) || any_errors()) return false;
+			return true;
+		}
+		if (instruction.kind == RspReturn) return true;
+	} else if (!rsp_apply_instruction(state, instruction)) return false;
+	if (instruction.kind == RspJump) successors->push_back(instruction.target);
+	else {
+		if (next == instructions.size()) { error(instruction.node, "RSP command has reachable fallthrough without a queue continuation"); return false; }
+		successors->push_back(next);
+		if (rsp_is_conditional(instruction)) successors->push_back(instruction.target);
 	}
-	error(node, "Expected final queue return jr %%ra or tail transfer j DMAOut followed by nop");
-	return false;
+	return true;
+}
+static bool rsp_check_flow(RspProgram const &program, i64 words, i64 scratch) {
+	auto const &instructions = program.instructions;
+	std::vector<RspEffects> inputs(instructions.size());
+	std::vector<bool> reached(instructions.size(), false), queued(instructions.size(), false);
+	std::deque<size_t> pending;
+	inputs[0] = rsp_live_inputs(words, scratch);
+	reached[0] = queued[0] = true;
+	pending.push_back(0);
+	while (!pending.empty()) {
+		size_t index = pending.front();
+		pending.pop_front();
+		queued[index] = false;
+		auto state = inputs[index];
+		std::vector<size_t> successors;
+		if (!rsp_execute_unit(program, index, state, &successors)) return false;
+		for (size_t successor : successors) {
+			bool changed = !reached[successor];
+			if (changed) inputs[successor] = state;
+			else changed = rsp_merge_effects(&inputs[successor], state);
+			reached[successor] = true;
+			if (changed && !queued[successor]) { pending.push_back(successor); queued[successor] = true; }
+		}
+	}
+	return true; // A fixed point proves safety at exits, not termination of loops.
+}
+static void rsp_emit_instruction(RspInstruction const &instruction, std::ostringstream &out) {
+	auto kind = instruction.kind;
+	int d = instruction.dest, s = instruction.left, t = instruction.right;
+	i64 imm = instruction.immediate;
+	if (kind == RspNop) out << "    nop\n";
+	else if (kind == RspReturn) out << "    jr $31\n";
+	else if (kind == RspDma) out << "    j DMAOut\n";
+	else if (kind == RspJump) out << "    j .Lrsp_" << instruction.target << "\n";
+	else if (rsp_is_conditional(instruction))
+		out << "    " << (kind == RspEqual ? "beq" : "bne") << " $" << s << ", $" << t << ", .Lrsp_" << instruction.target << "\n";
+	else if (kind == RspAddress) out << "    ori $" << d << ", $0, %lo(rspq_scratch)\n";
+	else if (kind == RspLoad || kind == RspStore)
+		out << "    " << (kind == RspLoad ? "lw" : "sw") << " $" << d << ", " << imm << "($" << s << ")\n";
+	else {
+		auto form = instruction.scalar;
+		if (form->form == RspUpper || form->form == RspLiteral) rsp_materialize(form->form, d, imm, out);
+		else if (form->form == RspMove) out << "    addu $" << d << ", $" << s << ", $0\n";
+		else {
+			out << "    " << form->name << " $" << d << ", $" << s << ", ";
+			if (form->form == RspRegisterBinary) out << "$" << t;
+			else out << imm;
+			out << "\n";
+		}
+	}
+}
+static void rsp_layout_check(std::ostringstream &out, Ast *node, std::string const &condition, char const *diagnostic) {
+	rsp_location(out, node);
+	out << ".if " << condition << "\n";
+	rsp_location(out, node);
+	out << ".error " << rsp_quoted(diagnostic) << "\n.endif\n";
+}
+static void rsp_emit_layout_checks(RspProgram const &program, Ast *entry, std::ostringstream &out) {
+	out << ".Lrsp_end:\n";
+	rsp_layout_check(out, entry,
+		"rsp_command - _ovl_text_start",
+		"RSP command entry must start at the aligned SDK overlay boundary");
+	for (size_t i = 0; i < program.instructions.size(); i++) {
+		auto const &instruction = program.instructions[i];
+		if (instruction.kind != RspJump && !rsp_is_conditional(instruction)) continue;
+		auto target = ".Lrsp_" + std::to_string(instruction.target);
+		rsp_layout_check(out, instruction.node,
+			"((" + target + " - rsp_command) % 4) || ((" + target + " - rsp_command) < 0) || ((" + target + " - .Lrsp_end) >= 0)",
+			"RSP branch target must be aligned and inside the command");
+		if (instruction.kind != RspJump) {
+			auto displacement = "(" + target + " - .Lrsp_" + std::to_string(i) + " - 4)";
+			rsp_layout_check(out, instruction.node, displacement + " < -131072 || " + displacement + " > 131068",
+				"RSP branch displacement must fit a signed 16-bit word offset");
+		}
+	}
 }
 static bool rsp_check_body(RspUnit &unit, Ast *entry, i64 words, i64 scratch, std::ostringstream &out) {
-	auto instructions = entry->AsmTemplate.instructions;
-	if (instructions.count < 2) { error(entry, "RSP commands require a final queue transfer followed by an explicit nop"); return false; }
-	auto state = rsp_live_inputs(words, scratch);
-	for (isize i = 0; i < instructions.count; i++) {
-		Ast *node = instructions[i];
-		if (node->kind != Ast_AsmInstruction) { error(node, "RSP labels and directives are unsupported in the scalar profile"); return false; }
-		auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
-		auto operands = node->AsmInstruction.operands;
+	RspProgram program;
+	if (!rsp_decode_program(unit, entry, scratch, &program) || !rsp_check_flow(program, words, scratch)) return false;
+	for (size_t i = 0; i < program.instructions.size(); i++) {
+		auto const &instruction = program.instructions[i];
 		out << ".Lrsp_" << i << ":\n";
-		rsp_location(out, node);
-		if (i == instructions.count-1) {
-			if (name != "nop" || operands.count) { error(node, "RSP transfer delay slot must be an explicit nop"); return false; }
-			out << "    nop\n";
-		} else if (i == instructions.count-2) {
-			if (!rsp_transfer(state, node, out)) return false;
-		} else if (name == "nop" && operands.count == 0) {
-			out << "    nop\n";
-		} else if (name == "la") {
-			if (!rsp_address(state, node, out)) return false;
-		} else if (name == "lw" || name == "sw") {
-			if (!rsp_memory(unit, state, node, out)) return false;
-		} else if (!rsp_scalar(unit, state, node, out)) return false;
+		rsp_location(out, instruction.node);
+		rsp_emit_instruction(instruction, out);
 	}
+	rsp_emit_layout_checks(program, entry, out);
 	return true;
 }
 
