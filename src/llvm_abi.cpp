@@ -312,7 +312,10 @@ gb_internal i64 lb_alignof(LLVMTypeRef type) {
 	case LLVMIntegerTypeKind:
 		{
 			unsigned w = LLVMGetIntTypeWidth(type);
-			return gb_clamp((w + 7)/8, 1, build_context.max_align);
+			// ABI coercions can produce i24, i40, i48, etc. Their byte size
+			// is not a valid alignment: use the next integer alignment while
+			// retaining Odin's target cap (e.g. O64's 8-byte maximum).
+			return gb_clamp(next_pow2(cast(i64)(w + 7)/8), 1, build_context.max_align);
 		}
 	case LLVMHalfTypeKind:
 		return 2;
@@ -1381,6 +1384,14 @@ namespace lbAbiAmd64SysV {
 						}
 						if (lanes == 0) { lanes = 1; }
 						LLVMTypeRef vec_type = LLVMVectorType(elem_type, lanes);
+						if (reg_class == RegClass_SSEHv && vec_len == 1 && lanes > 1) {
+							// One SSE eightbyte is a bit container. Pack half lanes
+							// into the equivalent float/double register type: X86
+							// FastISel otherwise scalarizes aggregate half-vector
+							// returns into too many f16 results at -O0. This keeps
+							// the same bits and XMM register assignment as Clang.
+							vec_type = lanes <= 2 ? LLVMFloatTypeInContext(c) : LLVMDoubleTypeInContext(c);
+						}
 						array_add(&types, vec_type);
 						sz -= lb_sizeof(vec_type);
 						i += vec_len;
