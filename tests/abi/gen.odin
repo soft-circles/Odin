@@ -272,6 +272,9 @@ build :: proc() {
 		// float member, not just on its being one
 		{"f16"}, {"f16", "f16"}, {"f16", "i16"}, {"f16", "f32"},
 		{"f16", "f16", "f16"}, {"f16", "f16", "f16", "f16"},
+		{"f16", "f16", "f16", "f16", "f16"},
+		{"f16", "f16", "f16", "f16", "f16", "f16"},
+		{"f16", "f16", "f16", "f16", "f16", "f16", "f16", "f16"},
 		{"f32", "f16"}, {"f64", "f16"},
 		// an enum is only under test if it is explicitly backed: Odin's default
 		// is `int`, which is register-sized against C's 4
