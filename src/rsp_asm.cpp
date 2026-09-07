@@ -129,12 +129,16 @@ static bool rsp_invalid_dma_address(RspValue value) {
 }
 struct RspEffects {
 	RspValue registers[32] = {};
+	RspValue vectors[32][8] = {};
+	// Low, middle, high slices. No incoming accumulator definition is assumed.
+	RspValue accumulator[3][8] = {};
 	std::vector<RspValue> scratch;
 };
 static RspEffects rsp_live_inputs(i64 words, i64 scratch) {
 	RspEffects state;
 	state.scratch.resize(size_t(scratch/4));
 	state.registers[0] = {RspConstant, 0};
+	for (auto &element : state.vectors[0]) element = {RspConstant, 0};
 	for (int i = 0; i < 4 && i < words; i++) state.registers[4+i] = {RspUnknown, 0};
 	state.registers[15] = {RspConstant, words*4}; // SDK rspq_cmd_size (t7).
 	state.registers[28] = state.registers[31] = {RspUnknown, 0};
@@ -175,6 +179,65 @@ static RspValue rsp_binary_value(RspScalarOperation operation, RspValue left, Rs
 	if (operation == RspOr) return {RspConstant, a | b};
 	if (operation == RspXor) return {RspConstant, a ^ b};
 	return {RspUnknown, 0};
+}
+enum RspVectorMode { RspWholeVector, RspVectorElement };
+struct RspVectorOperand {
+	int reg = -1;
+	int element = -1;
+};
+static std::string rsp_vector_name(int reg) {
+	return std::string("$v") + (reg < 10 ? "0" : "") + std::to_string(reg);
+}
+static bool rsp_vector_operand(Ast *node, RspVectorMode mode, RspVectorOperand *operand) {
+	if (node->kind != Ast_AsmRegister) {
+		error(node, "Expected an explicit RSP vector register (v00..v31)"); return false;
+	}
+	auto name = rsp_string(node->AsmRegister.name.string);
+	for (int reg = 0; reg < 32; reg++) {
+		if ("$" + name == rsp_vector_name(reg)) { operand->reg = reg; break; }
+	}
+	if (operand->reg < 0) {
+		error(node, "Expected an explicit RSP vector register (v00..v31)"); return false;
+	}
+	auto selector = rsp_string(node->AsmRegister.flag.string);
+	if (mode == RspWholeVector) {
+		if (selector.empty()) return true;
+		error(node, "RSP whole-vector operand cannot have an element, byte or broadcast selector"); return false;
+	}
+	if (selector.size() == 2 && selector[0] == 'e' && selector[1] >= '0' && selector[1] <= '7') {
+		operand->element = selector[1] - '0';
+		return true;
+	}
+	error(node, "RSP vector transfer requires an element selector e0..e7 (not a byte or broadcast selector)");
+	return false;
+}
+static RspValue rsp_vector_read(RspEffects const &state, Ast *node, int reg, int element) {
+	auto value = state.vectors[reg][element];
+	if (value.kind == RspUndefined)
+		error(node, "RSP vector v%02d.e%d is read before definition", reg, element);
+	return value;
+}
+static void rsp_apply_vector_xor(RspEffects &state, Ast *node,
+                                 RspVectorOperand dest, RspVectorOperand left, RspVectorOperand right) {
+	auto operands = node->AsmInstruction.operands;
+	for (int element = 0; element < 8; element++) {
+		auto a = rsp_vector_read(state, operands[1], left.reg, element);
+		auto b = rsp_vector_read(state, operands[2], right.reg, element);
+		auto result = rsp_binary_value(RspXor, a, b);
+		state.vectors[dest.reg][element] = result;
+		// VXOR writes ACC_LO; it neither reads nor defines ACC_MID/ACC_HI.
+		state.accumulator[0][element] = result;
+	}
+}
+static RspValue rsp_vector_insert_value(RspValue value) {
+	if (value.kind == RspConstant) return {RspConstant, value.value & 0xffff};
+	if (value.kind == RspUndefined) return value;
+	return {RspUnknown, 0, value.invalid_dma_address || value.kind == RspScratch}; // No exact scratch address survives truncation.
+}
+static RspValue rsp_vector_extract_value(RspValue value) {
+	// MFC2 sign-extends the selected 16-bit element into a 32-bit GPR.
+	if (value.kind == RspConstant && (value.value & 0x8000)) value.value |= 0xffff0000;
+	return value;
 }
 enum RspScalarForm { RspRegisterBinary, RspImmediateBinary, RspUpper, RspLiteral, RspMove };
 struct RspScalarInstruction {
@@ -218,11 +281,13 @@ static RspValue rsp_materialize(RspScalarForm form, int dest, i64 immediate, std
 // Decode once, then use the same instruction effects on ordinary and delayed paths.
 // Local labels index instructions, never CPU entities or assembler-supplied symbols.
 enum RspInstructionKind { RspScalar, RspAddress, RspLoad, RspStore, RspNop,
+                          RspVectorXor, RspVectorInsert, RspVectorExtract,
                           RspEqual, RspNotEqual, RspJump, RspReturn, RspDma };
 struct RspInstruction {
 	Ast *node = nullptr;
 	RspInstructionKind kind = RspNop;
 	RspScalarInstruction const *scalar = nullptr;
+	RspVectorOperand vector_dest, vector_left, vector_right;
 	int dest = -1, left = -1, right = -1;
 	i64 immediate = 0;
 	size_t target = 0;
@@ -266,7 +331,9 @@ static bool rsp_decode_instruction(RspUnit &unit, i64 scratch, RspInstruction *i
 	auto name = rsp_string(node->AsmInstruction.name->Ident.token.string);
 	auto operands = node->AsmInstruction.operands;
 	int count = 0;
-	if (name == "nop") instruction->kind = RspNop;
+	if (name == "vxor") { instruction->kind = RspVectorXor; count = 3; }
+	else if (name == "mtc2" || name == "mfc2") { instruction->kind = name == "mtc2" ? RspVectorInsert : RspVectorExtract; count = 2; }
+	else if (name == "nop") instruction->kind = RspNop;
 	else if (name == "beq" || name == "bne") { instruction->kind = name == "beq" ? RspEqual : RspNotEqual; count = 3; }
 	else if (name == "j") { instruction->kind = RspJump; count = 1; }
 	else if (name == "jr") { instruction->kind = RspReturn; count = 1; }
@@ -280,6 +347,19 @@ static bool rsp_decode_instruction(RspUnit &unit, i64 scratch, RspInstruction *i
 	}
 	if (operands.count != count) { error(node, "RSP %s requires %d operands", name.c_str(), count); return false; }
 	if (instruction->kind == RspNop) return true;
+	if (instruction->kind == RspVectorXor) {
+		return rsp_vector_operand(operands[0], RspWholeVector, &instruction->vector_dest) &&
+		       rsp_vector_operand(operands[1], RspWholeVector, &instruction->vector_left) &&
+		       rsp_vector_operand(operands[2], RspWholeVector, &instruction->vector_right);
+	}
+	if (instruction->kind == RspVectorInsert || instruction->kind == RspVectorExtract) {
+		if (instruction->kind == RspVectorExtract) {
+			if (!rsp_destination(operands[0], &instruction->dest)) return false;
+		} else instruction->left = rsp_gpr(operands[0]);
+		// One selected vector operand: written by MTC2, read by MFC2.
+		if (!rsp_vector_operand(operands[1], RspVectorElement, &instruction->vector_dest)) return false;
+		return !any_errors();
+	}
 	if (rsp_is_conditional(*instruction)) {
 		instruction->left = rsp_gpr(operands[0]);
 		instruction->right = rsp_gpr(operands[1]);
@@ -392,7 +472,19 @@ static bool rsp_apply_instruction(RspEffects &state, RspInstruction const &instr
 	Ast *node = instruction.node;
 	RspValue result = {RspUnknown, 0};
 	if (instruction.kind == RspNop) return true;
-	if (instruction.kind == RspAddress) result = {RspScratch, 0};
+	if (instruction.kind == RspVectorXor) {
+		rsp_apply_vector_xor(state, node, instruction.vector_dest, instruction.vector_left, instruction.vector_right);
+		return !any_errors();
+	}
+	if (instruction.kind == RspVectorInsert) {
+		auto value = rsp_read(state, node, instruction.left);
+		state.vectors[instruction.vector_dest.reg][instruction.vector_dest.element] = rsp_vector_insert_value(value);
+		return !any_errors();
+	}
+	if (instruction.kind == RspVectorExtract) {
+		auto value = rsp_vector_read(state, node, instruction.vector_dest.reg, instruction.vector_dest.element);
+		result = rsp_vector_extract_value(value);
+	} else if (instruction.kind == RspAddress) result = {RspScratch, 0};
 	else if (instruction.kind == RspLoad || instruction.kind == RspStore) {
 		size_t word = 0;
 		if (!rsp_word_address(state, instruction, &word)) return false;
@@ -453,10 +545,23 @@ static bool rsp_merge_value(RspValue *value, RspValue incoming) {
 	*value = merged;
 	return true;
 }
+static bool rsp_merge_vector_value(RspValue *value, RspValue incoming) {
+	// MFC2 sign-extends bit 15. Losing a known negative lane at a join must
+	// not disguise its eventual 0xffffxxxx GPR result as a valid DMA address.
+	incoming.invalid_dma_address |= (value->kind == RspConstant && (value->value & 0x8000)) ||
+	                                (incoming.kind == RspConstant && (incoming.value & 0x8000));
+	return rsp_merge_value(value, incoming);
+}
 static bool rsp_merge_effects(RspEffects *state, RspEffects const &incoming) {
 	bool changed = false;
 	for (int reg = 0; reg < 32; reg++) changed |= rsp_merge_value(&state->registers[reg], incoming.registers[reg]);
 	for (size_t word = 0; word < state->scratch.size(); word++) changed |= rsp_merge_value(&state->scratch[word], incoming.scratch[word]);
+	for (int reg = 0; reg < 32; reg++) {
+		for (int element = 0; element < 8; element++) changed |= rsp_merge_vector_value(&state->vectors[reg][element], incoming.vectors[reg][element]);
+	}
+	for (int slice = 0; slice < 3; slice++) {
+		for (int element = 0; element < 8; element++) changed |= rsp_merge_value(&state->accumulator[slice][element], incoming.accumulator[slice][element]);
+	}
 	return changed;
 }
 // Execute one ordinary instruction or one transfer-plus-slot unit. Terminal
@@ -517,7 +622,13 @@ static void rsp_emit_instruction(RspInstruction const &instruction, std::ostring
 	auto kind = instruction.kind;
 	int d = instruction.dest, s = instruction.left, t = instruction.right;
 	i64 imm = instruction.immediate;
-	if (kind == RspNop) out << "    nop\n";
+	if (kind == RspVectorXor)
+		out << "    vxor " << rsp_vector_name(instruction.vector_dest.reg) << ", " << rsp_vector_name(instruction.vector_left.reg)
+		    << ", " << rsp_vector_name(instruction.vector_right.reg) << "\n";
+	else if (kind == RspVectorInsert || kind == RspVectorExtract)
+		out << "    " << (kind == RspVectorInsert ? "mtc2" : "mfc2") << " $" << (kind == RspVectorInsert ? s : d)
+		    << ", " << rsp_vector_name(instruction.vector_dest.reg) << ".e" << instruction.vector_dest.element << "\n";
+	else if (kind == RspNop) out << "    nop\n";
 	else if (kind == RspReturn) out << "    jr $31\n";
 	else if (kind == RspDma) out << "    j DMAOut\n";
 	else if (kind == RspJump) out << "    j .Lrsp_" << instruction.target << "\n";
@@ -642,7 +753,9 @@ static bool rsp_emit_artifact(Parser *parser, String entry_name, String output_p
 	       ".data\nRSPQ_BeginOverlayHeader\n    RSPQ_DefineCommand rsp_command, " << words*4 <<
 	       "\nRSPQ_EndOverlayHeader\nRSPQ_EmptySavedState\n";
 	if (scratch) out << ".bss\n.balign 16\nrspq_scratch:\n    .space " << scratch << "\n";
-	out << ".text\n.set noreorder\n.set noat\n.set nomacro\n.globl rsp_command\nrsp_command:\n";
+	// SDK vector macros emit .long. Disable MIPS data auto-alignment so their
+	// sizes remain fixed for delayed-flow layout assertions, with no hidden pad.
+	out << ".text\n.align 0\n.set noreorder\n.set noat\n.set nomacro\n.globl rsp_command\nrsp_command:\n";
 	if (!rsp_check_body(unit, entry, words, scratch, out) || any_errors()) return false;
 	if (!rsp_publish(output, out.str())) { error(declaration, "Cannot publish RSP artifact at '%.*s'", LIT(output_path)); return false; }
 	return true;

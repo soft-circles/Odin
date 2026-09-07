@@ -14,11 +14,13 @@ Compile a separate source unit to an inspectable assembly artifact:
 odin build command.odin -file -build-mode:rsp-asm -rsp-entry:command -out:rsp_command.S
 ```
 
-The [scalar fixture](tests/rsp_asm/scalar.odin) consumes four command words:
+The [vector fixture](tests/rsp_asm/vector.odin) consumes four command words:
 first-word payload, `x`, `y`, and a physical RDRAM output address. It writes the
 32-bit wrapping sum, the low 16 bits of `x XOR y`, and two zero words to scratch,
-then transfers all 16 bytes through `DMAOut`. This scalar slice does not implement
-the later vector-command milestone. A command that does no work remains valid:
+then transfers all 16 bytes through `DMAOut`. It uses explicit vectors for XOR,
+initializes both inputs from queue vector zero, and masks the extracted element
+to remove sign extension. The [scalar fixture](tests/rsp_asm/scalar.odin) computes
+the same result using GPRs. A command that does no work remains valid:
 
 ```odin
 package overlay
@@ -58,7 +60,8 @@ the final linker budget therefore permits less than 4096 bytes of scratch.
 ## Supported instructions
 
 Every operand shown is required; two-operand arithmetic aliases are unsupported.
-`d`, `s`, `t` and `base` below are explicit GPRs. All scalar values are 32 bits.
+`d`, `s`, `t` and `base` below are explicit GPRs; `vd`, `vs` and `vt` are
+explicit vectors. All scalar values are 32 bits; vector elements are 16 bits.
 
 | Source form | Meaning and checked effects |
 | --- | --- |
@@ -72,7 +75,10 @@ Every operand shown is required; two-operand arithmetic aliases are unsupported.
 | `la d, rspq_scratch` | Exactly `ori d, zero, %lo(rspq_scratch)`; write a checked local scratch address. Requires declared scratch. |
 | `lw d, [base + constant]` | Read an initialized scratch word and write `d`. |
 | `sw s, [base + constant]` | Read `s`, initialize one scratch word. |
-| `nop` | No effects; may also separate scalar instructions. |
+| `vxor vd, vs, vt` | Whole-vector XOR; read all eight elements of both sources, write all destination elements and accumulator low elements. |
+| `mtc2 s, vt.eN` | Read the GPR and write its low 16 bits to exactly one vector element (`e0`–`e7`). |
+| `mfc2 d, vs.eN` | Read one defined vector element (`e0`–`e7`) and sign-extend it to the destination GPR. |
+| `nop` | No effects; may also separate instructions. |
 | `beq s, t, .label`, `bne s, t, .label` | Read both GPRs before the explicit delay slot, then branch on equality/inequality. |
 | `j .label` | Direct local jump after an explicit delay slot. |
 | `jr %ra` | Return through inherited `r31` after an explicit delay slot. |
@@ -83,13 +89,13 @@ Every operand shown is required; two-operand arithmetic aliases are unsupported.
 `lui d, upper16; ori d, d, lower16`. The upper/lower halves come from the
 validated 32-bit bit pattern. It writes only `d`, with no hidden `at` scratch.
 The other admitted instructions emit one real instruction each. The generated
-body disables assembler reordering, implicit `at` use and multi-instruction
-macro expansion. No invalid operand is truncated to fit an encoding.
+body disables assembler reordering, implicit `at` use, multi-instruction
+macro expansion and implicit alignment padding inside the command. No invalid operand is truncated to fit an encoding.
 
 GPR names resolve as `%r0`–`%r31` or unambiguous ABI aliases (`zero`, `at`,
 `a0`–`a3`, `t0`–`t9`, `s0`–`s8`, `k0`, `k1`, `gp`, `sp`, `fp`, `ra`).
-`%v0`/`%v1` are ambiguous and rejected, as are vector registers, unknown names
-and element selectors. Aliases cannot bypass queue restrictions.
+`%v0`/`%v1` are ambiguous and rejected. GPR operands reject vector registers and
+all selectors. Aliases cannot bypass queue restrictions.
 
 The only initial scalar definitions are zero, the declared first four words in
 `a0`–`a3`, the byte command size in `t7`, and inherited `gp`/`ra` state. Sizes
@@ -97,6 +103,47 @@ above four words do not seed additional registers; fetching later words is not
 in this slice. Reading another register before writing it is an error, including
 when writing to zero. Writes to zero have no effect. All writes to `gp`/`r28` or
 `ra`/`r31` and every use of `sp`/`r29` are rejected.
+
+## Vector registers and effects
+
+Canonical vector names are `%v00`–`%v31`, distinct from GPRs `%r0`–`%r31`.
+Short names such as `%v1`, vector aliases, and names outside that range reject.
+Transfers require the vector operand in second position with exactly one typed
+`.e0`–`.e7` element selector. Bare vectors, numeric selectors, `.e8`, byte selectors
+`.b0`–`.b15`, and broadcast/quarter/half modes are unsupported. Whole-vector XOR
+accepts no selector in any position. There are no two-operand XOR aliases.
+
+```odin
+vxor %v01, %v00, %v00
+nop
+nop
+mtc2 %a0, %v01.e7
+nop
+nop
+mfc2 %r2, %v01.e7
+nop
+nop
+andi %r2, %r2, 0xffff
+```
+
+Only `%v00` begins defined, with all eight elements zero under the pinned queue
+contract. It is writable; later reads use its current contents. Other vectors
+must be initialized by authored instructions. A transfer defines only its selected
+element and preserves the others. Whole-vector XOR requires every source element
+to be defined, even for self-XOR; initialize from `%v00` or write all eight elements.
+A destination may overlap either source. Vector transfers discard exact scratch-address
+provenance, and `mfc2` respects the same GPR write restrictions as scalar operations.
+
+XOR writes all eight low accumulator elements, without reading the accumulator
+or changing its middle/high slices. The checker assumes no incoming accumulator
+definitions. Transfers leave accumulator state unchanged. Carry, flag, divider,
+accumulator-read, other vector arithmetic, and vector-memory instructions remain
+unsupported, including `vadd`, `vaddc`, `vch`, `vmrg`, `vrcp`, `vsar`, and `lqv`.
+
+Scheduling remains the author's responsibility. The example leaves two explicit
+no-ops between dependent vector operations/transfers; the compiler preserves them
+and inserts no scheduling or register allocation. This checker tracks definitions,
+not pipeline readiness.
 
 ## Scratch memory and DMA
 
@@ -139,19 +186,20 @@ arithmetic, duplicate or unresolved names, and targets outside the command or
 inside a delay slot are rejected. The only external target is `j DMAOut`.
 
 Every transfer requires a following instruction. The slot may use any admitted
-scalar instruction, including a scratch load/store, provided it emits exactly
-one real instruction. A two-word `li`, another transfer, or a missing slot fails.
+scalar or vector instruction, including a scratch load/store, provided it emits
+exactly one real instruction. A two-word `li`, another transfer, or a missing slot fails.
 Use `nop` when no work is needed. The branch condition is read before the slot;
 the slot's reads and writes happen on both outcomes before control transfers.
 A slot can therefore initialize a result used by both paths or finish DMA setup.
 
-The checker joins register definitions, constant values, scratch addresses and
-initialized words across all incoming paths, including loop backedges. A read
-must be defined on every path. Differing constants lose their exact value;
+The checker joins GPR and vector-element definitions, accumulator slices,
+constant values, scratch addresses and initialized words across all incoming
+paths, including loop backedges. A read must be defined on every path. Differing constants lose their exact value;
 differing scratch addresses cannot be used as a proven memory base. A known bad
 DMA destination on either path remains rejected after a join, including through
-arithmetic on the merged value. Both branch
-outcomes are analyzed conservatively, even for a constant condition. Syntax and
+arithmetic and vector extraction of the merged value. Known negative vector
+alternatives retain their invalid sign-extended DMA result at the join. Both
+branch outcomes are analyzed conservatively, even for a constant condition. Syntax and
 protected-register policies also apply to unreachable instructions. Reachable
 fallthrough beyond the command fails; every reachable exit must use queue return
 or the modeled DMA tail. A closed loop may compile: this analysis does **not**
@@ -178,7 +226,7 @@ bindings, DMA destination ownership, canaries and bounded execution remain in
 that runner. No vector support is required by this command.
 
 Arbitrary calls, branch-likely instructions, indirect targets other than `jr %ra`,
-halt/break completion, vector/FPU operations, HI/LO multiply/divide, 64-bit
+halt/break completion, FPU operations, HI/LO multiply/divide, 64-bit
 operations and other COP0 operations are unsupported. Instruction scheduling
 remains explicit; no automatic scheduler is provided.
 
@@ -200,14 +248,20 @@ Run the public CLI regression suite with:
 python3 tests/rsp_asm/test_rsp_asm.py
 ```
 
-SDK tests compare generated and independent scalar/branch words, relocations, common
-sections and scratch alignment under default, release and profiling settings.
+SDK tests compare generated and independent scalar/vector/branch command words,
+relocations, common sections and scratch alignment under default, release and
+profiling settings. The [vector oracle](tests/rsp_asm/vector-reference.S) records
+reviewed machine words independently of the emitter and rexcode. Transfer checks
+cover every element, including nonzero elements and `e7`, and register endpoints.
+In COP2 transfers, `eN` denotes byte offset `2*N` in bits 10:7; arithmetic broadcast
+selectors use a different field and are not accepted here.
 They check the minimal descriptor/empty-state layout and SDK wrapper rule,
 exercise every admitted scalar form, and reject linked IMEM/DMEM overflow.
 Local branch displacements are checked against the signed 16-bit word range
 using expanded instruction sizes. The artifact also carries source-located
 assembler assertions that keep the command entry at the aligned SDK overlay
-boundary and check local transfer range/alignment. SDK tests inspect the linked descriptor, resolved jump words,
+boundary and check local transfer range/alignment. SDK tests inspect the linked
+descriptor, resolved jump words,
 backward branch encoding and absence of relocations, and deliberately misalign
 or move targets/entries to verify rejection. The ISA displacement range exceeds
 physical IMEM: successful emission still requires the SDK linker budget check.
