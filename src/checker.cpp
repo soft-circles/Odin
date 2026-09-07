@@ -5077,6 +5077,15 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 					error(name, "Asm template groups are not allowed within a foreign block");
 				}
 			}else if (init->kind == Ast_AsmTemplate) {
+				for (auto attribute : vd->attributes) {
+					for (auto element : attribute->Attribute.elems) {
+						Ast *field = element->kind == Ast_FieldValue ? element->FieldValue.field : element;
+						if (field->kind == Ast_Ident &&
+						    (field->Ident.token.string == "rspq_command_words" || field->Ident.token.string == "rspq_scratch_bytes")) {
+							error(element, "RSP template metadata requires -build-mode:rsp-asm; RSP commands are not CPU callables");
+						}
+					}
+				}
 				if (c->scope->flags&ScopeFlag_Type) {
 					error(name, "Asm templates are not allowed within a struct");
 					continue;
