@@ -115,16 +115,6 @@ gb_internal String get_default_features() {
 		}
 	}
 
-	if (bc->metrics.arch == TargetArch_mips32be) {
-		String features = str_lit("noabicalls");
-		if (bc->target_features_string.len > 0) {
-			bc->target_features_string = concatenate3_strings(permanent_allocator(), features, str_lit(","), bc->target_features_string);
-		} else {
-			bc->target_features_string = features;
-		}
-		return features;
-	}
-
 	for (int i = off; i < off+target_microarch_counts[bc->metrics.arch]; i += 1) {
 		if (microarch_features_list[i].microarch == microarch) {
 			return microarch_features_list[i].features;
@@ -3152,6 +3142,11 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 		llvm_features = gb_string_append_length(llvm_features, str.text, str.len);
 	}
+	if (build_context.metrics.arch == TargetArch_mips32be &&
+	    !check_single_target_feature_is_valid(build_context.target_features_string, str_lit("noabicalls"))) {
+		// Static, non-PIC calls: O64 code for the N64 has no GOT.
+		llvm_features = gb_string_appendc(llvm_features, first ? "+noabicalls" : ",+noabicalls");
+	}
 
 	debugf("CPU: %.*s, Features: %s\n", LIT(llvm_cpu), llvm_features);	
 
@@ -3172,7 +3167,6 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 	for (auto const &entry : gen->modules) {
 		LLVMTargetMachineRef target_machine;
-		#if LLVM_VERSION_MAJOR >= 18
 		if (build_context.metrics.arch == TargetArch_mips32be) {
 			LLVMTargetMachineOptionsRef options = LLVMCreateTargetMachineOptions();
 			LLVMTargetMachineOptionsSetCPU(options, cast(char const *)llvm_cpu.text);
@@ -3183,9 +3177,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			LLVMTargetMachineOptionsSetCodeModel(options, code_mode);
 			target_machine = LLVMCreateTargetMachineWithOptions(target, target_triple, options);
 			LLVMDisposeTargetMachineOptions(options);
-		} else
-		#endif
-		{
+		} else {
 			target_machine = LLVMCreateTargetMachine(
 				target, target_triple, (const char *)llvm_cpu.text,
 				llvm_features,

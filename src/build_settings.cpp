@@ -11,6 +11,8 @@
 #define DEFAULT_MAX_ERROR_COLLECTOR_COUNT (36)
 #define DEFAULT_DID_YOU_MEAN_LIMIT (10)
 
+#include "n64_build.hpp"
+
 enum TargetOsKind : u16 {
 	TargetOs_Invalid,
 
@@ -524,15 +526,8 @@ struct BuildContext {
 	String rsp_entry;
 	String resource_filepath;
 	String pdb_filepath;
-	String n64_inst;
+	N64BuildSettings n64;
 	bool   n64_inst_given;
-	String n64_title;
-	String n64_region;
-	String n64_save_type;
-	String n64_controllers[4];
-	String n64_assets;
-	String n64_metadata;
-	bool   n64_rtc;
 	bool   n64_rom_options_given;
 
 	u64 vet_flags;
@@ -2193,9 +2188,6 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 // a binary search is possible.
 
 gb_internal bool check_single_target_feature_is_valid(String const &feature_list, String const &feature) {
-	if (build_context.metrics.arch == TargetArch_mips32be && feature == str_lit("noabicalls")) {
-		return true;
-	}
 	String_Iterator it = {feature_list, 0};
 	String str = {};
 	while (string_split_iterator_next(&it, ',', &str)) {

@@ -7,6 +7,7 @@
 struct S3 { uint8_t a, b, c; };
 struct S12 { uint32_t a, b, c; };
 struct Big { uint32_t a, b, c, d, e, f; };
+#define BIG_FOLD(r) ((r).a ^ (r).b ^ (r).c ^ (r).d ^ (r).e ^ (r).f)
 union U8 { uint64_t q; uint32_t w[2]; uint8_t b[8]; };
 
 #define DECLARE_SIDE(prefix) \
@@ -84,15 +85,18 @@ FORWARD_PAIR(int32_t, stack,
 
 NOINLINE uint32_t c_to_odin_ret_big(
 	uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f) {
-	return odin_ret_big(a, b, c, d, e, f).f;
+	struct Big r = odin_ret_big(a, b, c, d, e, f);
+	return BIG_FOLD(r);
 }
 NOINLINE uint32_t c_to_gcc_ret_big(
 	uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f) {
-	return gcc_ret_big(a, b, c, d, e, f).f;
+	struct Big r = gcc_ret_big(a, b, c, d, e, f);
+	return BIG_FOLD(r);
 }
 NOINLINE uint32_t gcc_to_c_ret_big(
 	uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f) {
-	return c_ret_big(a, b, c, d, e, f).f;
+	struct Big r = c_ret_big(a, b, c, d, e, f);
+	return BIG_FOLD(r);
 }
 NOINLINE int64_t gcc_to_c_var_i32(int32_t tag, int32_t x) { return c_var_i32(tag, x); }
 

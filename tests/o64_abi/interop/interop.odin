@@ -56,7 +56,8 @@ foreign {
 	return c_stack(a, b, c, d, e)
 }
 @(export) odin_to_c_ret_big :: proc "c" (a, b, c, d, e, f: u32) -> u32 {
-	return c_ret_big(a, b, c, d, e, f).f
+	r := c_ret_big(a, b, c, d, e, f)
+	return r.a ~ r.b ~ r.c ~ r.d ~ r.e ~ r.f
 }
 @(export) odin_to_c_var_i32 :: proc "c" (tag, x: i32) -> i64 {
 	return c_var_i32(tag, x)

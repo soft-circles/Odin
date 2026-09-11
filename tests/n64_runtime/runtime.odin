@@ -3,21 +3,19 @@
 package n64_runtime
 
 import "base:runtime"
-import "core:c"
 
 // Fixture-local logging only; this compiler test has no Odin64 dependency.
 foreign import dragon "system:dragon"
 @(default_calling_convention="c")
 foreign dragon {
-	debug_init_emulog :: proc() -> c.bool ---
 	debugf :: proc(msg: cstring, #c_vararg args: ..any) ---
 }
 
 #assert(ODIN_OS == .N64)
 
 main :: proc() {
-	_ = debug_init_emulog()
-	debugf("ODIN_N64_RUNTIME_CHECK:v2:MAIN_REACHED:PASS\n")
+	// Through the runtime's stderr path: it must open the emulator log itself.
+	runtime.print_string("ODIN_N64_RUNTIME_CHECK:v2:MAIN_REACHED:PASS\n")
 	if !verify_runtime_ordering() || !verify_general_allocator() ||
 	   !verify_temp_allocator() || !verify_allocator_replaceability() {
 		return
@@ -35,6 +33,7 @@ REPLACE_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS
 MAIN_RETURN_SENTINEL :: "ODIN_N64_RUNTIME_MAIN_RETURN:v2\n"
 CLEANUP_SENTINEL     :: "ODIN_N64_RUNTIME_CLEANUP:v2\n"
 PASS_SENTINEL        :: "ODIN_N64_RUNTIME_PASS:v2\n"
+PANIC_SENTINEL       :: "ODIN_N64_RUNTIME_PANIC:v2"
 
 OOM_SIZE         :: 64 * 1024 * 1024
 GLOBAL_MAGIC     :: u32(0x4f44_494e)
@@ -153,6 +152,8 @@ finalize_runtime_probe :: proc "contextless" () {
 	} else {
 		debugf("ODIN_N64_RUNTIME_FAIL:v2:CLEANUP_ORDER\n")
 	}
+	// Last: a panic message must reach the emulator log through the runtime.
+	panic_contextless(PANIC_SENTINEL)
 }
 
 @(private="file")

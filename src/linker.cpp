@@ -10,37 +10,21 @@ struct LinkerData {
 	bool     needs_system_library_linked;
 };
 
+gb_internal i32 system_exec_command_line_app(char const *name, char const *fmt, ...);
+gb_internal bool system_exec_command_line_app_output(char const *command, gbString *output);
+
 #include "n64_build.cpp"
 
-gb_internal N64BuildSettings n64_build_settings_from_context(void) {
-	N64BuildSettings settings = {};
-	settings.sdk_root = build_context.n64_inst;
-	settings.title = build_context.n64_title;
-	settings.region = build_context.n64_region;
-	settings.save_type = build_context.n64_save_type;
-	for (isize index = 0; index < gb_count_of(settings.controllers); index += 1) {
-		settings.controllers[index] = build_context.n64_controllers[index];
-	}
-	settings.assets = build_context.n64_assets;
-	settings.metadata = build_context.n64_metadata;
-	settings.rtc = build_context.n64_rtc;
-	settings.show_system_calls = build_context.show_system_calls;
-	settings.keep_temp_files = build_context.keep_temp_files;
-	return settings;
-}
-
 gb_internal bool n64_prepare_build_from_context(void) {
-	N64BuildSettings settings = n64_build_settings_from_context();
 	if (build_context.metrics.os == TargetOs_n64 &&
-	    (build_context.command_kind & Command__does_build) != 0 &&
 	    build_context.command_kind == Command_build &&
 	    build_context.build_mode == BuildMode_Executable &&
-	    settings.sdk_root.len == 0) {
+	    build_context.n64.sdk_root.len == 0) {
 		char const *environment_sdk = gb_get_env("N64_INST", permanent_allocator());
 		if (environment_sdk != nullptr) {
 			String path = string_trim_whitespace(make_string_c(environment_sdk));
 			if (path.len > 0) {
-				settings.sdk_root = path_to_full_path(permanent_allocator(), path);
+				build_context.n64.sdk_root = path_to_full_path(permanent_allocator(), path);
 			}
 		}
 	}
@@ -48,6 +32,7 @@ gb_internal bool n64_prepare_build_from_context(void) {
 	N64PrepareBuildRequest request = {};
 	request.is_n64_target = build_context.metrics.os == TargetOs_n64;
 	request.n64_options_given = build_context.n64_inst_given || build_context.n64_rom_options_given;
+	request.rom_options_given = build_context.n64_rom_options_given;
 	request.command_does_build = (build_context.command_kind & Command__does_build) != 0;
 	request.is_build_command = build_context.command_kind == Command_build;
 	request.build_mode = build_context.build_mode;
@@ -57,18 +42,15 @@ gb_internal bool n64_prepare_build_from_context(void) {
 	request.no_entry_point = build_context.no_entry_point;
 	request.linker_choice = build_context.linker_choice;
 	request.print_linker_flags = build_context.print_linker_flags;
-	request.settings = settings;
-
-	N64PrepareBuildResult result = n64_prepare_build(request);
-	if (result.success) {
-		build_context.n64_inst = result.sdk_root;
-	}
-	return result.success;
+	request.settings = build_context.n64;
+	return n64_prepare_build(request);
 }
 
 gb_internal i32 n64_package_rom_from_linker(LinkerData *linker, String const &output_filename) {
 	N64BuildRequest request = {};
-	request.settings = n64_build_settings_from_context();
+	request.settings = build_context.n64;
+	request.show_system_calls = build_context.show_system_calls;
+	request.keep_temp_files = build_context.keep_temp_files;
 	request.output_filename = output_filename;
 	request.output_name = build_context.build_paths[BuildPath_Output].name;
 	request.extra_linker_flags = build_context.extra_linker_flags;

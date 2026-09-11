@@ -738,7 +738,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_KeepTempFiles,           str_lit("keep-temp-files"),           BuildFlagParam_None,    Command__does_build | Command_strip_semicolon);
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
-	add_flag(&build_flags, BuildFlag_RspEntry, str_lit("rsp-entry"), BuildFlagParam_String, Command_build);
+	add_flag(&build_flags, BuildFlag_RspEntry,                str_lit("rsp-entry"),                 BuildFlagParam_String,  Command_build);
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
@@ -1358,18 +1358,14 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						}
 
-						case BuildFlag_N64Inst: {
+						case BuildFlag_N64Inst:
 							GB_ASSERT(value.kind == ExactValue_String);
-							String path = string_trim_whitespace(value.value_string);
-							if (is_build_flag_path_valid(path)) {
-								build_context.n64_inst = path_to_full_path(permanent_allocator(), path);
+							if (n64_parse_existing_path(STR_LIT("-n64-inst"), value.value_string, true, &build_context.n64.sdk_root)) {
 								build_context.n64_inst_given = true;
 							} else {
-								gb_printf_err("Invalid -n64-inst path, got %.*s\n", LIT(path));
 								bad_flags = true;
 							}
 							break;
-						}
 						case BuildFlag_N64Title: {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String title = string_trim_whitespace(value.value_string);
@@ -1377,7 +1373,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("Invalid -n64-title value '%.*s': expected 1-20 characters using letters, digits, spaces, '-', '_', '.', or '!'\n", LIT(title));
 								bad_flags = true;
 							} else {
-								build_context.n64_title = copy_string(permanent_allocator(), title);
+								build_context.n64.title = copy_string(permanent_allocator(), title);
 								build_context.n64_rom_options_given = true;
 							}
 							break;
@@ -1392,7 +1388,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								u8 *text = gb_alloc_array(permanent_allocator(), u8, 2);
 								text[0] = cast(u8)gb_char_to_upper(cast(char)region[0]);
 								text[1] = 0;
-								build_context.n64_region = make_string(text, 1);
+								build_context.n64.region = make_string(text, 1);
 								build_context.n64_rom_options_given = true;
 							}
 							break;
@@ -1404,18 +1400,18 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("Invalid -n64-save-type value '%.*s': expected none, eeprom4k, eeprom16k, sram256k, sram768k, sram1m, or flashram\n", LIT(value.value_string));
 								bad_flags = true;
 							} else {
-								build_context.n64_save_type = save_type;
+								build_context.n64.save_type = save_type;
 								build_context.n64_rom_options_given = true;
 							}
 							break;
 						}
 						case BuildFlag_N64RTC:
-							build_context.n64_rtc = true;
+							build_context.n64.rtc = true;
 							build_context.n64_rom_options_given = true;
 							break;
 						case BuildFlag_N64Controllers: {
 							GB_ASSERT(value.kind == ExactValue_String);
-							if (!n64_parse_controllers(value.value_string, build_context.n64_controllers)) {
+							if (!n64_parse_controllers(value.value_string, build_context.n64.controllers)) {
 								gb_printf_err("Invalid -n64-controllers value '%.*s': expected 1-4 semicolon-separated controller declarations\n", LIT(value.value_string));
 								gb_printf_err("Valid declarations: n64, n64,pak=rumble, n64,pak=controller, n64,pak=transfer, none, mouse, vru, gamecube, randnetkeyboard, gamecubekeyboard\n");
 								bad_flags = true;
@@ -1426,7 +1422,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						}
 						case BuildFlag_N64Assets:
 							GB_ASSERT(value.kind == ExactValue_String);
-							if (n64_parse_existing_path(STR_LIT("-n64-assets"), value.value_string, true, &build_context.n64_assets)) {
+							if (n64_parse_existing_path(STR_LIT("-n64-assets"), value.value_string, true, &build_context.n64.assets)) {
 								build_context.n64_rom_options_given = true;
 							} else {
 								bad_flags = true;
@@ -1434,7 +1430,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						case BuildFlag_N64Metadata:
 							GB_ASSERT(value.kind == ExactValue_String);
-							if (n64_parse_existing_path(STR_LIT("-n64-metadata"), value.value_string, false, &build_context.n64_metadata)) {
+							if (n64_parse_existing_path(STR_LIT("-n64-metadata"), value.value_string, false, &build_context.n64.metadata)) {
 								build_context.n64_rom_options_given = true;
 							} else {
 								bad_flags = true;
@@ -1481,6 +1477,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 
 						case BuildFlag_RspEntry:
+							GB_ASSERT(value.kind == ExactValue_String);
 							build_context.rsp_entry = value.value_string;
 							break;
 						case BuildFlag_BuildMode: {
@@ -3334,6 +3331,9 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Example: -out:foo.exe");
 		}
 
+		if (print_flag("-rsp-entry:<template>")) {
+			print_usage_line(2, "Names the asm template that becomes the RSP overlay entry for -build-mode:rsp-asm.");
+		}
 		if (print_flag("-n64-inst:<directory>")) {
 			print_usage_line(2, "Sets the installed libdragon SDK root for -target:n64.");
 			print_usage_line(2, "Takes precedence over the N64_INST environment variable.");

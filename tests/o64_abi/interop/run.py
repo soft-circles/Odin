@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Execute linked GCC/Odin call pairs from identical O64 machine states."""
 
-import importlib.util
 import os
 import re
 import struct
@@ -11,19 +10,11 @@ from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
-ODIN_ROOT = HERE.parents[2]
-WORKSPACE = ODIN_ROOT.parent
-PHASE0 = WORKSPACE / "llvm-project/llvm/utils/o64-abi-differential.py"
-N64_INST = Path(os.environ.get("N64_INST", Path.home() / "n64_toolchain"))
+sys.path.insert(0, str(HERE.parents[1]))
+from n64_pins import N64_INST, load_phase0
+
 OBJDUMP = Path(os.environ.get("MIPS_O64_OBJDUMP", N64_INST / "bin/mips64-elf-objdump"))
 STOP = 0xDEAD0000
-
-
-def load_phase0():
-	spec = importlib.util.spec_from_file_location("o64_phase0", PHASE0)
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
 
 
 def disassemble(elf):

@@ -159,8 +159,7 @@ gb_internal void lb_add_function_type_attributes(LLVMValueRef fn, lbFunctionType
 	unsigned offset = 0;
 	if (ft->ret.kind == lbArg_Indirect) {
 		offset += 1;
-	} else if (build_context.metrics.arch == TargetArch_mips32be &&
-	           ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
+	} else if (ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
 		LLVMAddAttributeAtIndex(fn, LLVMAttributeReturnIndex, ft->ret.attribute);
 	}
 

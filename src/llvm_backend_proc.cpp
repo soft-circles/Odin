@@ -1037,6 +1037,26 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 
 		lbFunctionType *ft = map_must_get(&p->module->function_type_map, base_type(value.type));
 
+		// O64 passes aggregate C varargs like fixed aggregates: packed into
+		// 8-byte slots, left-justified (`inreg`) in a big-endian partial slot.
+		isize const arg_base = return_ptr.value != nullptr ? 1 : 0;
+		isize vararg_start = arg_count;
+		if (build_context.metrics.arch == TargetArch_mips32be && proc_type->Proc.c_vararg) {
+			vararg_start = arg_base;
+			for_array(i, ft->args) {
+				if (ft->args[i].kind != lbArg_Ignore) {
+					vararg_start += 1;
+				}
+			}
+			for (isize i = vararg_start; i < arg_count; i++) {
+				lbValue const &arg = processed_args[i-arg_base];
+				LLVMTypeRef t = LLVMTypeOf(arg.value);
+				if (lbAbiMipsO64::is_aggregate(t, arg.type)) {
+					args[i] = OdinLLVMBuildTransmute(p, arg.value, lbAbiMipsO64::aggregate_type(p->module->ctx, lb_sizeof(t)));
+				}
+			}
+		}
+
 		{
 			unsigned param_count = LLVMCountParamTypes(fnp);
 			GB_ASSERT(arg_count >= param_count);
@@ -1086,19 +1106,14 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 			param_offset += 1;
 
 			LLVMAddCallSiteAttribute(ret, 1, lb_create_enum_attribute_with_type(p->module->ctx, "sret", LLVMTypeOf(args[0])));
-		} else if (build_context.metrics.arch == TargetArch_mips32be &&
-		           ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
+		} else if (ft->ret.kind == lbArg_Direct && ft->ret.attribute != nullptr) {
 			LLVMAddCallSiteAttribute(ret, LLVMAttributeIndex_ReturnIndex, ft->ret.attribute);
 		}
 
-		LLVMAttributeIndex value_offset = LLVMAttributeIndex_FirstArgIndex;
-		if (return_ptr.value != nullptr) {
-			value_offset += 1;
-		}
-		for_array(i, processed_args) {
-			if (processed_args[i].abi_attribute != nullptr) {
-				LLVMAddCallSiteAttribute(ret, value_offset+cast(LLVMAttributeIndex)i,
-				                         processed_args[i].abi_attribute);
+		for (isize i = vararg_start; i < arg_count; i++) {
+			lbValue const &arg = processed_args[i-arg_base];
+			if (lbAbiMipsO64::is_aggregate(LLVMTypeOf(arg.value), arg.type)) {
+				LLVMAddCallSiteAttribute(ret, LLVMAttributeIndex_FirstArgIndex+cast(LLVMAttributeIndex)i, lb_create_enum_attribute(p->module->ctx, "inreg"));
 			}
 		}
 

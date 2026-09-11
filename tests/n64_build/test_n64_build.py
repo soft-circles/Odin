@@ -409,6 +409,25 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(output.is_file(), result.stdout)
 
+	def test_inherited_compiler_and_linker_flags_do_not_reach_the_pinned_link(self):
+		app = create_app(self.root, "inherited flags app")
+		output = app / "flags.z64"
+
+		result = run_build(
+			app,
+			f"-n64-inst:{self.sdk}",
+			f"-out:{output}",
+			extra_env={
+				"LDFLAGS": f"-L{self.root / 'missing libs'} -lno-such-library",
+				"CFLAGS": "-DODIN_UNEXPECTED",
+				"CXXFLAGS": "-DODIN_UNEXPECTED",
+				"ASFLAGS": "--no-such-assembler-flag",
+			},
+		)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertTrue(output.is_file(), result.stdout)
+
 	def test_inherited_make_ignore_errors_cannot_hide_packaging_failure(self):
 		sdk = make_sdk_with_commit(self.root, self.sdk, PINNED_LIBDRAGON_COMMIT)
 		tool = sdk / "bin/n64sym"
