@@ -846,12 +846,12 @@ try_cross_linking:;
 				// by the compiler frontend are still needed and most of the command
 				// line arguments prepared previously are incompatible with ld.
 				if (build_context.metrics.os == TargetOs_darwin) {
-					link_settings = gb_string_appendc(link_settings, "-Wl,-init,'__odin_entry_point' ");
+					link_settings = gb_string_appendc(link_settings, "-Wl,-init,__odin_entry_point ");
 					// NOTE(weshardee): __odin_exit_point should also be added, but -fini
 					// does not exist on MacOS
 				} else {
-					link_settings = gb_string_appendc(link_settings, "-Wl,-init,'_odin_entry_point' ");
-					link_settings = gb_string_appendc(link_settings, "-Wl,-fini,'_odin_exit_point' ");
+					link_settings = gb_string_appendc(link_settings, "-Wl,-init,_odin_entry_point ");
+					link_settings = gb_string_appendc(link_settings, "-Wl,-fini,_odin_exit_point ");
 				}
 			} else if (is_android) {
 				// Always shared even in android!
@@ -867,6 +867,7 @@ try_cross_linking:;
 				}
 			} else if (build_context.build_mode != BuildMode_DynamicLibrary) {
 				if (build_context.metrics.os != TargetOs_openbsd
+					&& build_context.metrics.os != TargetOs_darwin
 					&& build_context.metrics.arch != TargetArch_riscv64
 					&& !is_android
 				) {
@@ -1018,7 +1019,7 @@ try_cross_linking:;
 					if (is_android) {
 						// ignore
 					} else {
-						link_settings = gb_string_appendc(link_settings, "-Wl,-rpath,\\$ORIGIN ");
+						link_settings = gb_string_appendc(link_settings, "-Wl,-rpath,$ORIGIN ");
 					}
 				}
 			}

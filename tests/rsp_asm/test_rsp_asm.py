@@ -325,9 +325,23 @@ class RspArtifactTests(unittest.TestCase):
         self.assert_rejected(MINIMAL.replace("jr %ra", "addu %zero, %t0, %zero; jr %ra"), "read before definition")
         self.assert_rejected(SCALAR.replace("%a1", "%v01"))
 
+    def test_scratch_memory_signed_offsets_preserve_emission(self):
+        for memory in ("[%s4 + 4]", "[%s4 - -4]", "[%s4 + (2 + 2)]"):
+            with self.subTest(memory=memory):
+                source = self.command_body(
+                    f"la %s4, rspq_scratch; sw %zero, {memory}; "
+                    f"lw %r2, {memory}; nop; jr %ra; nop", 16)
+                result = self.build(source)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                text = self.output.read_text()
+                self.assertIn("sw $0, 4($20)", text)
+                self.assertIn("lw $2, 4($20)", text)
+
     def test_scratch_memory_forms_and_initialization_fail_closed(self):
         for memory in ("[%s4 + 2]", "[%s4 - 4]", "[%s4 + 16]", "[%s4 + 32768]",
                        "[%s4 - -32768]", "[%s4 + %a1]", "[%s4 + 4*2]", "[%s4 + 4 + 4]",
+                       "[%s4 * 1]", "[%s4 << 0]", "[%s4 + 4 << 1]", "[%s4 + 4 >> 1]",
+                       "[4 + %s4]", "#pre [%s4]", "#post [%s4]",
                        "[%zero:%s4]", "[%s4]:i32", "[%a0]", "[rspq_scratch]", "[%sp]", "%s4"):
             with self.subTest(memory=memory):
                 self.assert_rejected(SCALAR.replace("[%s4]", memory))

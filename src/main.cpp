@@ -84,6 +84,10 @@ gb_global Timings global_timings = {0};
 
 #include "bug_report.cpp"
 
+#if defined(GB_SYSTEM_OSX) || defined(GB_SYSTEM_UNIX)
+int run_subprocess(const char *name, const char **args, bool honor_path = false);
+#endif
+
 // NOTE(bill): 'name' is used in debugging and profiling modes
 gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char const *name, char const *fmt, va_list va) {
 	isize const cmd_cap = 64<<20; // 64 MiB should be more than enough
@@ -155,7 +159,11 @@ gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char con
 		gb_printf_err("[SYSTEM CALL] %s\n", name);
 		gb_printf_err("%s\n\n", cmd_line);
 	}
-	exit_code = system(cmd_line);
+
+	int argc;
+	char **argv = command_line_to_spawn_argv(cmd_line, &argc);
+
+	exit_code = run_subprocess(argv[0], cast(const char**)(argv), true);
 	if (exit_on_err && WIFSIGNALED(exit_code)) {
 		struct rlimit limit = { 0, 0, };
 		setrlimit(RLIMIT_CORE, &limit);
@@ -187,6 +195,19 @@ extern char **environ;
 #endif
 
 #if defined(GB_SYSTEM_WINDOWS)
+PROCESS_INFORMATION pi = {0};
+
+BOOL WINAPI run_subprocess_ctrl_c_handler(DWORD signal) {
+	switch (signal) {
+	case CTRL_C_EVENT:
+		// Caught ctrl-c event from child process.
+		TerminateProcess(pi.hProcess, 0);
+		return true;
+	default:
+		return false;
+	}
+}
+
 int run_subprocess(String const &exe_name, wchar_t *after_double_dash_raw) {
 	gbAllocator a = heap_allocator();
 
@@ -217,9 +238,10 @@ int run_subprocess(String const &exe_name, wchar_t *after_double_dash_raw) {
 	cmd_line[n] = '\0';
 
 	STARTUPINFOW start_info = {gb_size_of(STARTUPINFOW)};
-	PROCESS_INFORMATION pi = {0};
+
 	int exit_code = 0;
 
+	SetConsoleCtrlHandler(run_subprocess_ctrl_c_handler, true);
 	if (CreateProcessW(nullptr, cmd_line,
 	                   nullptr, nullptr, true, 0, nullptr, nullptr,
 	                   &start_info, &pi)) {
@@ -234,13 +256,24 @@ int run_subprocess(String const &exe_name, wchar_t *after_double_dash_raw) {
 		gb_free(a, cmd_line_utf8.text);
 		exit_code = -1;
 	}
+	SetConsoleCtrlHandler(run_subprocess_ctrl_c_handler, false);
+
 	return exit_code;
 }
 #else
-int run_subprocess(const char *name, const char **args) {
+int run_subprocess(const char *name, const char **args, bool honor_path) {
 	pid_t pid;
 	int status;
-	status = posix_spawn(&pid, name, NULL, NULL, (char *const *)args, environ);
+
+	String exec_name = make_string_c(args[0]);
+	exec_name = last_path_element(exec_name);
+	args[0] = alloc_cstring(gb_heap_allocator(), exec_name);
+
+	if (!honor_path) {
+		status = posix_spawn(&pid, name, NULL, NULL, (char *const *)args, environ);
+	} else {
+		status = posix_spawnp(&pid, name, NULL, NULL, (char *const *)args, environ);
+	}
 	if (status != 0) {
 		gb_printf_err("Could not spawn subprocess: %s\n", strerror(errno));
 		return -1;

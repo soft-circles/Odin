@@ -16,6 +16,14 @@ gb_internal i32 check_asm_operand_bit_width(Type *type) {
 	return cast(i32)(sz * 8);
 }
 
+gb_internal bool check_asm_target_supports_label_memory_operand(void) {
+	switch (build_context.metrics.arch) {
+	case TargetArch_amd64:
+		return true;
+	}
+	return false;
+}
+
 gb_internal bool is_valid_asm_parameter_type(Type *type) {
 	if (is_type_integer(type)) {
 		// NOTE(bill): do not allow 128-bit integers
@@ -81,14 +89,37 @@ gb_internal AsmOperandKind determine_asm_operand_kind(Operand const *operand) {
 		}
 		return AsmOperand_Register;
 	case_end;
+
+	case_ast_node(ie, IndexExpr, expr);
+		return AsmOperand_Lane;
+	case_end;
+
+	case_ast_node(be, BinaryExpr, expr);
+		return AsmOperand_RegisterShift;
+	case_end;
+
 	}
 	return AsmOperand_Invalid;
+}
+
+gb_internal bool asm_operand_kind_fits(AsmOperandKind dst, AsmOperandKind src) {
+	if (dst == src) {
+		return true;
+	}
+	switch (dst) {
+	case AsmOperand_Register_Or_Memory:
+		return src == AsmOperand_Register || src == AsmOperand_Memory;
+	case AsmOperand_RegisterShift:
+		return src == AsmOperand_Register;
+	}
+	return false;
 }
 
 gb_internal bool asm_reg_class_compatible(AsmRegClass want, AsmRegClass got) {
 	switch (want) {
 	case AsmRegClass_Integer:
 		return got == AsmRegClass_Integer;
+	case AsmRegClass_Float:
 	case AsmRegClass_Vector:
 		// A scalar float uses only the low lane, so it is valid in any vector
 		// register slot; a #simd vector matches the vector class exactly.
@@ -142,15 +173,35 @@ gb_internal void check_asm_collect_refs(AsmCtx *asm_ctx, PtrSet<Entity *> *refs,
 		// the bit; the unused check maps decl pins back through this mask.
 		if (touched_regs_) *touched_regs_ |= asm_ctx->clobber_bit_for_reg_name(expr->AsmRegister.name.string);
 		return;
+
+	case Ast_AsmMemoryTerm: {
+		auto *t = &expr->AsmMemoryTerm;
+		check_asm_collect_refs(asm_ctx, refs, t->operand, touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, t->scale,   touched_regs_);
+		return;
+	}
+
 	case Ast_AsmMemoryOperand: {
 		auto *m = &expr->AsmMemoryOperand;
 		check_asm_collect_refs(asm_ctx, refs, m->segment_override, touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, m->base,             touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, m->index,            touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, m->scale,            touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, m->disp,             touched_regs_);
+		for (Ast *term : m->terms) {
+			check_asm_collect_refs(asm_ctx, refs, term, touched_regs_);
+		}
 		return;
 	}
+	case Ast_IndexExpr:
+		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.expr,  touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.index, touched_regs_);
+		return;
+
+	case Ast_UnaryExpr:
+		check_asm_collect_refs(asm_ctx, refs, expr->UnaryExpr.expr,  touched_regs_);
+		return;
+
+	case Ast_BinaryExpr:
+		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.left,  touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.right, touched_regs_);
+		return;
 	}
 }
 enum AsmMismatch : u8 {
@@ -311,7 +362,8 @@ gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::
 	// must not be held against the slot's register class. Only width matters for the
 	// memory interpretation. Register operands still get the full class check.
 	if (want_class != AsmRegClass_Unknown && !is_memory) {
-		if (!asm_reg_class_compatible(want_class, got_class)) {
+		bool is_lane = asm_ctx->operand_type_is_lane(slot);
+		if (!is_lane && !asm_reg_class_compatible(want_class, got_class)) {
 			if (mismatch_) *mismatch_ = AsmMismatch_Class;
 			return false;
 		}
@@ -322,7 +374,10 @@ gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::
 		if (want_class == AsmRegClass_Vector && !is_memory) {
 			// A scalar float uses only the low lane, so it may be narrower than the
 			// slot; a #simd vector must match the vector width exactly.
-			bool width_ok = (got_class == AsmRegClass_Float) ? (got_w <= want_w) : (got_w == want_w);
+			bool is_lane = asm_ctx->operand_type_is_lane(slot);
+			bool width_ok = (got_class == AsmRegClass_Float && !is_lane)
+			              ? (got_w <= want_w)  // scalar float in a vector slot: narrower ok
+			              : (got_w == want_w); // lane element (or #simd vector): exact
 			if (!width_ok) {
 				if (mismatch_) *mismatch_ = AsmMismatch_Size;
 				return false;
@@ -848,13 +903,6 @@ gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegiste
 	if (r) {
 		operand->mode = Addressing_Value;
 
-		u16 reg_class = asm_ctx->reg_class(r);
-		if (reg_class == asm_ctx->REG_CLASS_K) {
-			// Opmask register: classify as a mask, not a 64-bit integer.
-			// operand->type = t_asm_mask; // see note if this type does not yet exist
-			// return true;
-		}
-
 		u16 width_in_bits = asm_ctx->reg_size(r);
 		switch (width_in_bits) {
 		case 0:
@@ -1149,6 +1197,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 	auto form_user_operand_count = [&](typename AsmCtx::Encoding const &form) -> int {
 		int count = is_pseudo ? target_explicit_count : cast(int)form.explicit_count();
+		GB_ASSERT_MSG(count <= 4, "%d", count);
 		return gb_max(count, 0);
 	};
 
@@ -1185,7 +1234,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		return asm_ctx->OP_NONE;
 	};
 
-	auto describe_form = [&](typename AsmCtx::Encoding const &form, typename AsmCtx::Clobber const &clobber) -> gbString {
+	auto describe_form = [&](typename AsmCtx::Encoding const &form, typename AsmCtx::Clobber const &clobber, isize max_count) -> gbString {
 		gbString s = gb_string_make(heap_allocator(), "");
 		int count = form_user_operand_count(form);
 		for (int i = 0; i < count; i++) {
@@ -1213,6 +1262,10 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 					s = (w > 0) ? gb_string_append_fmt(s, "%s%d", reg, cast(int)w)
 					            : gb_string_appendc(s, reg);
 					break;
+				case AsmOperand_Lane:
+					s = (w > 0) ? gb_string_append_fmt(s, "v%d[i]", cast(int)w)
+					            : gb_string_appendc(s, "v[i]");
+					break;
 				case AsmOperand_Memory:
 					s = (w > 0) ? gb_string_append_fmt(s, "m%d", cast(int)w)
 					            : gb_string_appendc(s, "m");
@@ -1221,6 +1274,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 					s = (w > 0) ? gb_string_append_fmt(s, "%s/m%d", reg, cast(int)w)
 					            : gb_string_append_fmt(s, "%s/m", reg);
 					break;
+				case AsmOperand_RegisterShift:
+					s = (w > 0) ? gb_string_append_fmt(s, "%s%d{,sh}", reg, cast(int)w)
+					            : gb_string_append_fmt(s, "%s{,sh}", reg);
 				default:
 					s = gb_string_appendc(s, "operand");
 					break;
@@ -1231,27 +1287,40 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				s = gb_string_appendc(s, ", ");
 			}
 
-			switch (k) {
-			case AsmOperand_Label: // 5 characters
-				break;
-			case AsmOperand_Immediate: // 3+ characters
-			case AsmOperand_Register_Or_Memory:
-				if (w == 0) {
-					s = gb_string_appendc(s, "  ");
-				} else if (w < 10) {
-					s = gb_string_appendc(s, " ");
+			if (max_count > 1) {
+				switch (k) {
+				case AsmOperand_Label: // 5 characters
+					break;
+				case AsmOperand_Immediate: // 3+ characters
+				case AsmOperand_Register_Or_Memory:
+					if (w == 0) {
+						s = gb_string_appendc(s, "   ");
+					} else if (w < 10) {
+						s = gb_string_appendc(s, "  ");
+					} else if (w < 100) {
+						s = gb_string_appendc(s, " ");
+					}
+					break;
+				case AsmOperand_Register: // 1+ characters
+				case AsmOperand_Lane:
+				case AsmOperand_Memory:
+					if (w == 0) {
+						s = gb_string_appendc(s, "    ");
+					} else if (w < 10) {
+						s = gb_string_appendc(s, "   ");
+					} else if (w < 100) {
+						s = gb_string_appendc(s, "  ");
+					} else {
+						s = gb_string_appendc(s, " ");
+					}
+					break;
+				case AsmOperand_RegisterShift:
+					// "<reg><w>{,sh}" — 5 trailing chars beyond the register arm
+					if      (w == 0)   s = gb_string_appendc(s, " ");
+					else if (w < 10)   s = gb_string_appendc(s, "");
+					// tune to match your actual column width; the point is: don't leave it unpadded
+					break;
 				}
-				break;
-			case AsmOperand_Register: // 1+ characters
-			case AsmOperand_Memory:
-				if (w == 0) {
-					s = gb_string_appendc(s, "    ");
-				} else if (w < 10) {
-					s = gb_string_appendc(s, "   ");
-				} else if (w < 100) {
-					s = gb_string_appendc(s, "  ");
-				}
-				break;
 			}
 		}
 		bool all_implicit = true;
@@ -1261,6 +1330,8 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			switch (k) {
 			case AsmOperand_Label:
 			case AsmOperand_Register:
+			case AsmOperand_RegisterShift:
+			case AsmOperand_Lane:
 			case AsmOperand_Memory:
 			case AsmOperand_Register_Or_Memory:
 				all_implicit = false;
@@ -1321,7 +1392,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			return;
 		}
 
-		gbString desc = describe_form(forms[form_index], clobber_forms[form_index]);
+		gbString desc = describe_form(forms[form_index], clobber_forms[form_index], 1);
 		defer (gb_string_free(desc));
 		String line = make_string(cast(u8 const *)desc, gb_string_length(desc));
 		line = string_trim_trailing_whitespace(line);
@@ -1343,7 +1414,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		);
 
 		for_array(fi, forms) {
-			gbString desc = describe_form(forms[fi], clobber_forms[fi]);
+			gbString desc = describe_form(forms[fi], clobber_forms[fi], forms.count);
 			bool dup = false;
 			for (auto const &l : lines) {
 				if (gb_string_are_equal(l, desc)) {
@@ -1450,8 +1521,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			AsmOperandKind dst = asm_ctx->kind_from_operand_type(type);
 			AsmOperandKind src = determine_asm_operand_kind(operand);
 
-			bool kind_ok = (dst == src) ||
-			               (dst == AsmOperand_Register_Or_Memory && (src == AsmOperand_Register || src == AsmOperand_Memory));
+			bool kind_ok = asm_operand_kind_fits(dst, src);
 
 			// Bias toward wider register slots so an r64 form outranks an otherwise-equal r32 form.
 			width_pref += cast(int)asm_ctx->operand_type_bit_width(type);
@@ -1531,12 +1601,100 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		}
 
 		GB_ASSERT(tmpl_entity->kind == Entity_AsmTemplate);
+		auto *ate = &tmpl_entity->AsmTemplate;
 
 		GB_ASSERT(valid_form_index >= 0);
 		instr->mnemonic = mnemonic;
 		instr->valid_form_index = cast(i32)valid_form_index;
 
 		check_operand_constraints(asm_ctx, operands, mnemonic, name);
+
+
+		// NOTE(bill): The scaled-index shift must equal log2(transfer size) on targets that require it
+		// e.g. on AArch64 register-offset loads/stores.
+		// Generic: forms with form_transfer_bytes()==0, or operands with no constant scale, impose nothing.
+		{
+			u16 tb = asm_ctx->form_transfer_bytes(forms[valid_form_index]);
+			if (build_context.metrics.arch == TargetArch_arm64 && tb != 0) {
+				i64 want = 0;
+				{
+					u16 b = tb;
+					while (b > 1) {
+						b >>= 1;
+						want++;
+					}
+				}
+				for_array(oi, operands) {
+					Ast *e = operands[oi].expr;
+					if (e == nullptr || e->kind != Ast_AsmMemoryOperand) {
+						continue;
+					}
+					auto *m = &e->AsmMemoryOperand;
+					if (m->classify.scale == nullptr || m->classify.scale->tav.mode != Addressing_Constant) {
+						continue;
+					}
+					i64 raw = exact_value_to_i64(exact_value_to_integer(m->classify.scale->tav.value));
+					// Normalise the '*' form to a shift amount; '<<'/'>>' are already shifts.
+					i64 shift = raw;
+					if (m->classify.scale_op.kind == Token_Mul) {
+						switch (raw) {
+						case 1:  shift = 0;  break;
+						case 2:  shift = 1;  break;
+						case 4:  shift = 2;  break;
+						case 8:  shift = 3;  break;
+						case 16: shift = 4;  break;
+						default: shift = -1; break;
+						}
+					}
+					// shift 0 (unscaled) is always legal; otherwise it must match log2(size).
+					if (shift != 0 && shift != want) {
+						if (m->classify.scale_op.kind == Token_Mul) {
+							error(m->classify.scale, "'%.*s' scaled-index multiplier must be %lld (the %u-byte transfer size), got %lld",
+							      LIT(name), cast(long long)(cast(i64)1 << want), cast(unsigned)tb, cast(long long)raw);
+						} else {
+							error(m->classify.scale, "'%.*s' scaled-index shift must be %lld (log2 of the %u-byte transfer), got %lld",
+							      LIT(name), cast(long long)want, cast(unsigned)tb, cast(long long)shift);
+						}
+					}
+				}
+			}
+		}
+		{
+			// Feature gate: the matched form may require a target feature (crc32b needs
+			// +crc, LSE atomics need +lse, ...). The form carries its Feature. It is
+			// satisfied if the feature is globally enabled for the target, OR if this
+			// template's own signature declares it via #require_target_feature /
+			// #enable_target_feature — a template opting in to a feature shouldn't be
+			// rejected just because the global build didn't enable it.
+			String feat = asm_ctx->feature_name_from_form(forms[valid_form_index]);
+			if (feat.len != 0) {
+				bool ok = check_target_feature_is_enabled(feat, nullptr);
+
+				if (!ok) {
+					// The proc type may declare the feature itself.
+					Type *pt = base_type(tmpl_entity->type);
+					GB_ASSERT(pt->kind == Type_Proc);
+					String req = pt->Proc.require_target_feature;
+					String en  = pt->Proc.enable_target_feature;
+					// These are comma-lists; `feat` is a single bare name. is_superset_of
+					// checks whether the declared list contains it.
+					if (req.len != 0 && check_target_feature_is_superset_of(req, feat, nullptr)) {
+						ok = true;
+					}
+					if (!ok && en.len != 0 && check_target_feature_is_superset_of(en, feat, nullptr)) {
+						ok = true;
+					}
+				}
+
+				if (!ok) {
+					error(instr->name,
+					      "'%.*s' requires the target feature '%.*s', which is not enabled; "
+					      "enable it on this 'asm' template (e.g. @(enable_target_feature=\"%.*s\")), "
+					      "or globally via '-target-features:\"%.*s\"' or a matching micro-architecture",
+					      LIT(name), LIT(feat), LIT(feat), LIT(feat));
+				}
+			}
+		}
 
 		// Handle clobbering from mnemonic
 		auto clobber = clobber_forms[valid_form_index];
@@ -1566,12 +1724,12 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 		bool effective_side_effects = clobber.implies_side_effects() && !internal_branch;
 
-		tmpl_entity->AsmTemplate.clobber_flags  |= clobber.implies_clobber_flags();
-		tmpl_entity->AsmTemplate.clobber_memory |= clobber.implies_clobber_memory() && mem_is_real;
-		tmpl_entity->AsmTemplate.is_volatile    |= effective_side_effects;
+		ate->clobber_flags  |= clobber.implies_clobber_flags();
+		ate->clobber_memory |= clobber.implies_clobber_memory() && mem_is_real;
+		ate->is_volatile    |= effective_side_effects;
 
-		tmpl_entity->AsmTemplate.has_observable_side_effect |= effective_side_effects;
-		tmpl_entity->AsmTemplate.has_observable_side_effect |= clobber.writes_mem && mem_is_real;
+		ate->has_observable_side_effect |= effective_side_effects;
+		ate->has_observable_side_effect |= clobber.writes_mem && mem_is_real;
 
 		// #align_stack only matters if the body makes a call (which requires the stack
 		// aligned at the call boundary) or manipulates RSP directly. Plain memory access
@@ -1582,8 +1740,8 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		}
 
 		u16 pinned_mask = 0;
-		for_array(i, tmpl_entity->AsmTemplate.decls) {
-			pinned_mask |= asm_decl_resolve_pin_bit(asm_ctx, tmpl_entity->AsmTemplate.decls, cast(i32)i);
+		for_array(i, ate->decls) {
+			pinned_mask |= asm_decl_resolve_pin_bit(asm_ctx, ate->decls, cast(i32)i);
 		}
 
 		u16 produced = cast(u16)clobber.implicit_wr & asm_ctx->CLOBBER_REGS_NAMED;
@@ -1591,7 +1749,6 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 		u16 written_ops = cast(u16)clobber.written;
 		u16 pinned_param_writes = 0;
-		auto const &decls = tmpl_entity->AsmTemplate.decls;
 		for_array(i, operands) {
 			int tslot = user_operand_target_index(cast(int)i);
 			if (tslot < 0 || tslot >= 4 || (written_ops & (1u << tslot)) == 0) {
@@ -1604,12 +1761,17 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				explicit_writes |= b;
 				continue;
 			}
-			Entity *pe = entity_of_node(operands[i].expr);
-			if (pe != nullptr && pe->kind == Entity_Variable) {
-				i32 di = -1;
-				check_asm_find_group(pe, decls, &di);         // reuse existing index finder
-				pinned_param_writes |= asm_decl_resolve_pin_bit(asm_ctx, decls, di);
+			// NOTE(bill): A lane operand `v[idx]` is an IndexExpr with no entity of its own
+			Ast *op_expr = operands[i].expr;
+			if (op_expr != nullptr && op_expr->kind == Ast_IndexExpr) {
+				op_expr = op_expr->IndexExpr.expr;
 			}
+			Entity *pe = entity_of_node(op_expr);
+ 			if (pe != nullptr && pe->kind == Entity_Variable) {
+ 				i32 di = -1;
+ 				check_asm_find_group(pe, ate->decls, &di);
+ 				pinned_param_writes |= asm_decl_resolve_pin_bit(asm_ctx, ate->decls, di);
+ 			}
 		}
 
 		if (is_pseudo &&
@@ -1631,7 +1793,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		}
 
 		facts->gen_regs   = produced | pinned_param_writes;
-		facts->gen_flags  = cast(u16)clobber.flags_wr;
+		facts->gen_flags  = cast(u16)clobber.flags_wr_call();
 		facts->read_flags = cast(u16)clobber.flags_rd_call();
 
 		// NOTE(bill): mnemonics such as `xor r, r` / `sub r, r` act as zeroing the destination
@@ -1697,6 +1859,20 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			if (slot < 0) {
 				continue;
 			}
+			// A pre/post-index memory operand writes back (and reads) its base
+			// register. The operand kind is Memory, so the register/lane path below
+			// won't see it; record the base's def+use here so liveness sees the
+			// cursor advance and a later read of it isn't flagged undefined.
+			if (operands[i].expr != nullptr && operands[i].expr->kind == Ast_AsmMemoryOperand) {
+				auto *m = &operands[i].expr->AsmMemoryOperand;
+				if (m->kind == AsmMemoryOperand_Pre || m->kind == AsmMemoryOperand_Post) {
+					Entity *be = entity_of_node(m->classify.base);
+					if (be != nullptr && be->kind == Entity_Variable) {
+						array_add(&facts->gen_params,  be);
+						array_add(&facts->read_params, be);
+					}
+				}
+			}
 			Entity *pe = entity_of_node(operands[i].expr);
 			if (pe == nullptr || pe->kind != Entity_Variable) {
 				continue;
@@ -1711,7 +1887,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 
 			{ // View aliasing: a view decl shares its source's physical register.
-				auto const &decls = tmpl_entity->AsmTemplate.decls;
+				auto const &decls = ate->decls;
 				i32 di = -1;
 				check_asm_find_group(pe, decls, &di);
 				if (di >= 0 && decls[di].view_of >= 0) {
@@ -1776,13 +1952,13 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			bool control = clobber.has_control();
 			bool halt    = clobber.has_halt();
 			// A conditional branch reads a flag and can fall through -> not terminal.
-			bool conditional = clobber.is_conditional();
+			bool conditional = clobber.is_conditional(valid_form);
 
 			facts->is_control = control;
 			facts->is_conditional = conditional;
 			facts->is_terminal = halt || (control && !conditional);
 		}
-		asm_ctx->clobber_implicit_regs(&tmpl_entity->AsmTemplate.clobber_registers_set, produced);
+		asm_ctx->clobber_implicit_regs(&ate->clobber_registers_set, produced);
 
 		// Purity inference
 		if (cfg->can_be_pure) {
@@ -1836,9 +2012,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			possible_kinds      [i] = dst;
 			possible_class_kinds[i] = asm_ctx->reg_class_from_operand_type(type);
 
-			bool kind_ok = (dst == src) ||
-			               (dst == AsmOperand_Register_Or_Memory
-			                && (src == AsmOperand_Register || src == AsmOperand_Memory));
+			bool kind_ok = asm_operand_kind_fits(dst, src);
 			if (!kind_ok) {
 				valid_spots[i] = false;
 			} else {
@@ -1934,6 +2108,40 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 }
 
 
+enum AsmTermCategory : u8 {
+	AsmTermCategory_Other,
+	AsmTermCategory_Register,
+	AsmTermCategory_Const,
+	AsmTermCategory_Immediate,
+	AsmTermCategory_Label,
+};
+
+gb_internal AsmTermCategory check_asm_mem_term_category(Operand *o, Array<AsmTemplateEntityDecl> const &decls) {
+	if (o == nullptr || o->expr == nullptr) {
+		return AsmTermCategory_Other;
+	}
+	if (o->expr->kind == Ast_AsmLabelDecl) {
+		return AsmTermCategory_Label;
+	}
+	if (o->expr->kind == Ast_AsmRegister) {
+		return AsmTermCategory_Register;
+	}
+	if (o->mode == Addressing_Constant) {
+		return AsmTermCategory_Const;
+	}
+	Entity *pe = entity_of_node(o->expr);
+	if (pe != nullptr && pe->kind == Entity_Variable) {
+		switch (check_asm_find_kind(pe, decls)) {
+		case AsmTemplateEntityDecl_Immediate:
+			return AsmTermCategory_Immediate;
+		case AsmTemplateEntityDecl_Register:
+		case AsmTemplateEntityDecl_Memory:
+			return AsmTermCategory_Register;
+		}
+	}
+	return AsmTermCategory_Other;
+}
+
 template <typename AsmCtx>
 gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *entity, Operand *operand, Ast *expr, bool allow_memory_operands) {
 	if (expr == nullptr) {
@@ -1961,10 +2169,27 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 	case_ast_node(pe, ParenExpr, expr);
 		check_expr(ctx, operand, expr);
 		if (operand->mode != Addressing_Constant) {
-			error(expr, "Asm operands within parentheses can only compile time constants, if they were supported");
-		} else {
-			error(expr, "Asm operands with parentheses are not currently supported");
+			error(expr, "Asm operands within parentheses must be compile time constants");
+			return;
 		}
+
+		Ast *inner = pe->expr;
+		bool trivial = false;
+		switch (inner->kind) {
+		case Ast_BasicLit:
+		case Ast_Ident:
+			trivial = true;
+			break;
+		case Ast_UnaryExpr:
+			// `(-3)` / `(~x)` — a unary on an atom parses fine unparenthesised.
+			trivial = inner->UnaryExpr.expr->kind == Ast_BasicLit ||
+			          inner->UnaryExpr.expr->kind == Ast_Ident;
+			break;
+		}
+		if (trivial) {
+			warning(expr, "Redundant parentheses around a single asm operand; the parentheses can be removed");
+		}
+
 		return;
 	case_end;
 
@@ -1978,6 +2203,31 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		}
 		found = scope_lookup(param_scope->parent, i->interned, i->hash);
 		if (found == nullptr) {
+			u32 cond_code = 0;
+			if (asm_ctx->is_cond_code_name(i->token.string, &cond_code)) {
+				// A condition code (e.g. `eq` in `csinc r, a, b, eq`) is not built-in:
+				// condition codes are ordinary constants in Odin. Point the user at the
+				// fix rather than the generic "undeclared" message.
+				char bits[5] = {
+					char('0' + ((cond_code >> 3) & 1)),
+					char('0' + ((cond_code >> 2) & 1)),
+					char('0' + ((cond_code >> 1) & 1)),
+					char('0' + ( cond_code       & 1)),
+					0,
+				};
+				error(expr, "Condition code '%.*s' is not defined in scope. Condition codes are ordinary constants in Odin, "
+				            "define it e.g. `%.*s :: 0b%s` (%u)",
+				            LIT(i->token.string), LIT(i->token.string), bits, cond_code);
+
+				// NOTE(bill): Add this here to improve error propagation because this is the most likely result
+				operand->mode  = Addressing_Constant;
+				operand->value = exact_value_i64(cond_code);
+				operand->type  = t_untyped_integer;
+
+				add_type_and_value(ctx, expr, operand->mode, operand->type, operand->value);
+
+				return;
+			}
 			error(expr, "Undeclared asm parameter or constant '%.*s'", LIT(i->token.string));
 			return;
 		}
@@ -2019,8 +2269,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		} else if (segment_override.expr->kind == Ast_AsmRegister) {
 			String reg_name = segment_override.expr->AsmRegister.name.string;
 			auto reg = asm_ctx->register_lookup(reg_name);
-			auto reg_class = asm_ctx->reg_class(asm_ctx->register_codes[reg]);
-			if (reg_class != asm_ctx->REG_CLASS_SEG) {
+			if (!asm_ctx->reg_is_segment(cast(u16)reg)) {
 				gbString s = expr_to_string(segment_override.expr);
 				error(segment_override.expr, "A segment override must be a selector register parameter, got %s", s);
 				gb_string_free(s);
@@ -2031,54 +2280,185 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			gb_string_free(s);
 		}
 
+		switch (mem_op->kind) {
+		case AsmMemoryOperand_Default:
+			break;
+		case AsmMemoryOperand_Pre:
+		case AsmMemoryOperand_Post:
+			if (build_context.metrics.arch != TargetArch_arm64) {
+				error(expr, "#pre/#post asm memory operands are not supported by the target platform");
+			}
+			break;
+		}
+
+
 		Operand base  = {};
 		Operand index = {};
 		Operand scale = {};
 		Operand disp  = {};
-		check_asm_instruction_operand(asm_ctx, ctx, entity, &base,  mem_op->base,  false);
-		check_asm_instruction_operand(asm_ctx, ctx, entity, &index, mem_op->index, false);
-		check_asm_instruction_operand(asm_ctx, ctx, entity, &scale, mem_op->scale, false);
-		check_asm_instruction_operand(asm_ctx, ctx, entity, &disp,  mem_op->disp,  false);
+		Token   scale_op = {};
+		i64  disp_total     = 0;
+		bool has_disp_const = false;
+		Ast *disp_host      = nullptr; // node to host a folded constant displacement
+		Ast *label_node     = nullptr;
+		bool class_ok       = true;
 
-		// NOTE(bill): if the base/index is actually an immediate and there is no scale nor disp,
-		// then treat it as a disp, and modify the AST too
-		if (index.expr != nullptr && scale.expr == nullptr && disp.expr == nullptr) {
-			bool do_swap = index.mode == Addressing_Constant;
-			if (!do_swap) {
-				Entity *param_entity = entity_of_node(index.expr);
-				if (param_entity != nullptr && param_entity->kind == Entity_Variable) {
-					auto kind = check_asm_find_kind(param_entity, ate->decls);
-					do_swap = kind == AsmTemplateEntityDecl_Immediate;
-				}
+		for (Ast *term_ast : mem_op->terms) {
+			if (term_ast == nullptr || term_ast->kind != Ast_AsmMemoryTerm) {
+				continue;
 			}
-			if (do_swap) {
-				disp = index;
-				index = {};
+			ast_node(term, AsmMemoryTerm, term_ast);
+			bool neg = term->op.kind == Token_Sub;
 
-				mem_op->disp = mem_op->index;
-				mem_op->index = nullptr;
+			Operand o = {};
+			check_asm_instruction_operand(asm_ctx, ctx, entity, &o, term->operand, false);
+			AsmTermCategory operand_cat = check_asm_mem_term_category(&o, ate->decls);
 
-				mem_op->disp_op = mem_op->index_op;
-				mem_op->index_op = {};
+			if (term->scale != nullptr) {
+				Operand s = {};
+				check_asm_instruction_operand(asm_ctx, ctx, entity, &s, term->scale, false);
+				AsmTermCategory scale_cat = check_asm_mem_term_category(&s, ate->decls);
+
+				bool scale_is_const = scale_cat == AsmTermCategory_Const || scale_cat == AsmTermCategory_Immediate;
+				if (operand_cat == AsmTermCategory_Register && scale_is_const) {
+					// reg*scale -> a genuine scaled index
+					if (neg) {
+						error(term->operand, "A memory index register cannot be negated");
+						class_ok = false;
+					} else if (index.expr != nullptr) {
+						error(term->operand, "A memory operand may only have a single index register");
+						class_ok = false;
+					} else {
+						index    = o;
+						scale    = s;
+						scale_op = term->scale_op;
+					}
+				} else if (operand_cat == AsmTermCategory_Const && scale_cat == AsmTermCategory_Const &&
+				           o.value.kind == ExactValue_Integer && s.value.kind == ExactValue_Integer) {
+					i64 iv = exact_value_to_i64(o.value);
+					i64 sv = exact_value_to_i64(s.value);
+					i64 v  = 0;
+					// TODO(bill): should this be in big-int math or not?
+					switch (term->scale_op.kind) {
+					case Token_Shl:
+					case Token_Shr:
+						// A shift by a negative amount or by >= the width is undefined;
+						// guard it rather than fold UB into the displacement.
+						if (sv < 0 || sv >= 64) {
+							error(term->scale_op, "A constant shift amount must be within 0 ..< 64, got %lld", cast(long long)sv);
+							class_ok = false;
+							sv = gb_clamp(sv, 0, 63);
+							break;
+						}
+						v = (term->scale_op.kind == Token_Shl) ? (iv << sv) : (iv >> sv);
+						break;
+					case Token_Mul:
+						v = iv * sv;
+						break;
+					default:
+						error(term->scale_op, "Unknown/unhandled scaling operator '%.*s'", LIT(term->scale_op.string));
+						class_ok = false;
+						break;
+					}
+					disp_total += neg ? -v : v;
+					has_disp_const = true;
+					if (disp_host == nullptr) {
+						disp_host = term->operand;
+					}
+				} else {
+					error(term->operand, "A scaled term in a memory operand must be 'register*constant'");
+					class_ok = false;
+				}
+				continue;
+			}
+
+
+			switch (operand_cat) {
+			case AsmTermCategory_Register:
+				if (neg) {
+					error(term->operand, "A base or index register cannot be negated");
+					class_ok = false;
+				} else if (base.expr == nullptr) {
+					base = o;
+				} else if (index.expr == nullptr) {
+					index = o;
+				} else {
+					error(term->operand, "A memory operand may have at most a base and an index register");
+					class_ok = false;
+				}
+				break;
+			case AsmTermCategory_Const:
+				if (o.value.kind == ExactValue_Integer) {
+					i64 v = exact_value_to_i64(o.value);
+					disp_total += neg ? -v : v;
+					has_disp_const = true;
+					if (disp_host == nullptr) {
+						disp_host = term->operand;
+					}
+				} else {
+					// non-integer constant: let the displacement check below report it
+					disp = o;
+				}
+				break;
+			case AsmTermCategory_Immediate:
+				// A $-immediate parameter is a legal assemble-time displacement.
+				if (disp.expr != nullptr) {
+					error(term->operand, "A memory operand may only have a single immediate displacement");
+					class_ok = false;
+				} else {
+					disp = o;
+				}
+				break;
+			case AsmTermCategory_Label:
+				if (label_node != nullptr) {
+					error(term->operand, "A memory operand may only reference a single label");
+					class_ok = false;
+				} else {
+					label_node = term->operand;
+					disp       = o;
+				}
+				break;
+			default:
+				{
+					gbString s = expr_to_string(term->operand);
+					error(term->operand, "Invalid term in a memory operand, got %s", s);
+					gb_string_free(s);
+					class_ok = false;
+				}
+				break;
 			}
 		}
-		if (base.expr != nullptr && index.expr == nullptr && scale.expr == nullptr && disp.expr == nullptr) {
-			bool do_swap = base.mode == Addressing_Constant;
-			if (!do_swap) {
-				Entity *param_entity = entity_of_node(base.expr);
-				if (param_entity != nullptr && param_entity->kind == Entity_Variable) {
-					auto kind = check_asm_find_kind(param_entity, ate->decls);
-					do_swap = kind == AsmTemplateEntityDecl_Immediate;
-				}
-			}
-			if (do_swap) {
-				disp = base;
-				base = {};
 
-				mem_op->disp = mem_op->base;
-				mem_op->base = nullptr;
-			}
+		// Materialise a single displacement operand from the folded constant, unless a
+		// label or immediate already occupies the displacement.
+		if (disp.expr == nullptr && has_disp_const && disp_host != nullptr) {
+			ExactValue folded = exact_value_i64(disp_total);
+			add_type_and_value(ctx, disp_host, Addressing_Constant, t_untyped_integer, folded);
+			disp.expr  = disp_host;
+			disp.mode  = Addressing_Constant;
+			disp.type  = t_untyped_integer;
+			disp.value = folded;
 		}
+
+		mem_op->classify.base           = base.expr;
+		mem_op->classify.index          = index.expr;
+		mem_op->classify.scale          = scale.expr;
+		mem_op->classify.scale_op       = scale_op;
+		mem_op->classify.label          = label_node;
+		mem_op->classify.disp_total     = disp_total;
+		mem_op->classify.has_disp_const = has_disp_const;
+		mem_op->classify.ok             = class_ok;
+
+		// Defensive: a well-formed memory operand always classifies to at least one
+		// of base / index / label / displacement. If none is set, the term list
+		// reached the checker empty or malformed — e.g. a bare `[reg]` whose sole
+		// term the parser dropped (it pushes terms only inside the +/- loop). Catch
+		// that here rather than silently emitting a memory operand with no address.
+		GB_ASSERT_MSG(!(base.expr == nullptr && index.expr == nullptr &&
+		                label_node == nullptr && !has_disp_const && disp.expr == nullptr),
+		              "asm: memory operand produced no base/index/displacement "
+		              "(terms.count = %td); the parser likely dropped a single-term '[operand]'",
+		              cast(isize)mem_op->terms.count);
 
 		i32  base_w     = 0;
 		i32  index_w    = 0;
@@ -2086,78 +2466,69 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		bool have_index = false;
 
 		// base: must resolve to a 32/64-bit integer register
-		if (base.expr) {
+		for (int i = 0; base.expr && i == 0; i++) {
 			String reg_name = {};
-			bool ok_kind = true;
 			if (base.expr->kind == Ast_AsmRegister) {
 				reg_name = base.expr->AsmRegister.name.string;
-				ok_kind = check_register(asm_ctx, &base, &base.expr->AsmRegister);
-			} else {
-				Entity *param_entity = entity_of_node(base.expr);
-				if (param_entity == nullptr || param_entity->kind != Entity_Variable) {
-					gbString s = expr_to_string(base.expr);
-					error(base.expr, "A base value must be a register parameter, got %s", s);
-					gb_string_free(s);
-					ok_kind = false;
-				} else {
-					auto kind = check_asm_find_kind(param_entity, ate->decls);
-					// A pointer/integer parameter used as an address base lowers to a
-					// register operand, so accept both Register and Memory kinds here.
-					if (kind != AsmTemplateEntityDecl_Register && kind != AsmTemplateEntityDecl_Memory) {
-						gbString s = expr_to_string(base.expr);
-						error(base.expr, "A base value must be a register parameter, got %s", s);
-						gb_string_free(s);
-						ok_kind = false;
-					}
+				if (check_register(asm_ctx, &base, &base.expr->AsmRegister)) {
+					have_base = check_asm_addr_register(&base, AsmAddr_Base, reg_name, &base_w);
 				}
+				break;
 			}
-			if (ok_kind) {
-				have_base = check_asm_addr_register(&base, AsmAddr_Base, reg_name, &base_w);
+			Entity *param_entity = entity_of_node(base.expr);
+			if (param_entity == nullptr || param_entity->kind != Entity_Variable) {
+				gbString s = expr_to_string(base.expr);
+				error(base.expr, "A base value must be a register parameter, got %s", s);
+				gb_string_free(s);
+				break;
 			}
+			auto kind = check_asm_find_kind(param_entity, ate->decls);
+			// A pointer/integer parameter used as an address base lowers to a
+			// register operand, so accept both Register and Memory kinds here.
+			if (kind != AsmTemplateEntityDecl_Register && kind != AsmTemplateEntityDecl_Memory) {
+				gbString s = expr_to_string(base.expr);
+				error(base.expr, "A base value must be a register parameter, got %s", s);
+				gb_string_free(s);
+				break;
+			}
+			have_base = check_asm_addr_register(&base, AsmAddr_Base, reg_name, &base_w);
 		}
 
 		// index: must resolve to a 32/64-bit integer register, and not rsp/esp
-		if (index.expr) {
-			String reg_name = {};
-			bool ok_kind = true;
+		for (int i = 0; index.expr && i == 0; i++) {
 			if (index.expr->kind == Ast_AsmRegister) {
-				reg_name = index.expr->AsmRegister.name.string;
-				ok_kind = check_register(asm_ctx, &index, &index.expr->AsmRegister);
-			} else {
-				Entity *param_entity = entity_of_node(index.expr);
-				if (param_entity == nullptr || param_entity->kind != Entity_Variable) {
-					gbString s = expr_to_string(index.expr);
-					error(index.expr, "An index value must be an integer register, got %s", s);
-					gb_string_free(s);
-					ok_kind = false;
-				} else {
-					auto kind = check_asm_find_kind(param_entity, ate->decls);
-					switch (kind) {
-					case AsmTemplateEntityDecl_Register:
-					case AsmTemplateEntityDecl_Immediate:
-						// okay
-						break;
-					default:
-						{
-							gbString s = expr_to_string(index.expr);
-							gbString t = type_to_string(index.type);
-							error(index.expr, "An index must be an integer register, got %s of type %s", s, t);
-							gb_string_free(t);
-							gb_string_free(s);
-							ok_kind = false;
-						}
-						break;
-					}
+				String reg_name = index.expr->AsmRegister.name.string;
+				if (check_register(asm_ctx, &index, &index.expr->AsmRegister)) {
+					have_index = check_asm_addr_register(&index, AsmAddr_Index, reg_name, &index_w);
 				}
+				break;
 			}
-			if (ok_kind) {
-				have_index = check_asm_addr_register(&index, AsmAddr_Index, reg_name, &index_w);
+			Entity *param_entity = entity_of_node(index.expr);
+			if (param_entity == nullptr || param_entity->kind != Entity_Variable) {
+				gbString s = expr_to_string(index.expr);
+				error(index.expr, "An index value must be an integer register, got %s", s);
+				gb_string_free(s);
+				break;
 			}
+			auto kind = check_asm_find_kind(param_entity, ate->decls);
+			if (kind != AsmTemplateEntityDecl_Register && kind != AsmTemplateEntityDecl_Memory) {
+				gbString s = expr_to_string(index.expr);
+				gbString t = type_to_string(index.type);
+				error(index.expr, "An index must be an integer register, got %s of type %s", s, t);
+				gb_string_free(t);
+				gb_string_free(s);
+				break;
+			}
+			have_index = check_asm_addr_register(&index, AsmAddr_Index, /*reg_name*/{}, &index_w);
 		}
 
 		// base and index must be the same width
-		if (have_base && have_index && base_w != index_w) {
-			Ast *at = mem_op->base ? mem_op->base : expr;
+		// AArch64 register-offset addressing allows a 32-bit index with a 64-bit base
+		// (extended-register form: uxtw/sxtw). Other targets require equal widths.
+		bool ext_index_ok = build_context.metrics.arch == TargetArch_arm64 &&
+		                    base_w == 64 && index_w == 32;
+		if (have_base && have_index && base_w != index_w && !ext_index_ok) {
+			Ast *at = base.expr ? base.expr : expr;
 			error(at, "A memory operand's base and index registers must be the same width, got a %d-bit base and a %d-bit index",
 			      cast(int)base_w, cast(int)index_w);
 		}
@@ -2184,7 +2555,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 				} else {
 					i64 v = exact_value_to_i64(scale.value);
 
-					Token op = mem_op->scale_op;
+					Token op = scale_op;
 					switch (op.kind) {
 					case Token_Mul:
 						switch (v) {
@@ -2217,6 +2588,8 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 							error(op, "The target platform does not support '%.*s' for shifting scale parameters in memory operands", LIT(op.string));
 						}
 					}
+
+					add_type_and_value(ctx, scale.expr, scale.mode, scale.type, scale.value);
 				}
 			} else {
 				Entity *param_entity = entity_of_node(scale.expr);
@@ -2240,6 +2613,19 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		for (int i = 0; disp.expr && i == 0; i++) {
 			if (disp.expr->kind == Ast_AsmRegister) {
 				error(disp.expr, "A displacement must be a constant integer value, got a register");
+				break;
+			}
+
+			if (disp.expr->kind == Ast_AsmLabelDecl) {
+				// NOTE(bill): The label was resolved (and marked used) by the recursive operand check
+				// above, so all that is left is rejecting the encodings that cannot carry it.
+				if (!check_asm_target_supports_label_memory_operand()) {
+					error(disp.expr, "The target platform does not support label references within memory operands");
+					break;
+				}
+				if (base.expr != nullptr || index.expr != nullptr || scale.expr != nullptr) {
+					error(disp.expr, "A label reference within a memory operand cannot be combined with a base, index, or scale; it is always relative to the instruction pointer");
+				}
 				break;
 			}
 
@@ -2296,7 +2682,6 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 					gb_string_free(s);
 					// leave operand->type == t_rawptr ("unsized")
 				}
-
 			}
 		}
 
@@ -2311,6 +2696,124 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		}
 		add_entity_use(ctx, label->name, found);
 		add_type_and_value(ctx, expr, Addressing_Value, found->type, {});
+		return;
+	case_end;
+
+	case_ast_node(ie, IndexExpr, expr);
+		if (!allow_memory_operands) {
+			error(expr, "Invalid use of an index expression in an asm operand");
+			return;
+		}
+
+		Operand lhs = {};
+		Operand rhs = {};
+		check_asm_instruction_operand(asm_ctx, ctx, entity, &lhs, ie->expr,  false);
+		check_asm_instruction_operand(asm_ctx, ctx, entity, &rhs, ie->index, false);
+
+		auto lhs_kind = determine_asm_operand_kind(&lhs);
+		if (lhs_kind != AsmOperand_Register) {
+			gbString s = expr_to_string(lhs.expr);
+			error(lhs.expr, "Expected a vector register, got '%s' which is %.*s",
+			      s, LIT(asm_operand_kind_expected_strings[lhs_kind]));
+			gb_string_free(s);
+		} else if (!is_type_simd_vector(lhs.type)) {
+			gbString s = type_to_string(lhs.type);
+			error(lhs.expr, "Expected a vector register, got %s", s);
+			gb_string_free(s);
+		}
+
+		auto rhs_kind = determine_asm_operand_kind(&rhs);
+		if (rhs_kind != AsmOperand_Immediate) {
+			gbString s = expr_to_string(rhs.expr);
+			error(rhs.expr, "Expected an integer immediate as an index, got '%s' which is %.*s",
+			      s, LIT(asm_operand_kind_expected_strings[rhs_kind]));
+			gb_string_free(s);
+		} else if (!is_type_integer(rhs.type)) {
+			gbString s = type_to_string(rhs.type);
+			error(rhs.expr, "Expected an integer immediate as an index, got %s", s);
+			gb_string_free(s);
+		} else if (rhs.mode != Addressing_Constant || rhs.value.kind != ExactValue_Integer) {
+			Entity *pe = entity_of_node(rhs.expr);
+			bool is_poly_const = pe != nullptr && pe->kind == Entity_Variable &&
+			                     (pe->flags & EntityFlag_PolyConst) != 0;
+			if (!is_poly_const) {
+				error(rhs.expr, "A vector lane index must be an assemble-time integer constant");
+			}
+		}
+
+		if (build_context.metrics.arch != TargetArch_arm64) {
+			error(expr, "The target platform does not support vector element extraction syntax");
+		}
+
+		operand->expr = expr;
+		operand->mode = Addressing_Value;
+		operand->type = base_array_type(lhs.type);
+		operand->value = {};
+
+		add_type_and_value(ctx, operand->expr, operand->mode, operand->type, operand->value);
+
+		if (rhs.mode == Addressing_Constant) {
+			add_type_and_value(ctx, rhs.expr, rhs.mode, rhs.type, rhs.value);
+		}
+		return;
+	case_end;
+
+	case_ast_node(be, BinaryExpr, expr);
+		switch (be->op.kind) {
+		case Token_Shl:
+		case Token_Shr:
+		case Token_Mul:
+			break;
+		default:
+			error(be->op, "Unsupported operator '%.*s' in an asm operand; only a register shift/scale ('<<', '>>', '*') is allowed here", LIT(be->op.string));
+			return;
+		}
+
+		if (build_context.metrics.arch != TargetArch_arm64) {
+			error(expr, "Asm shifted/scaled register operands are not supported by the target platform");
+			return;
+		}
+
+		Operand reg    = {};
+		Operand amount = {};
+		check_asm_instruction_operand(asm_ctx, ctx, entity, &reg,    be->left,  false);
+		check_asm_instruction_operand(asm_ctx, ctx, entity, &amount, be->right, false);
+		if (reg.mode == Addressing_Invalid || amount.mode == Addressing_Invalid) {
+			return;
+		}
+		if (determine_asm_operand_kind(&reg) != AsmOperand_Register) {
+			gbString s = expr_to_string(reg.expr);
+			error(reg.expr, "The left-hand side of a register shift/scale must be a register, got %s", s);
+			gb_string_free(s);
+			return;
+		}
+
+		if (determine_asm_operand_kind(&amount) != AsmOperand_Immediate) {
+			error(amount.expr, "The right side of a register shift/scale must be an immediate");
+			return;
+		}
+
+		if (amount.mode == Addressing_Constant && amount.value.kind == ExactValue_Integer) {
+			i64 amt = exact_value_to_i64(amount.value);
+			if (be->op.kind == Token_Mul) {
+				if (amt <= 0 || (amt & (amt-1)) != 0) {
+					error(be->right, "A register scale using '*' must be a positive power of two, got %lld", cast(long long)amt);
+					return;
+				}
+			} else {
+				i64 max_shift = 63;
+				if (reg.type != nullptr && is_type_integer(reg.type)) {
+					max_shift = 8*cast(i64)type_size_of(reg.type) - 1;
+				}
+				if (amt < 0 || amt > max_shift) {
+					error(be->right, "A register shift amount must be within 0..=%lld, got %lld", cast(long long)max_shift, cast(long long)amt);
+					return;
+				}
+			}
+		}
+
+		operand->mode = reg.mode;
+		operand->type = reg.type;
 		return;
 	case_end;
 	}
@@ -2355,8 +2858,13 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		// always require the results of `asm` templates
 		type->Proc.require_results = true;
 	}
-
 	entity->type = type;
+
+	AttributeContext ac = make_attribute_context({}, {});
+	if (d != nullptr) {
+		check_decl_attributes(ctx, d->attributes, proc_decl_attribute, &ac);
+	}
+	check_target_feature_attributes(ac, entity, type);
 
 	check_asm_specs(asm_ctx, ctx, ate->param_scope, at->specs, &ate->decls);
 
@@ -2364,7 +2872,8 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 	{ // check clobbers
 		bool is_volatile       = false;
 		bool is_align_stack    = false;
-		auto *clobber_registers_set = &entity->AsmTemplate.clobber_registers_set;
+		auto *clobber_registers_set  = &entity->AsmTemplate.clobber_registers_set;
+		auto *preserve_registers_set = &entity->AsmTemplate.preserve_registers_set;
 
 		bool clobber_flags  = false;
 		bool clobber_memory = false;
@@ -2394,22 +2903,55 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 				continue;
 			}
 
+			if (clobber->name.string == "preserve" ||
+			    clobber->name.string == "clobber") {
+				// okay
+			} else {
+				error(clobber->name, "Unknown clobber directive '#%.*s'", LIT(clobber->name.string));
+				continue;
+			}
+
+			bool is_preserve = clobber->name.string == "preserve";
+			auto *target_set = is_preserve ? preserve_registers_set : clobber_registers_set;
+
 			switch (clobber->value->kind) {
 			case_ast_node(asm_reg, AsmRegister, clobber->value)
 				String reg = asm_reg->name.string;
-				if (asm_reg->flag.string != "") {
-					error(asm_reg->flag, "#clobber on specific flags is not allowed");
-				}
-				Operand operand = {};
-				if (check_register(asm_ctx, &operand, asm_reg)) {
-					if (string_set_update(clobber_registers_set, reg)) {
-						error(clobber->value, "#clobber %%%.*s has already been defined", LIT(reg));
+
+				if (reg == "flags") {
+					// `%flags` clobbers all condition flags — the preferred spelling.
+					// A specific flag bit (`%flags.z`) can't be individually clobbered,
+					// and flags are meaningless for `#preserve`.
+					if (asm_reg->flag.string != "") {
+						error(asm_reg->flag, "#%.*s on a specific flag ('%%flags.%.*s') is not allowed; use '%%flags' to clobber all condition flags",
+						      LIT(clobber->name.string), LIT(asm_reg->flag.string));
+					} else if (is_preserve) {
+						error(clobber->value, "Expected a register for a '#preserve' specification, got '%%flags'");
+					} else if (clobber_flags) {
+						error(clobber->value, "#clobber %%flags has already been defined");
+					} else {
+						clobber_flags = true;
+					}
+				} else {
+					if (asm_reg->flag.string != "") {
+						error(asm_reg->flag, "#%.*s on specific flags is not allowed", LIT(clobber->name.string));
+					}
+					Operand operand = {};
+					if (check_register(asm_ctx, &operand, asm_reg)) {
+						if (string_set_update(target_set, reg)) {
+							error(clobber->value, "#%.*s %%%.*s has already been defined", LIT(clobber->name.string), LIT(reg));
+						}
 					}
 				}
 			case_end;
 			case_ast_node(ident, Ident, clobber->value);
 				String str = ident->token.string;
-				if (str == "flags") {
+				if (is_preserve) {
+					// #preserve applies only to registers, not flags/memory.
+					error(clobber->value, "Expected a register for a '#preserve' specification, got '%.*s'", LIT(str));
+				} else if (str == "flags") {
+					// Deprecated bare-identifier spelling; `%flags` is the register form.
+					warning(clobber->value, "#clobber flags is deprecated; use '#clobber %%flags' instead");
 					if (clobber_flags) {
 						error(clobber->value, "#clobber flags has already been defined");
 					}
@@ -2420,11 +2962,13 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 					}
 					clobber_memory = true;
 				} else {
-					error(clobber->value, "Expected either a register, 'flags', or 'memory' for a '#clobber' specification, got '%.*s'", LIT(str));
+					error(clobber->value, "Expected either a register, 'flags', or 'memory' for a '#%.*s' specification, got '%.*s'", LIT(str), LIT(clobber->name.string));
 				}
 			case_end;
 			default:
-				error(clobber->value, "Expected either a register, 'flags', or 'memory' for a '#clobber' specification");
+				error(clobber->value, "Expected a register%s for a '#%.*s' specification",
+				      is_preserve ? "" : ", 'flags', or 'memory'",
+				      LIT(clobber->name.string));
 				break;
 			}
 		}
@@ -2440,6 +2984,14 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(clobber_registers_set, rname);
+			}
+		}
+
+		for (String const &reg : *preserve_registers_set) {
+			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
+			if (rname != reg) {
+				string_set_update(preserve_registers_set, rname);
 			}
 		}
 	}
@@ -2689,6 +3241,34 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		error(previous_prefix_instr, "A prefix must be immediately followed by an instruction, but the template ended");
 	}
 
+
+	for (auto const &ed : ate->decls) {
+		if (is_type_simd_vector(ed.entity->type)) {
+			i32 vw = cast(i32)(type_size_of(ed.entity->type) * 8);
+			String feat = asm_ctx->required_vector_feature(vw);
+			if (feat.len != 0 && !check_target_feature_is_enabled(feat, nullptr)) {
+				error(ed.entity->token,
+				      "'asm' vector operand '%.*s' is %d-bit, which requires the '%.*s' target feature",
+				      LIT(ed.entity->token.string), vw, LIT(feat));
+			}
+		}
+
+		if (ed.param_group == AsmTemplateEntityDeclParamGroup_Output) {
+			if (ed.tie >= 0 || ed.no_init) {
+				// ignore
+			} else if (ed.pin.len != 0) {
+				auto r = asm_ctx->register_lookup(ed.pin);
+				if (asm_ctx->reg_is_non_allocateable(r)) {
+					error(ed.entity->token,
+					      "'asm' output '%.*s' is pinned to a register '%%%.*s' which cannot be an output; "
+					      "read it into a general-purpose register in the body instead "
+					      "(e.g. on AMD64, 'mov %%rax, %%%.*s' with the output pinned to %%rax)",
+					      LIT(ed.entity->token.string), LIT(ed.pin), LIT(ed.pin));
+				}
+			}
+		}
+	}
+
 	// NOTE(bill): After the linear collection pass of the mnemonics,
 	// now do the CFG building, analysis, and liveness checks (only if everything was correct)
 
@@ -2814,6 +3394,8 @@ gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, De
 		check_asm_template(&g_asm_amd64, c, e, d);
 	} else if (build_context.metrics.arch == TargetArch_riscv64) {
 		check_asm_template(&g_asm_riscv, c, e, d);
+	} else if (build_context.metrics.arch == TargetArch_arm64) {
+		check_asm_template(&g_asm_arm64, c, e, d);
 	} else {
 		error(e->token, "asm templates are not currently supported for this target");
 	}

@@ -313,13 +313,18 @@ static bool rsp_destination(Ast *node, int *reg) {
 static bool rsp_decode_memory(RspUnit &unit, Ast *node, RspInstruction *instruction) {
 	if (node->kind != Ast_AsmMemoryOperand) { error(node, "RSP word memory requires [base + constant]"); return false; }
 	auto &operand = node->AsmMemoryOperand;
-	if (operand.segment_override || operand.scale || operand.disp || operand.type) {
+	if (operand.kind != AsmMemoryOperand_Default || operand.segment_override || operand.type ||
+	    operand.terms.count < 1 || operand.terms.count > 2) {
 		error(node, "RSP word memory has no segment, index, scale, extra displacement or type"); return false;
 	}
-	instruction->left = rsp_gpr(operand.base);
-	if (operand.index) {
-		bool subtract = operand.index_op.kind == Token_Sub;
-		if (!rsp_integer(unit, operand.index, subtract ? -32767 : -32768, subtract ? 32768 : 32767, &instruction->immediate)) return false;
+	auto &base = operand.terms[0]->AsmMemoryTerm;
+	if (base.scale) { error(node, "RSP word memory has no scale"); return false; }
+	instruction->left = rsp_gpr(base.operand);
+	if (operand.terms.count == 2) {
+		auto &offset = operand.terms[1]->AsmMemoryTerm;
+		if (offset.scale) { error(node, "RSP word memory has no scale"); return false; }
+		bool subtract = offset.op.kind == Token_Sub;
+		if (!rsp_integer(unit, offset.operand, subtract ? -32767 : -32768, subtract ? 32768 : 32767, &instruction->immediate)) return false;
 		if (subtract) instruction->immediate = -instruction->immediate;
 	}
 	return !any_errors();
