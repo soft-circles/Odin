@@ -22,9 +22,9 @@ gb_internal bool in_strict_style_packages(AstFile *file) {
 
 	String pkg_name = {};
 
-	if (file->pkg->name.len > 0) {
-		pkg_name = file->pkg->name;
-	} else if (file->pkg_decl->kind == Ast_PackageDecl) {
+	// Use this file's own package clause, not pkg->name: reading pkg->name here
+	// without name_mutex races the write in parse_file and can see a torn String.
+	if (file->pkg_decl->kind == Ast_PackageDecl) {
 		Token name_token = file->pkg_decl->PackageDecl.name;
 		if (name_token.kind == Token_Ident) {
 			pkg_name = name_token.string;
@@ -58,9 +58,9 @@ gb_internal bool in_vet_packages(AstFile *file) {
 
 	String pkg_name = {};
 
-	if (file->pkg->name.len > 0) {
-		pkg_name = file->pkg->name;
-	} else if (file->pkg_decl->kind == Ast_PackageDecl) {
+	// Use this file's own package clause, not pkg->name: reading pkg->name here
+	// without name_mutex races the write in parse_file and can see a torn String.
+	if (file->pkg_decl->kind == Ast_PackageDecl) {
 		Token name_token = file->pkg_decl->PackageDecl.name;
 		if (name_token.kind == Token_Ident) {
 			pkg_name = name_token.string;
