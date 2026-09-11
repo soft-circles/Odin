@@ -3400,21 +3400,23 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 			}
 			GB_PANIC("Unknown complex type");
 		} else if (is_type_float(t)) {
-			bool little = is_type_endian_little(t) || (is_type_endian_platform(t) && build_context.endian_kind == TargetEndian_Little);
+			// The integer bitcast follows the target's byte order. Only an
+			// explicitly opposite-endian float needs the byte-swapped mask.
+			bool swapped = is_type_different_to_arch_endianness(t);
 			Type *t_unsigned = nullptr;
 			lbValue mask = {0};
 			switch (type_size_of(t)) {
 			case 2:
 				t_unsigned = t_u16;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFF : 0xFF7F);
+				mask = lb_const_int(p->module, t_unsigned, swapped ? 0xFF7F : 0x7FFF);
 				break;
 			case 4:
 				t_unsigned = t_u32;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFF : 0xFFFFFF7F);
+				mask = lb_const_int(p->module, t_unsigned, swapped ? 0xFFFFFF7F : 0x7FFFFFFF);
 				break;
 			case 8:
 				t_unsigned = t_u64;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFFFFFFFFFF : 0xFFFFFFFFFFFFFF7F);
+				mask = lb_const_int(p->module, t_unsigned, swapped ? 0xFFFFFFFFFFFFFF7F : 0x7FFFFFFFFFFFFFFF);
 				break;
 			default:
 				GB_PANIC("abs: unhandled float size");
