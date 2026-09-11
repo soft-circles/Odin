@@ -165,7 +165,7 @@ class RspArtifactTests(unittest.TestCase):
         for reg in ("gp", "r28", "ra", "r31", "sp", "r29"):
             self.assert_rejected(MINIMAL.replace("jr %ra", f"mfc2 %{reg}, %v00.e0; jr %ra"))
         for instruction in ("mtc2 %r2, %v01.e0", "mfc2 %zero, %v01.e0",
-                            "vxor %v01, %v01, %v01", "vxor %v01, %v00, %v02",
+                            "vxor %v01, %v00, %v02",
                             "vadd %v01, %v00, %v00", "vaddc %v01, %v00, %v00",
                             "vsub %v01, %v00, %v00", "vsubc %v01, %v00, %v00",
                             "vch %v01, %v00, %v00", "vcl %v01, %v00, %v00", "vmrg %v01, %v00, %v00",
@@ -177,6 +177,22 @@ class RspArtifactTests(unittest.TestCase):
         body = "; ".join(f"mtc2 %a0, %v01.e{element}" for element in range(8))
         result = self.build(MINIMAL.replace("jr %ra", body + "; nop; nop; vxor %v01, %v01, %v00; jr %ra"))
         self.assertEqual(result.returncode, 0, result.stdout)
+        # The zeroing idiom defines its destination without reading it.
+        result = self.build(MINIMAL.replace("jr %ra", "vxor %v05, %v05, %v05; nop; nop; mfc2 %r2, %v05.e3; jr %ra"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("vxor $v05, $v05, $v05", self.output.read_text())
+
+    def test_missing_and_invalid_command_words_report_once(self):
+        for source in (MINIMAL.replace("@(rspq_command_words=1)", ""),
+                       MINIMAL.replace("rspq_command_words=1", "rspq_command_words=0")):
+            result = self.build(source)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stdout.count("1..62"), 1, result.stdout)
+
+    def test_published_artifact_honours_umask(self):
+        self.addCleanup(os.umask, os.umask(0o022))
+        self.assertEqual(self.build().returncode, 0)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o644)
 
 
     def test_vector_constants_truncate_sign_extend_and_preserve_other_elements(self):
@@ -671,6 +687,16 @@ class RspArtifactTests(unittest.TestCase):
                 self.assertLessEqual(symbols["_text_end"], 0xa4002000)
                 self.assertEqual(self.sdk_section_size(sdk, elf, ".bss"), 16)
 
+    def test_sdk_register_conventions_match_the_checker_model(self):
+        # rsp_live_inputs and rsp_dma_out hard-code these; a pin bump must not drift silently.
+        include = self.sdk()/"mips64-elf/include"
+        queue = (include/"rsp_queue.inc").read_text()
+        for line in ("#define rspq_cmd_size t7", "#define vzero    $v00"):
+            self.assertIn(line, queue)
+        dma = (include/"rsp_dma.inc").read_text()
+        for line in ("#   t0: transfer size", "#   t1: pitch", "#   s0: RDRAM address", "#   s4: DMEM address"):
+            self.assertIn(line, dma)
+
     def test_sdk_scalar_words_relocations_and_scratch_bounds(self):
         sdk = self.sdk()
         self.assert_sdk_command_matches_reference(sdk, SCALAR, "scalar-reference.S")
@@ -835,7 +861,7 @@ class RspArtifactTests(unittest.TestCase):
         # Exercise the actual SDK RSP filename rule in a directory containing spaces.
         (self.path/"sdk").symlink_to(sdk, target_is_directory=True)
         (self.path/"Makefile").write_text("N64_INST := sdk\nBUILD_DIR := build\nSOURCE_DIR := .\ninclude sdk/include/n64.mk\nRSPASFLAGS += $(N64_RSPASFLAGS)\n")
-        self.run_tool(["/usr/bin/make", "build/rsp_command.o"], cwd=self.path)
+        self.run_tool(["make", "build/rsp_command.o"], cwd=self.path)
         wrapped = self.path / "build/rsp_command.o"
         symbols = self.sdk_symbols(sdk, wrapped)
         self.assertEqual(symbols["rsp_command_text_end"] - symbols["rsp_command_text_start"], len(text))

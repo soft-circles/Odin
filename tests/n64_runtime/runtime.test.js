@@ -3,11 +3,13 @@ if (!rom || ares.args.length !== 1)
 	throw new Error("usage: runtime.test.js <runtime.z64>");
 
 ares.setHomebrew(true);
-ares.setRenderer("angrylion");
+ares.setRenderer("none");
 ares.loadRom(rom);
 ares.resume();
 if (!ares.waitLog("ODIN_N64_RUNTIME_CLEANUP:v2", 10))
 	throw new Error("runtime did not return through cleanup:\n" + ares.log());
+if (!ares.waitLog("ODIN_N64_RUNTIME_PANIC:v2", 5))
+	throw new Error("panic message did not reach the emulator log:\n" + ares.log());
 const log = ares.log();
 if (log.includes("ODIN_N64_RUNTIME_FAIL:"))
 	throw new Error("runtime failure:\n" + log);
@@ -20,6 +22,7 @@ const ordered = [
 	"ODIN_N64_RUNTIME_PASS:v2",
 	"ODIN_N64_RUNTIME_MAIN_RETURN:v2",
 	"ODIN_N64_RUNTIME_CLEANUP:v2",
+	"ODIN_N64_RUNTIME_PANIC:v2",
 ];
 let previous = -1;
 for (const sentinel of ordered) {
@@ -28,4 +31,4 @@ for (const sentinel of ordered) {
 		throw new Error("missing or out-of-order sentinel " + sentinel + ":\n" + log);
 	previous = index;
 }
-console.log("runtime: ordered startup, allocators, main return and cleanup PASS");
+console.log("runtime: ordered startup, allocators, main return, cleanup and panic log PASS");

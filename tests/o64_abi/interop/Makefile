@@ -7,11 +7,12 @@ SDK_VALIDATOR := ../validate_sdk.py
 
 all: $(ROM)
 
+ifneq ($(MAKECMDGOALS),clean)
 ifndef N64_INST
 $(error N64_INST must point to the installed libdragon toolchain)
 endif
-
 include $(N64_INST)/include/n64.mk
+endif
 
 validate-sdk:
 	python3 $(SDK_VALIDATOR) "$(N64_INST)"

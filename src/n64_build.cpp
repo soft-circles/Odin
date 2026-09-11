@@ -2,34 +2,20 @@
 #include <llvm/Support/SHA256.h>
 #include "n64_toolchain_pins.hpp"
 
-gb_internal i32 system_exec_command_line_app(char const *name, char const *fmt, ...);
-gb_internal bool system_exec_command_line_app_output(char const *command, gbString *output);
 #if !defined(GB_SYSTEM_WINDOWS)
 #include <spawn.h>
 extern char **environ;
-int run_subprocess(char const *name, char const **args);
 #endif
 
 // This module's boundary is the two request/result operations below:
 // n64_prepare_build validates a complete set of parsed build settings, and
 // n64_package_rom packages already-compiled and flattened link inputs. Keep
 // compiler globals and linker entities in the adapter in linker.cpp.
-struct N64BuildSettings {
-	String sdk_root;
-	String title;
-	String region;
-	String save_type;
-	String controllers[4];
-	String assets;
-	String metadata;
-	bool rtc;
-	bool show_system_calls;
-	bool keep_temp_files;
-};
-
+// N64BuildSettings itself lives in n64_build.hpp so BuildContext can hold it.
 struct N64PrepareBuildRequest {
 	bool is_n64_target;
 	bool n64_options_given;
+	bool rom_options_given;
 	bool command_does_build;
 	bool is_build_command;
 	BuildModeKind build_mode;
@@ -42,11 +28,6 @@ struct N64PrepareBuildRequest {
 	N64BuildSettings settings;
 };
 
-struct N64PrepareBuildResult {
-	bool success;
-	String sdk_root;
-};
-
 struct N64ForeignLibrary {
 	String name;
 	String extra_linker_flags;
@@ -55,6 +36,8 @@ struct N64ForeignLibrary {
 
 struct N64BuildRequest {
 	N64BuildSettings settings;
+	bool show_system_calls;
+	bool keep_temp_files;
 	String output_filename;
 	String output_name;
 	String extra_linker_flags;
@@ -262,100 +245,99 @@ gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 	return true;
 }
 
-gb_internal N64PrepareBuildResult n64_prepare_build(N64PrepareBuildRequest const &request) {
+gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 	if (!request.is_n64_target) {
 		if (request.n64_options_given) {
 			gb_printf_err("N64 build options may only be used with -target:n64\n");
-			return {false, {}};
+			return false;
 		}
-		return {true, request.settings.sdk_root};
+		return true;
 	}
 	if (!request.command_does_build) {
-		return {true, request.settings.sdk_root};
+		return true;
 	}
 	if (!request.is_build_command) {
 		gb_printf_err("-target:n64 build outputs currently support the build command only\n");
-		return {false, {}};
+		return false;
 	}
-	if (request.build_mode != BuildMode_Executable && request.n64_options_given) {
+	if (request.build_mode != BuildMode_Executable && request.rom_options_given) {
 		gb_printf_err("N64 ROM configuration options require executable ROM output\n");
-		return {false, {}};
+		return false;
 	}
 	switch (request.build_mode) {
 	case BuildMode_Object:
 	case BuildMode_Assembly:
 	case BuildMode_LLVM_IR:
-		return {true, request.settings.sdk_root};
+		return true;
 	case BuildMode_StaticLibrary:
 	case BuildMode_DynamicLibrary:
 		gb_printf_err("-target:n64 currently supports executable ROM, object, assembly, and LLVM IR output\n");
-		return {false, {}};
+		return false;
 	case BuildMode_Executable:
 		break;
 	}
 #if defined(GB_SYSTEM_WINDOWS)
 	gb_printf_err("The integrated N64 ROM build currently requires a POSIX host\n");
-	return {false, {}};
+	return false;
 #endif
 	if (request.lto_kind != LTO_None) {
 		gb_printf_err("-target:n64 does not support LTO in the pinned libdragon build pipeline\n");
-		return {false, {}};
+		return false;
 	}
 	if (request.reloc_mode != RelocMode_Static) {
 		gb_printf_err("-target:n64 executable builds require -reloc-mode:static\n");
-		return {false, {}};
+		return false;
 	}
 	if (request.no_crt || request.no_entry_point) {
 		gb_printf_err("-target:n64 executable builds do not support -no-crt or -no-entry-point; pinned n64.mk owns startup\n");
-		return {false, {}};
+		return false;
 	}
 	if (request.linker_choice != Linker_Default) {
 		gb_printf_err("-target:n64 executable builds do not support -linker; pinned n64.mk selects the linker\n");
-		return {false, {}};
+		return false;
 	}
 	if (request.print_linker_flags) {
 		gb_printf_err("-print-linker-flags is not supported by the integrated N64 packaging pipeline; use -show-system-calls\n");
-		return {false, {}};
+		return false;
 	}
 	if (request.settings.rtc &&
 	    (request.settings.save_type == STR_LIT("eeprom4k") ||
 	     request.settings.save_type == STR_LIT("eeprom16k"))) {
 		gb_printf_err("-n64-rtc cannot be combined with -n64-save-type:%.*s; the pinned N64 header format cannot use RTC with EEPROM\n",
 		              LIT(request.settings.save_type));
-		return {false, {}};
+		return false;
 	}
-#if !defined(GB_SYSTEM_WINDOWS)
 	if (!n64_sdk_tool_is_executable(STR_LIT("/usr/bin/make"))) {
 		gb_printf_err("GNU make is required at /usr/bin/make for the integrated N64 build\n");
-		return {false, {}};
+		return false;
 	}
-#endif
 
 	String sdk_root = request.settings.sdk_root;
 	if (sdk_root.len == 0) {
 		gb_printf_err("N64 SDK is not configured; use -n64-inst:<path> or set the N64_INST environment variable\n");
-		return {false, {}};
+		return false;
 	}
 	if (!n64_validate_sdk_root(sdk_root)) {
-		return {false, {}};
+		return false;
 	}
 	if (request.settings.assets.len > 0) {
 		String tool = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("bin/mkdfs"));
 		if (!n64_sdk_tool_is_executable(tool)) {
 			gb_printf_err("-n64-assets requires the executable N64 SDK tool bin/mkdfs in %.*s\n", LIT(sdk_root));
-			return {false, {}};
+			return false;
 		}
 	}
 	if (request.settings.metadata.len > 0) {
 		String tool = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("bin/n64metadata"));
 		if (!n64_sdk_tool_is_executable(tool)) {
 			gb_printf_err("-n64-metadata requires the executable N64 SDK tool bin/n64metadata in %.*s\n", LIT(sdk_root));
-			return {false, {}};
+			return false;
 		}
 	}
-	return {true, sdk_root};
+	return true;
 }
 
+#if !defined(GB_SYSTEM_WINDOWS)
 struct N64BuildStage {
 	String work_dir;
 	String build_dir;
@@ -373,25 +355,14 @@ struct N64BuildStage {
 };
 
 gb_internal bool n64_remove_directory(String const &path) {
-#if defined(GB_SYSTEM_WINDOWS)
-	String16 wide_path = string_to_string16(temporary_allocator(), path);
-	return RemoveDirectoryW(cast(wchar_t *)wide_path.text) != 0;
-#else
 	return rmdir(alloc_cstring(temporary_allocator(), path)) == 0;
-#endif
 }
 
 gb_internal bool n64_create_staging_link(String const &source_path, String const &link_path) {
-#if defined(GB_SYSTEM_WINDOWS)
-	(void)source_path;
-	(void)link_path;
-	return false;
-#else
 	return symlink(
 		alloc_cstring(temporary_allocator(), source_path),
 		alloc_cstring(temporary_allocator(), link_path)
 	) == 0;
-#endif
 }
 
 enum N64MetadataSectionKind {
@@ -497,11 +468,6 @@ gb_internal Array<String> n64_metadata_companion_roots(String const &source_ini)
 }
 
 gb_internal bool n64_stage_metadata_directory(N64BuildStage *stage, String const &source_ini) {
-#if defined(GB_SYSTEM_WINDOWS)
-	(void)stage;
-	(void)source_ini;
-	return false;
-#else
 	if (mkdir(alloc_cstring(temporary_allocator(), stage->metadata_dir_path), 0700) != 0) {
 		gb_printf_err("Failed to create N64 metadata staging directory %.*s: %s\n",
 		              LIT(stage->metadata_dir_path), strerror(errno));
@@ -541,7 +507,6 @@ gb_internal bool n64_stage_metadata_directory(N64BuildStage *stage, String const
 		return false;
 	}
 	return true;
-#endif
 }
 
 gb_internal bool n64_init_build_stage(
@@ -557,11 +522,6 @@ gb_internal bool n64_init_build_stage(
 
 	String output_directory = directory_from_path(output_filename);
 	String stage_template = n64_path_join(temporary_allocator(), output_directory, STR_LIT(".odin-n64-build-XXXXXX"));
-#if defined(GB_SYSTEM_WINDOWS)
-	stage->work_dir = copy_string(allocator, stage_template);
-	gb_printf_err("The integrated N64 ROM build currently requires a POSIX host\n");
-	return false;
-#else
 	char *stage_template_c = alloc_cstring(temporary_allocator(), stage_template);
 	char *created_work_dir = mkdtemp(stage_template_c);
 	if (created_work_dir == nullptr) {
@@ -570,7 +530,6 @@ gb_internal bool n64_init_build_stage(
 		return false;
 	}
 	stage->work_dir = copy_string(allocator, make_string_c(created_work_dir));
-#endif
 	stage->build_dir = n64_path_join(allocator, stage->work_dir, STR_LIT("build"));
 	stage->makefile_path = n64_path_join(allocator, stage->work_dir, STR_LIT("Makefile"));
 	stage->sdk_link_path = n64_path_join(allocator, stage->work_dir, STR_LIT("sdk"));
@@ -582,23 +541,17 @@ gb_internal bool n64_init_build_stage(
 	if (!n64_create_staging_link(settings.sdk_root, stage->sdk_link_path)) {
 		gb_printf_err("Failed to create N64 SDK staging link %.*s -> %.*s\n",
 		              LIT(stage->sdk_link_path), LIT(settings.sdk_root));
-		if (!n64_remove_directory(stage->work_dir)) {
-			gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage->work_dir));
+		if (n64_remove_directory(stage->work_dir)) {
+			stage->work_dir = {};
 		}
 		return false;
 	}
 	if (settings.assets.len > 0 &&
 	    !n64_create_staging_link(settings.assets, stage->assets_link_path)) {
 		gb_printf_err("Failed to stage N64 asset directory %.*s: %s\n", LIT(settings.assets), strerror(errno));
-		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage->work_dir));
 		return false;
 	}
-	if (settings.metadata.len > 0 &&
-	    !n64_stage_metadata_directory(stage, settings.metadata)) {
-		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage->work_dir));
-		return false;
-	}
-	return true;
+	return settings.metadata.len == 0 || n64_stage_metadata_directory(stage, settings.metadata);
 }
 
 gb_internal bool n64_stage_input(
@@ -625,6 +578,45 @@ gb_internal bool n64_stage_input(
 	return true;
 }
 
+gb_internal bool n64_foreign_input_is_sdk_library(String const &input) {
+	return input == "c" || input == "m" || input == "dragon" || input == "dragonsys";
+}
+
+// Pure validation, run before any staging directory exists so a rejected
+// request leaves nothing behind in the output directory.
+gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
+	String extra_flags = string_trim_whitespace(request.extra_linker_flags);
+	if (extra_flags.len > 0) {
+		gb_printf_err("-extra-linker-flags is not supported by the pinned N64 packaging pipeline\n");
+		return false;
+	}
+	for (N64ForeignLibrary const &library : request.foreign_libraries) {
+		String library_flags = string_trim_whitespace(library.extra_linker_flags);
+		if (library_flags.len > 0) {
+			gb_printf_err("N64 foreign import '%.*s' uses unsupported extra linker flags: %.*s\n",
+			              LIT(library.name), LIT(library_flags));
+			return false;
+		}
+		for (String const &path : library.paths) {
+			String input = string_trim_whitespace(path);
+			if (n64_foreign_input_is_sdk_library(input)) {
+				continue;
+			}
+			String extension = path_extension(input, false);
+			if (!str_eq_ignore_case(extension, STR_LIT("o")) &&
+			    !str_eq_ignore_case(extension, STR_LIT("a"))) {
+				gb_printf_err("N64 foreign import input must be a static .o or .a file, got: %.*s\n", LIT(input));
+				return false;
+			}
+			if (!gb_file_exists(alloc_cstring(temporary_allocator(), input))) {
+				gb_printf_err("N64 foreign import input does not exist: %.*s\n", LIT(input));
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 gb_internal bool n64_stage_link_inputs(N64BuildStage *stage, N64BuildRequest *request) {
 	// LLVM modules are collected from a hash map, so their completion/list order
 	// is not stable between compiler processes. Link in path order to keep an
@@ -642,28 +634,12 @@ gb_internal bool n64_stage_link_inputs(N64BuildStage *stage, N64BuildRequest *re
 
 	isize foreign_index = 0;
 	for (N64ForeignLibrary const &library : request->foreign_libraries) {
-		String extra_flags = string_trim_whitespace(library.extra_linker_flags);
-		if (extra_flags.len > 0) {
-			gb_printf_err("N64 foreign import '%.*s' uses unsupported extra linker flags: %.*s\n",
-			              LIT(library.name), LIT(extra_flags));
-			return false;
-		}
 		for (String const &path : library.paths) {
 			String input = string_trim_whitespace(path);
-			if (input == "c" || input == "m" || input == "dragon" || input == "dragonsys") {
+			if (n64_foreign_input_is_sdk_library(input)) {
 				continue;
 			}
-			String extension = path_extension(input, false);
-			if (!str_eq_ignore_case(extension, STR_LIT("o")) &&
-			    !str_eq_ignore_case(extension, STR_LIT("a"))) {
-				gb_printf_err("N64 foreign import input must be a static .o or .a file, got: %.*s\n", LIT(input));
-				return false;
-			}
-			if (!gb_file_exists(alloc_cstring(temporary_allocator(), input))) {
-				gb_printf_err("N64 foreign import input does not exist: %.*s\n", LIT(input));
-				return false;
-			}
-			String staged_extension = str_eq_ignore_case(extension, STR_LIT("o")) ? STR_LIT("o") : STR_LIT("a");
+			String staged_extension = str_eq_ignore_case(path_extension(input, false), STR_LIT("o")) ? STR_LIT("o") : STR_LIT("a");
 			if (!n64_stage_input(stage, input, STR_LIT("foreign"), foreign_index, staged_extension)) {
 				return false;
 			}
@@ -744,7 +720,7 @@ gb_internal bool n64_write_makefile(N64BuildStage const &stage, N64BuildRequest 
 		LIT(settings.controllers[3]),
 		LIT(stage.metadata_make_path),
 		settings.assets.len > 0 ? "assets" : "filesystem",
-		settings.show_system_calls ? "1" : "");
+		request.show_system_calls ? "1" : "");
 	if (has_metadata) {
 		// The pinned n64.mk requests --padding 0 to defer final padding to
 		// n64metadata, while its pinned n64tool requires a unit suffix for
@@ -768,7 +744,6 @@ gb_internal bool n64_write_makefile(N64BuildStage const &stage, N64BuildRequest 
 	return true;
 }
 
-#if !defined(GB_SYSTEM_WINDOWS)
 gb_internal bool n64_environment_key_is_filtered(char const *entry) {
 	char const *equals = strchr(entry, '=');
 	if (equals == nullptr) {
@@ -777,7 +752,7 @@ gb_internal bool n64_environment_key_is_filtered(char const *entry) {
 	isize key_length = equals-entry;
 	char const *exact_keys[] = {
 		"PATH", "SHELL", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKELEVEL",
-		"CCACHE", "V", "D",
+		"CCACHE", "V", "D", "CFLAGS", "CXXFLAGS", "ASFLAGS", "LDFLAGS",
 	};
 	for (char const *key : exact_keys) {
 		isize length = cast(isize)strlen(key);
@@ -806,18 +781,9 @@ gb_internal char **n64_sanitized_environment(void) {
 	environment[destination_count] = nullptr;
 	return environment;
 }
-#endif
 
 gb_internal i32 n64_run_make(N64BuildStage const &stage, bool show_system_calls) {
-#if defined(GB_SYSTEM_WINDOWS)
-	gb_printf_err("The integrated N64 build currently requires a POSIX host\n");
-	return 1;
-#else
-	char const *make_path = "/usr/bin/make";
-	if (!n64_sdk_tool_is_executable(make_string_c(make_path))) {
-		gb_printf_err("GNU make is required at %s for the integrated N64 build\n", make_path);
-		return 1;
-	}
+	char const *make_path = "/usr/bin/make"; // existence checked in n64_prepare_build
 	char const *work_dir = alloc_cstring(permanent_allocator(), stage.work_dir);
 	char const *arguments[8] = {};
 	isize count = 0;
@@ -839,7 +805,7 @@ gb_internal i32 n64_run_make(N64BuildStage const &stage, bool show_system_calls)
 		return -1;
 	}
 	for (;;) {
-		if (waitpid(pid, &status, WUNTRACED) < 0) {
+		if (waitpid(pid, &status, 0) < 0) {
 			gb_printf_err("Could not wait on N64 packaging subprocess: %s\n", strerror(errno));
 			return -1;
 		}
@@ -851,7 +817,6 @@ gb_internal i32 n64_run_make(N64BuildStage const &stage, bool show_system_calls)
 			return 128+WTERMSIG(status);
 		}
 	}
-#endif
 }
 
 gb_internal bool n64_remove_file_if_present(String const &path) {
@@ -893,42 +858,45 @@ gb_internal bool n64_cleanup_successful_stage(N64BuildStage const &stage, bool h
 }
 
 gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
-	String extra_flags = string_trim_whitespace(request.extra_linker_flags);
-	if (extra_flags.len > 0) {
-		gb_printf_err("-extra-linker-flags is not supported by the pinned N64 packaging pipeline\n");
+	if (!n64_validate_link_inputs(request)) {
 		return {1, {}};
 	}
 
 	N64BuildStage stage = {};
-	if (!n64_init_build_stage(&stage, request.settings, request.output_filename)) {
-		return {1, stage.work_dir};
+	i32 result = 1;
+	if (n64_init_build_stage(&stage, request.settings, request.output_filename)) {
+		gb_printf_err("N64 build intermediates: %.*s\n", LIT(stage.work_dir));
+		if (n64_stage_link_inputs(&stage, &request) && n64_write_makefile(stage, request)) {
+			result = n64_run_make(stage, request.show_system_calls);
+		}
+		if (result == 0) {
+			char const *staged_rom = alloc_cstring(temporary_allocator(), stage.staged_rom_path);
+			char const *final_rom = alloc_cstring(temporary_allocator(), request.output_filename);
+			if (rename(staged_rom, final_rom) != 0) {
+				gb_printf_err("Failed to atomically place N64 ROM at %.*s: %s\n", LIT(request.output_filename), strerror(errno));
+				result = 1;
+			}
+		}
 	}
-	gb_printf_err("N64 build intermediates: %.*s\n", LIT(stage.work_dir));
-	if (!n64_stage_link_inputs(&stage, &request) || !n64_write_makefile(stage, request)) {
-		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage.work_dir));
-		return {1, stage.work_dir};
-	}
-
-	i32 result = n64_run_make(stage, request.settings.show_system_calls);
 	if (result != 0) {
-		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage.work_dir));
+		if (stage.work_dir.len > 0) {
+			gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(stage.work_dir));
+		}
 		return {result, stage.work_dir};
 	}
 
-	char const *staged_rom = alloc_cstring(temporary_allocator(), stage.staged_rom_path);
-	char const *final_rom = alloc_cstring(temporary_allocator(), request.output_filename);
-	if (rename(staged_rom, final_rom) != 0) {
-		gb_printf_err("Failed to atomically place N64 ROM at %.*s: %s\n", LIT(request.output_filename), strerror(errno));
-		gb_printf_err("N64 build intermediates were retained at %.*s\n", LIT(stage.work_dir));
-		return {1, stage.work_dir};
-	}
-
-	if (request.settings.keep_temp_files) {
+	if (request.keep_temp_files) {
 		gb_printf_err("Retained N64 build intermediates: %.*s\n", LIT(stage.work_dir));
-	} else {
-		if (!n64_cleanup_successful_stage(stage, request.settings.metadata.len > 0)) {
-			gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(stage.work_dir));
-		}
+	} else if (!n64_cleanup_successful_stage(stage, request.settings.metadata.len > 0)) {
+		gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(stage.work_dir));
 	}
-	return {0, request.settings.keep_temp_files ? stage.work_dir : String{}};
+	return {0, request.keep_temp_files ? stage.work_dir : String{}};
 }
+#else
+gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
+	// ponytail: Windows hosts are rejected in n64_prepare_build; this stub only
+	// keeps the linker adapter compiling until a Windows packaging path exists.
+	gb_printf_err("The integrated N64 ROM build currently requires a POSIX host\n");
+	return {1, {}};
+}
+#endif

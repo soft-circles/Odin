@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Execute Odin and GCC O64 leaf probes from identical ABI-visible inputs."""
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -11,17 +10,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-WORKSPACE = ROOT.parent
-PHASE0 = WORKSPACE / "llvm-project/llvm/utils/o64-abi-differential.py"
-GCC = Path(os.environ.get("MIPS_O64_GCC", Path.home() / "n64_toolchain/bin/mips64-elf-gcc"))
+sys.path.insert(0, str(HERE.parent))
+from n64_pins import N64_INST, load_phase0
+
+GCC = Path(os.environ.get("MIPS_O64_GCC", N64_INST / "bin/mips64-elf-gcc"))
 ODIN = Path(os.environ.get("ODIN", ROOT / "odin"))
-
-
-def load_phase0():
-	spec = importlib.util.spec_from_file_location("o64_phase0", PHASE0)
-	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
 
 
 def run(command):
@@ -112,7 +105,7 @@ def main():
 	if failures:
 		for failure in failures:
 			print(f"  {failure}")
-			return 1
+		return 1
 
 	call_stack_bytes = {
 		"o_call_named": 0,

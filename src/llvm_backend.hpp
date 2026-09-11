@@ -4,8 +4,8 @@
 #include <llvm/Config/llvm-config.h>
 #endif
 
-#if LLVM_VERSION_MAJOR < 17
-#error "LLVM Version 17 is the minimum required"
+#if LLVM_VERSION_MAJOR < 18
+#error "LLVM Version 18 is the minimum required (the O64 MIPS target needs LLVMTargetMachineOptionsSetABI)"
 #endif
 
 #include <llvm-c/Core.h>
@@ -28,7 +28,6 @@ struct lbProcedure;
 struct lbValue {
 	LLVMValueRef value;
 	Type *type;
-	LLVMAttributeRef abi_attribute;
 };
 
 
