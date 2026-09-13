@@ -107,6 +107,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # These retained digests cover the historical LLVM tuple, not current qualification.
       - name: Retrieve exact image and verify embedded inputs offline
         env:
           IMAGE: ${{ matrix.image }}
@@ -117,7 +118,7 @@ jobs:
           mkdir evidence
           docker image inspect "$IMAGE" > evidence/image.json
           docker run --rm --network none "$IMAGE" bash -euo pipefail -c '
-            test "$(cat /opt/llvm/share/odin64/llvm-revision)" = 3b9b032e45e2f79fad0302327e1fedcd2a2ed0db
+            test "$(cat /opt/llvm/share/odin64/llvm-revision)" = 70b59e5a438983e8fe71ecc992a11229891f8840
             llvm-config --version --targets-built
             "$ODIN64_HOST_ODIN" version
             if test -d /opt/validation; then
