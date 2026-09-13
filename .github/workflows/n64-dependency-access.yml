@@ -1,0 +1,137 @@
+# Canonical platform-owned consumer probe; copy unchanged to each trusted owner.
+name: Verify N64 cross-repository access
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/repository-split-phase-10-access]
+permissions:
+  contents: read
+  packages: read
+jobs:
+  sources:
+    if: contains(fromJSON('["soft-circles/Odin64","soft-circles/odin-n64-platform","soft-circles/odin-n64-bindings","soft-circles/Odin","soft-circles/llvm-project"]'), github.repository) && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/codex/repository-split-phase-10-access')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repository: odin-n64-bindings
+            commit: 37bddd2439e945a1eace91128affed896f39d2a0
+            tag: bindings-v0.1.0-rc.1
+            assets: '[{"name":"bindings-v0.1.0-rc.1-source.tar.gz","sha256":"0f492366518b409cd0a9236706b5f5377268e02b8fe385128a76ad84f7db0e0f","size":216070},{"name":"platform-requirement.json","sha256":"b8a0d08a6393417fa0ddb07d6ca380429a685f31cf308348300ee496269b155f","size":0}]'
+          - repository: odin-n64-platform
+            commit: 59580a7a65d77348b4cd9c19b0478860d205f396
+            tag: platform-v0.1.0-rc.1
+            assets: '[{"name":"platform-v0.1.0-rc.1-macos-arm64-26.6.2.tar.gz","sha256":"e0c9e5918570b90b93a9a26031d6ddb22cdbaa97edc471b9872e6e38601107d6","size":34417069},{"name":"platform-v0.1.0-rc.1-source.tar.gz","sha256":"c4aa81779117be4a5a8419c9c256b2a58498c15b9e3f48df176a2fcc9a3fba60","size":175340},{"name":"platform-v0.1.0-rc.1-replay-v1.tar.gz","sha256":"0a0ab48ab04bd7d599f6b604270f8b839f594a39c5ca225c9a3ba6759489e7b0","size":2433},{"name":"platform-record.json","sha256":"1b60c54cec57b7c7da077602c69fe6367cde112ed4a17a80b03a63a5ecab3136","size":0}]'
+    steps:
+      - name: Mint repository-scoped read-only token
+        id: reader
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.N64_DEPENDENCY_APP_ID }}
+          private-key: ${{ secrets.N64_DEPENDENCY_APP_PRIVATE_KEY }}
+          owner: soft-circles
+          repositories: ${{ matrix.repository }}
+          permission-contents: read
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: soft-circles/${{ matrix.repository }}
+          ref: ${{ matrix.commit }}
+          token: ${{ steps.reader.outputs.token }}
+          persist-credentials: false
+          path: selected-source
+      - name: Verify exact clean source and annotated release
+        env:
+          GH_TOKEN: ${{ steps.reader.outputs.token }}
+          DEPENDENCY: ${{ matrix.repository }}
+          COMMIT: ${{ matrix.commit }}
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          test "$(git -C selected-source rev-parse HEAD)" = "$COMMIT"
+          test -z "$(git -C selected-source status --porcelain=v1 --untracked-files=all)"
+          mkdir -p evidence release-download
+          git -C selected-source archive HEAD | sha256sum > evidence/source.sha256
+          object=$(gh api "repos/soft-circles/$DEPENDENCY/git/ref/tags/$TAG" --jq '.object | select(.type == "tag") | .sha')
+          [[ "$object" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api "repos/soft-circles/$DEPENDENCY/git/tags/$object" --jq '.object | select(.type == "commit") | .sha')" = "$COMMIT"
+          gh api "repos/soft-circles/$DEPENDENCY/releases/tags/$TAG" > evidence/release.json
+          jq -e --arg tag "$TAG" '.tag_name == $tag and .draft == false' evidence/release.json
+      - name: Retrieve every selected Release asset on this fresh runner
+        env:
+          GH_TOKEN: ${{ steps.reader.outputs.token }}
+          DEPENDENCY: ${{ matrix.repository }}
+          ASSETS: ${{ matrix.assets }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$ASSETS" > evidence/selected-assets.json
+          jq -r '.[] | [.name,.sha256,.size] | @tsv' evidence/selected-assets.json | while IFS=$'\t' read -r name hash size; do
+            asset_id=$(jq -er --arg name "$name" '.assets[] | select(.name==$name) | .id' evidence/release.json)
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            gh api "repos/soft-circles/$DEPENDENCY/releases/assets/$asset_id" -H 'Accept: application/octet-stream' > "release-download/$name"
+            printf '%s  %s\n' "$hash" "$name" >> release-download/SHA256SUMS
+            if [[ "$size" != 0 ]]; then test "$(wc -c < "release-download/$name" | tr -d ' ')" = "$size"; fi
+          done
+          (cd release-download && sha256sum --strict --check SHA256SUMS) | tee evidence/retrieval.log
+      - name: Recheck cached bytes without a credential
+        run: |
+          env -u GH_TOKEN -u GITHUB_TOKEN bash -euo pipefail -c 'cd release-download; sha256sum --strict --check SHA256SUMS'
+      - name: Cache verified bytes for offline use
+        if: github.event.repository.private
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: release-download/
+          key: n64-release-${{ matrix.repository }}-${{ matrix.commit }}-${{ hashFiles('release-download/SHA256SUMS') }}
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.repository.private
+        with:
+          name: source-release-${{ matrix.repository }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
+  images:
+    if: contains(fromJSON('["soft-circles/Odin64","soft-circles/odin-n64-platform","soft-circles/odin-n64-bindings","soft-circles/Odin","soft-circles/llvm-project"]'), github.repository) && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/codex/repository-split-phase-10-access')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: llvm-o64
+            image: ghcr.io/soft-circles/llvm-o64@sha256:b0581f45977f542f4ec3c654fe5b3c6c552f8dad638d744036b902790c043744
+          - name: odin64-validation
+            image: ghcr.io/soft-circles/odin64-validation@sha256:229a1615fbc2ee832367b5f56b01b181684e08413dea3371efc1719d597123c8
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Retrieve exact image and verify embedded inputs offline
+        env:
+          IMAGE: ${{ matrix.image }}
+          PACKAGE: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          mkdir evidence
+          docker image inspect "$IMAGE" > evidence/image.json
+          docker run --rm --network none "$IMAGE" bash -euo pipefail -c '
+            test "$(cat /opt/llvm/share/odin64/llvm-revision)" = 3b9b032e45e2f79fad0302327e1fedcd2a2ed0db
+            llvm-config --version --targets-built
+            "$ODIN64_HOST_ODIN" version
+            if test -d /opt/validation; then
+              test "$(git -C /opt/src/ares-64 rev-parse HEAD)" = 09008b610a16c375f793d0e124a366227bc4839c
+              test "$(git -C /opt/src/libdragon rev-parse HEAD)" = c79a52b42ac790e06e797aede43914dd8754cd5f
+              echo "9bbe6e8efbb515cddbd7ce8f730cd003c12f655868cf63c4d6ed983592808ee6  /n64_toolchain/include/n64.mk" | sha256sum --check
+              /opt/ares-test/ares-test --help
+            fi
+          ' | tee evidence/embedded-inputs.log
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "https://ghcr.io/token?service=ghcr.io&scope=repository:soft-circles/$PACKAGE:pull")
+          [[ "$status" == 401 || "$status" == 403 ]]
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event.repository.private
+        with:
+          name: private-image-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 30
