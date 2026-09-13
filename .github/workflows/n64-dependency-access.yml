@@ -98,38 +98,55 @@ jobs:
       matrix:
         include:
           - name: llvm-o64
-            image: ghcr.io/soft-circles/llvm-o64@sha256:b0581f45977f542f4ec3c654fe5b3c6c552f8dad638d744036b902790c043744
+            revision: 3b9b032e45e2f79fad0302327e1fedcd2a2ed0db
+            image: ghcr.io/soft-circles/llvm-o64@sha256:358006372036245668d3cf0bc99dac0641567fbf815eb5ec7d25c648b63704eb
           - name: odin64-validation
-            image: ghcr.io/soft-circles/odin64-validation@sha256:229a1615fbc2ee832367b5f56b01b181684e08413dea3371efc1719d597123c8
+            revision: 3b9b032e45e2f79fad0302327e1fedcd2a2ed0db
+            image: ghcr.io/soft-circles/odin64-validation@sha256:72129ba83110a849090cbdb6715714f1ad595bc2b010306cc062717d16d4239f
     steps:
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # These retained digests cover the historical LLVM tuple, not current qualification.
+      # Each immutable image must match its own reviewed embedded revision.
       - name: Retrieve exact image and verify embedded inputs offline
         env:
           IMAGE: ${{ matrix.image }}
           PACKAGE: ${{ matrix.name }}
+          LLVM_REVISION: ${{ matrix.revision }}
         run: |
           set -euo pipefail
           docker pull "$IMAGE"
           mkdir evidence
           docker image inspect "$IMAGE" > evidence/image.json
-          docker run --rm --network none "$IMAGE" bash -euo pipefail -c '
-            test "$(cat /opt/llvm/share/odin64/llvm-revision)" = 70b59e5a438983e8fe71ecc992a11229891f8840
+          test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          docker run --rm --network none --env LLVM_REVISION "$IMAGE" bash -euo pipefail -c '
+            test "$(cat /opt/llvm/share/odin64/llvm-revision)" = "$LLVM_REVISION"
+            test "$(uname -m)" = x86_64
+            test "$(llvm-config --targets-built)" = "Mips X86"
+            test "$(llvm-config --assertion-mode)" = ON
+            for tool in clang clang++ llc llvm-config llvm-as llvm-dis llvm-mc llvm-readobj llvm-readelf llvm-objdump FileCheck just python3 git; do command -v "$tool"; done
             llvm-config --version --targets-built
+            clang --version
+            just --version
             "$ODIN64_HOST_ODIN" version
             if test -d /opt/validation; then
               test "$(git -C /opt/src/ares-64 rev-parse HEAD)" = 09008b610a16c375f793d0e124a366227bc4839c
               test "$(git -C /opt/src/libdragon rev-parse HEAD)" = c79a52b42ac790e06e797aede43914dd8754cd5f
               echo "9bbe6e8efbb515cddbd7ce8f730cd003c12f655868cf63c4d6ed983592808ee6  /n64_toolchain/include/n64.mk" | sha256sum --check
+              test -z "$(git -C /opt/src/ares-64 status --porcelain=v1 --untracked-files=no)"
+              test -z "$(git -C /opt/src/libdragon status --porcelain=v1 --untracked-files=no)"
               /opt/ares-test/ares-test --help
+              (cd /opt/src/ares-64 && /opt/ares-test/ares-test tests/smoke.test.js --timeout 30)
             fi
           ' | tee evidence/embedded-inputs.log
           status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "https://ghcr.io/token?service=ghcr.io&scope=repository:soft-circles/$PACKAGE:pull")
           [[ "$status" == 401 || "$status" == 403 ]]
+          printf 'anonymous_token_http=%s\n' "$status" > evidence/anonymous-access.txt
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "https://ghcr.io/v2/soft-circles/$PACKAGE/manifests/${IMAGE##*@}")
+          [[ "$status" == 401 || "$status" == 403 ]]
+          printf 'anonymous_manifest_http=%s\n' "$status" >> evidence/anonymous-access.txt
       - uses: actions/upload-artifact@v4
         if: always() && github.event.repository.private
         with:
