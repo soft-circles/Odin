@@ -19,6 +19,7 @@ class ValidationContract(unittest.TestCase):
         for forbidden in ("vendor:libdragon", "odin64:", "n64_pong", "n64_tracer", "libdragon_bindings"):
             self.assertNotIn(forbidden, text)
         self.assertIn("tests/n64_runtime", text)
+        self.assertIn("tests/n64_core_mem", text)
         self.assertIn("N64_VALIDATION_MODE", text)
         self.assertIn("quick", text)
 

@@ -1,4 +1,5 @@
 #+build !freestanding, wasm32, wasm64p32
+#+build !n64
 package mem
 
 import "core:sync"

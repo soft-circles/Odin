@@ -163,6 +163,12 @@ individual frees. Both context allocator fields may be replaced by an
 application; tests must keep covering replacement and allocation during
 `@(init)`.
 
+`core:mem` is supported on N64 except for its `core:sync`-backed allocators
+(`Mutex_Allocator` and `Tracking_Allocator`), which carry `#+build !n64`
+because `core:sync` has no N64 futex or thread-identity primitives. Keep those
+tags when merging upstream; [tests/n64_core_mem](tests/n64_core_mem) checks
+that `core:mem` still type-checks for the target.
+
 N64 is single-threaded and disables TLS. There is no supported mechanism for a
 C callback, interrupt, or timer entry to install an Odin context. Do not expose
 callback-taking APIs until their context, reentrancy, stack, allocator, and
@@ -202,7 +208,8 @@ python3 tests/n64_validate.py quick
 
 Checks cover pins, local documentation links, validation contracts, module
 boundaries, public options/failures, SDK-validator behavior and compilation of
-[tests/n64_runtime](tests/n64_runtime). No project-local binding is required.
+[tests/n64_runtime](tests/n64_runtime) and [tests/n64_core_mem](tests/n64_core_mem).
+No project-local binding is required.
 
 ### Full: compiler SDK and runtime checks
 
