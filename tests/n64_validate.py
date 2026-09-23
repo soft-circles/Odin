@@ -35,6 +35,7 @@ def quick_stages(lock_path: Path | None = None) -> list[Stage]:
         Stage("SDK validator unit tests", (PYTHON, "tests/o64_abi/test_validate_sdk.py")),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
+        Stage("core:mem target check", ("./odin", "check", "tests/n64_core_mem", "-target:n64", "-no-entry-point", "-vet", "-warnings-as-errors")),
     ]
 
 def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
