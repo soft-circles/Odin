@@ -18,11 +18,13 @@ python3 tests/n64_validate.py quick
 ```
 
 The focused command above remains available when this stage fails. The
-authoritative full layer runs it with the pinned SDK and does not accept its
+full layer runs it with the selected SDK and does not accept its
 end-to-end skip.
 
-The SDK discovery and validation tests run without invoking libdragon's build
-tools. The end-to-end tests use `N64_INST` when it is set, otherwise they use
+The SDK discovery tests cover required files/tools and custom SDKs with absent,
+unrecognized or locally modified version metadata. A small failing Makefile
+proves the compiler reaches packaging and preserves its failure. The end-to-end
+tests use `N64_INST` when it is set, otherwise they use
 `~/n64_toolchain` when that directory exists. Set `ODIN` to select a compiler
 binary other than the repository's `odin` executable.
 

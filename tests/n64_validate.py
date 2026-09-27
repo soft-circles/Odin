@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 import re
@@ -23,11 +22,9 @@ class Stage:
     cwd: Path = ODIN_ROOT
     environment: dict[str, str] = field(default_factory=dict)
 
-def quick_stages(lock_path: Path | None = None) -> list[Stage]:
+def quick_stages() -> list[Stage]:
     environment = {"N64_VALIDATION_MODE": "quick", "ODIN": str(ODIN_ROOT / "odin")}
-    pins = {"ODIN_N64_TOOLCHAIN_LOCK": str(lock_path)} if lock_path else {}
     return [
-        Stage("active pin drift", (PYTHON, "tests/n64_validation/check_active_pins.py"), environment=pins),
         Stage("documentation links", (PYTHON, "tests/n64_validation/check_documentation_links.py")),
         Stage("validation contract", (PYTHON, "tests/n64_validation/test_validation_contract.py")),
         Stage("N64 build-module boundary", (PYTHON, "tests/n64_build/test_n64_module.py")),
@@ -47,7 +44,7 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
     }
     rom = str(artifacts / "runtime.z64")
     return [
-        Stage("validate pinned SDK", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
+        Stage("check SDK files and tools", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
         Stage("N64 public build suite", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("Odin O64 ABI differential", (PYTHON, "tests/o64_abi/differential.py"), environment=environment),
         Stage("linked O64 ABI ROM", ("make", "-C", "tests/o64_abi/interop", "clean", "all", "check"), environment=environment),
@@ -103,16 +100,12 @@ def main() -> int:
         if not os.environ.get("N64_INST") or not sdk.is_dir():
             parser.error("full mode requires explicit N64_INST; see N64_BUILD.md")
         if not os.environ.get("ARES_TEST") or not shutil.which(runner):
-            parser.error("full mode requires an executable ARES_TEST; use Odin64 for pinned cross-repository qualification")
+            parser.error("full mode requires an executable ARES_TEST; use Odin64 for cross-repository qualification")
     base = (args.artifacts or ODIN_ROOT / ".n64-validation-artifacts").expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
     artifacts = Path(tempfile.mkdtemp(prefix=f"{args.mode}-", dir=base))
     if args.mode == "full":
         stages += full_stages(sdk, runner, artifacts)
-    identity = {"mode": args.mode, "scope": "compiler-only", "release_qualified": False,
-        "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ODIN_ROOT, text=True).strip(),
-        "status": subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], cwd=ODIN_ROOT, text=True)}
-    (artifacts / "identity.json").write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
     print(f"Compiler validation artifacts: {artifacts}")
     return run_stages(stages, artifacts)
 

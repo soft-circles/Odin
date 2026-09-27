@@ -1,9 +1,9 @@
 # MIPS O64 baseline verification
 
-These tests lock the compiler and ROM baseline used by the Odin N64 work. The
-libdragon fixture accepts only SDK commit
-`c79a52b42ac790e06e797aede43914dd8754cd5f`; `interop/Makefile` runs
-`validate_sdk.py` before compiling either object.
+These tests exercise the compiler and ROM behavior used by the Odin N64 work.
+`interop/Makefile` runs `validate_sdk.py` before compiling either object to
+check required SDK files and executable tools. It accepts different SDK
+revisions and local changes without version metadata or recipe hashes.
 
 ## Regression gates
 

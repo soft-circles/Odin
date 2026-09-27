@@ -1,7 +1,3 @@
-#include <llvm/ADT/ArrayRef.h>
-#include <llvm/Support/SHA256.h>
-#include "n64_toolchain_pins.hpp"
-
 #if !defined(GB_SYSTEM_WINDOWS)
 #include <spawn.h>
 extern char **environ;
@@ -66,83 +62,6 @@ gb_internal String n64_load_text_file(String const &path) {
 	return make_string(cast(u8 *)contents.data, contents.size);
 }
 
-gb_internal isize n64_json_field_value_start(String const &json, String const &field) {
-	for (isize index = 0; index < json.len; index += 1) {
-		if (json[index] != '"') {
-			continue;
-		}
-		isize key_start = index+1;
-		isize key_end = key_start;
-		while (key_end < json.len && json[key_end] != '"') {
-			if (json[key_end] == '\\') {
-				key_end += 1;
-			}
-			key_end += 1;
-		}
-		if (key_end >= json.len) {
-			return -1;
-		}
-		index = key_end;
-		if (substring(json, key_start, key_end) != field) {
-			continue;
-		}
-		isize value_start = key_end+1;
-		while (value_start < json.len && gb_char_is_space(json[value_start])) {
-			value_start += 1;
-		}
-		if (value_start >= json.len || json[value_start] != ':') {
-			continue;
-		}
-		value_start += 1;
-		while (value_start < json.len && gb_char_is_space(json[value_start])) {
-			value_start += 1;
-		}
-		return value_start;
-	}
-	return -1;
-}
-
-gb_internal String n64_json_string_field(String const &json, String const &field) {
-	isize index = n64_json_field_value_start(json, field);
-	if (index < 0 || index >= json.len || json[index] != '"') {
-		return {};
-	}
-	index += 1;
-	isize start = index;
-	while (index < json.len && json[index] != '"' && json[index] != '\\') {
-		index += 1;
-	}
-	if (index >= json.len) {
-		return {};
-	}
-	return substring(json, start, index);
-}
-
-gb_internal bool n64_json_false_field(String const &json, String const &field) {
-	isize index = n64_json_field_value_start(json, field);
-	if (index < 0 || index+5 > json.len || substring(json, index, index+5) != "false") {
-		return false;
-	}
-	index += 5;
-	while (index < json.len && gb_char_is_space(json[index])) {
-		index += 1;
-	}
-	return index >= json.len || json[index] == ',' || json[index] == '}';
-}
-
-gb_internal String n64_sha256(String const &contents) {
-	auto digest = llvm::SHA256::hash(llvm::ArrayRef<u8>(contents.text, contents.len));
-	char *hex = gb_alloc_array(permanent_allocator(), char, 65);
-	char const digits[] = "0123456789abcdef";
-	for (isize index = 0; index < 32; index += 1) {
-		u8 byte = digest[index];
-		hex[2*index+0] = digits[byte >> 4];
-		hex[2*index+1] = digits[byte & 0xf];
-	}
-	hex[64] = 0;
-	return make_string(cast(u8 *)hex, 64);
-}
-
 gb_internal bool n64_sdk_tool_is_executable(String const &path) {
 	char const *path_c = alloc_cstring(temporary_allocator(), path);
 	if (!gb_file_exists(path_c) || path_is_directory(path)) {
@@ -158,8 +77,6 @@ gb_internal bool n64_sdk_tool_is_executable(String const &path) {
 gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 	String required_files[] = {
 		STR_LIT("include/n64.mk"),
-		STR_LIT("mips64-elf/include/libdragon.version"),
-		STR_LIT("mips64-elf/include/toolchain.version"),
 		STR_LIT("mips64-elf/lib/libdragon.a"),
 		STR_LIT("mips64-elf/lib/libdragonsys.a"),
 		STR_LIT("mips64-elf/lib/n64.ld"),
@@ -191,58 +108,7 @@ gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 			valid = false;
 		}
 	}
-	if (!valid) {
-		return false;
-	}
-
-	String libdragon_version_path = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("mips64-elf/include/libdragon.version"));
-	String toolchain_version_path = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("mips64-elf/include/toolchain.version"));
-	String makefile_path = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("include/n64.mk"));
-	String libdragon_version = n64_load_text_file(libdragon_version_path);
-	String toolchain_version = n64_load_text_file(toolchain_version_path);
-	String makefile_sha256 = n64_sha256(n64_load_text_file(makefile_path));
-	if (makefile_sha256 != make_string_c(N64_PINNED_MAKEFILE_SHA256)) {
-		gb_printf_err("libdragon SDK mismatch: expected pinned n64.mk SHA-256 %s, found %.*s in %.*s\n",
-		              N64_PINNED_MAKEFILE_SHA256, LIT(makefile_sha256), LIT(makefile_path));
-		return false;
-	}
-	String actual_commit = n64_json_string_field(libdragon_version, STR_LIT("hash"));
-	String expected_commit = make_string_c(N64_PINNED_LIBDRAGON_COMMIT);
-	if (actual_commit != expected_commit) {
-		String shown_commit = actual_commit.len > 0 ? actual_commit : STR_LIT("<missing hash>");
-		gb_printf_err("libdragon SDK mismatch: expected %s, found %.*s in %.*s\n",
-		              N64_PINNED_LIBDRAGON_COMMIT, LIT(shown_commit), LIT(libdragon_version_path));
-		return false;
-	}
-	if (!n64_json_false_field(libdragon_version, STR_LIT("dirty"))) {
-		gb_printf_err("libdragon SDK mismatch: pinned SDK provenance must be clean in %.*s\n", LIT(libdragon_version_path));
-		return false;
-	}
-
-	gb_printf_err("Validated N64 SDK: %.*s\n", LIT(sdk_root));
-	gb_printf_err("  libdragon provenance: %.*s\n", LIT(string_trim_whitespace(libdragon_version)));
-	gb_printf_err("  toolchain provenance: %.*s\n", LIT(string_trim_whitespace(toolchain_version)));
-	struct ToolchainField {
-		String name;
-		String expected;
-	};
-	ToolchainField expected_toolchain[] = {
-		{STR_LIT("host"),     make_string_c(N64_EXPECTED_TOOLCHAIN_HOST)},
-		{STR_LIT("binutils"), make_string_c(N64_EXPECTED_BINUTILS_VERSION)},
-		{STR_LIT("gcc"),      make_string_c(N64_EXPECTED_GCC_VERSION)},
-		{STR_LIT("newlib"),   make_string_c(N64_EXPECTED_NEWLIB_VERSION)},
-	};
-	for (ToolchainField const &field : expected_toolchain) {
-		String actual = n64_json_string_field(toolchain_version, field.name);
-		if (actual != field.expected) {
-			String shown_actual = actual.len > 0 ? actual : STR_LIT("<missing>");
-			gb_printf_err(
-				"Warning: N64 SDK %.*s provenance differs from the validated baseline: expected %.*s, found %.*s.\n",
-				LIT(field.name), LIT(field.expected), LIT(shown_actual)
-			);
-		}
-	}
-	return true;
+	return valid;
 }
 
 gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
@@ -279,9 +145,9 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 #if defined(GB_SYSTEM_WINDOWS)
 	gb_printf_err("The integrated N64 ROM build currently requires a POSIX host\n");
 	return false;
-#endif
+#else
 	if (request.lto_kind != LTO_None) {
-		gb_printf_err("-target:n64 does not support LTO in the pinned libdragon build pipeline\n");
+		gb_printf_err("-target:n64 does not support LTO in the libdragon build pipeline\n");
 		return false;
 	}
 	if (request.reloc_mode != RelocMode_Static) {
@@ -289,11 +155,11 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		return false;
 	}
 	if (request.no_crt || request.no_entry_point) {
-		gb_printf_err("-target:n64 executable builds do not support -no-crt or -no-entry-point; pinned n64.mk owns startup\n");
+		gb_printf_err("-target:n64 executable builds do not support -no-crt or -no-entry-point; the selected n64.mk owns startup\n");
 		return false;
 	}
 	if (request.linker_choice != Linker_Default) {
-		gb_printf_err("-target:n64 executable builds do not support -linker; pinned n64.mk selects the linker\n");
+		gb_printf_err("-target:n64 executable builds do not support -linker; the selected n64.mk selects the linker\n");
 		return false;
 	}
 	if (request.print_linker_flags) {
@@ -303,7 +169,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 	if (request.settings.rtc &&
 	    (request.settings.save_type == STR_LIT("eeprom4k") ||
 	     request.settings.save_type == STR_LIT("eeprom16k"))) {
-		gb_printf_err("-n64-rtc cannot be combined with -n64-save-type:%.*s; the pinned N64 header format cannot use RTC with EEPROM\n",
+		gb_printf_err("-n64-rtc cannot be combined with -n64-save-type:%.*s; the N64 header format cannot use RTC with EEPROM\n",
 		              LIT(request.settings.save_type));
 		return false;
 	}
@@ -335,6 +201,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		}
 	}
 	return true;
+#endif
 }
 
 #if !defined(GB_SYSTEM_WINDOWS)
@@ -587,7 +454,7 @@ gb_internal bool n64_foreign_input_is_sdk_library(String const &input) {
 gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 	String extra_flags = string_trim_whitespace(request.extra_linker_flags);
 	if (extra_flags.len > 0) {
-		gb_printf_err("-extra-linker-flags is not supported by the pinned N64 packaging pipeline\n");
+		gb_printf_err("-extra-linker-flags is not supported by the N64 packaging pipeline\n");
 		return false;
 	}
 	for (N64ForeignLibrary const &library : request.foreign_libraries) {
@@ -722,8 +589,8 @@ gb_internal bool n64_write_makefile(N64BuildStage const &stage, N64BuildRequest 
 		settings.assets.len > 0 ? "assets" : "filesystem",
 		request.show_system_calls ? "1" : "");
 	if (has_metadata) {
-		// The pinned n64.mk requests --padding 0 to defer final padding to
-		// n64metadata, while its pinned n64tool requires a unit suffix for
+		// The selected n64.mk requests --padding 0 to defer final padding to
+		// n64metadata, while n64tool requires a unit suffix for
 		// a zero value. 0B preserves the intended no-prepadding build graph.
 		gb_fprintf(&file,
 			"override N64_TOOLFLAGS := $(filter-out --padding 0,$(N64_TOOLFLAGS)) --padding 0B\n"

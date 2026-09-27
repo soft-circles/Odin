@@ -25,11 +25,11 @@ The build flows through these owned seams:
 6. [`src/n64_build.cpp`](src/n64_build.cpp) validates the SDK, stages inputs,
    writes the private Makefile, starts a sanitized `/usr/bin/make` process,
    retains failures, and atomically places the completed ROM.
-7. The pinned libdragon `n64.mk` owns final static linking, symbols, stripping,
+7. The selected libdragon `n64.mk` owns final static linking, symbols, stripping,
    compression, DragonFS, header configuration, and extended metadata.
 
 Target selection and option parsing stay in their existing compiler modules.
-N64 SDK provenance, staging, generated graph details, subprocess policy,
+N64 SDK availability checks, staging, generated graph details, subprocess policy,
 cleanup, and ROM placement belong in `src/n64_build.cpp`. General linker code
 should contain only translation adapters. Runtime startup and allocation belong
 in target-tagged `base/runtime/*_n64.odin` files. Bound C declarations and their
@@ -76,15 +76,12 @@ Hard SDK gates are:
 
 - all required headers, libraries, linker script, and packaging tools exist;
 - required tools are executable;
-- installed `libdragon.version` names the pinned commit;
-- installed libdragon provenance reports `dirty: false`;
-- installed `include/n64.mk` has the pinned SHA-256;
 - `mkdfs` is present when assets are requested;
 - `n64metadata` is present when metadata is requested.
 
-Host, binutils, GCC, and newlib provenance differences are warnings. They are
-still release-record fields and must be reviewed; warning status is not
-permission to omit them from qualification evidence.
+The compiler does not inspect revision, clean-state, recipe-hash or toolchain
+version metadata. SDK compatibility is exercised by compilation, packaging
+and the ABI/runtime tests.
 
 The packaging process removes inherited `PATH`, `SHELL`, make recursion and
 override variables, `CCACHE`/`CCACHE_*`, `V`, `D`, and every `N64_*` variable.
@@ -174,30 +171,19 @@ C callback, interrupt, or timer entry to install an Odin context. Do not expose
 callback-taking APIs until their context, reentrancy, stack, allocator, and
 failure rules have a separate design and hardware validation.
 
-## Authoritative pins
+## Setup defaults
 
 [Odin64's toolchain.lock.toml](https://github.com/soft-circles/Odin64/blob/main/toolchain.lock.toml)
-owns the compatible Odin/LLVM revisions, libdragon SDK identity and validation
-runner pins. It does not record automatic release acceptance for new ROMs.
-The compiler embeds SDK constants in
-[src/n64_toolchain_pins.hpp](src/n64_toolchain_pins.hpp); tests compare them with
-the lock when available, or check local documentation in a standalone checkout.
-
-### Updating the toolchain pins
-
-1. Review the proposed SDK commit, clean provenance, n64.mk hash and tool versions.
-2. Update compiler constants and the Odin64 lock together, in their owning repositories.
-3. Review changed bindings and their C/Odin ABI assertions in Odin64.
-4. Run compiler quick/full checks and Odin64 cross-repository validation.
-5. Commit and publish compatible compiler changes, then lock that exact commit.
-6. Record new hashes honestly; changed artifacts require affected manual/hardware
-   qualification under Odin64's Foundation matrix. Do not rewrite historical evidence.
+records the default Odin/LLVM, libdragon and runner revisions used for setup.
+The compiler has no duplicate SDK pin constants or lock-drift gate. When changing
+those defaults, review affected bindings and run compiler and C/Odin ABI tests
+with the selected installation. Keep historical test evidence unchanged.
 
 ## Validation layers
 
 [tests/n64_validate.py](tests/n64_validate.py) runs compiler-owned checks only.
 Use `--list` to inspect stages and `--artifacts <parent>` for unique retained
-logs and a compiler identity manifest. It never builds LLVM or installs dependencies.
+logs. It never builds LLVM or installs dependencies.
 Build Odin separately using an explicit compatible `LLVM_CONFIG`.
 
 ### Quick: no SDK or emulator required
@@ -206,7 +192,7 @@ Build Odin separately using an explicit compatible `LLVM_CONFIG`.
 python3 tests/n64_validate.py quick
 ```
 
-Checks cover pins, local documentation links, validation contracts, module
+Checks cover local documentation links, validation contracts, module
 boundaries, public options/failures, SDK-validator behavior and compilation of
 [tests/n64_runtime](tests/n64_runtime) and [tests/n64_core_mem](tests/n64_core_mem).
 No project-local binding is required.

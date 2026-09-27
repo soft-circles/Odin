@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -11,18 +10,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-import sys
 
 
 HERE = Path(__file__).resolve().parent
 ODIN_ROOT = HERE.parents[1]
 ODIN = Path(os.environ.get("ODIN", ODIN_ROOT / "odin")).resolve()
-sys.path.insert(0, str(HERE.parent))
-from n64_pins import LIBDRAGON_COMMIT as PINNED_LIBDRAGON_COMMIT
 REQUIRED_SDK_FILES = (
 	"include/n64.mk",
-	"mips64-elf/include/libdragon.version",
-	"mips64-elf/include/toolchain.version",
 	"mips64-elf/lib/libdragon.a",
 	"mips64-elf/lib/libdragonsys.a",
 	"mips64-elf/lib/n64.ld",
@@ -94,21 +88,13 @@ def run_host_build(app: Path, *arguments: str) -> subprocess.CompletedProcess[st
 	)
 
 
-def make_sdk_with_commit(parent: Path, source: Path, commit: str) -> Path:
-	"""Make a lightweight SDK facade so validation reaches the commit check."""
+def make_sdk_facade(parent: Path, source: Path) -> Path:
+	"""Link the required SDK inputs without requiring version metadata."""
 	root = parent / "sdk facade"
 	for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS):
 		destination = root / relative
 		destination.parent.mkdir(parents=True, exist_ok=True)
-		if relative.endswith("libdragon.version"):
-			destination.write_text(json.dumps({
-				"branch": "preview",
-				"hash": commit,
-				"commit-date": "2026-08-18",
-				"dirty": False,
-			}), encoding="utf-8")
-		else:
-			destination.symlink_to(source / relative)
+		destination.symlink_to(source / relative)
 	return root
 
 
@@ -225,53 +211,34 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertIn(str(environment), result.stdout)
 		self.assertIn("include/n64.mk", result.stdout)
 
-	def test_sdk_with_wrong_libdragon_commit_is_rejected(self):
-		source = configured_sdk()
-		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
-			self.skipTest("a complete N64 SDK is required for the provenance fixture")
-		sdk = make_sdk_with_commit(self.root, source, "0" * 40)
+	def test_sdk_metadata_and_recipe_do_not_block_real_packaging_failures(self):
+		for index, metadata in enumerate((None, "not JSON", '{"hash":"local-development","dirty":true}')):
+			with self.subTest(metadata=metadata):
+				sdk = self.root / f"custom sdk {index}"
+				for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS):
+					path = sdk / relative
+					path.parent.mkdir(parents=True, exist_ok=True)
+					path.touch(mode=0o755 if relative in REQUIRED_SDK_TOOLS else 0o644)
+				(sdk / "include/n64.mk").write_text(
+					"odin-n64.z64:\n\t@echo custom-sdk-packaging-reached\n\t@exit 37\n")
+				if metadata is not None:
+					for name in ("libdragon.version", "toolchain.version"):
+						path = sdk / "mips64-elf/include" / name
+						path.parent.mkdir(parents=True, exist_ok=True)
+						path.write_text(metadata)
 
-		result = run_build(self.app, f"-n64-inst:{sdk}")
+				result = run_build(self.app, f"-n64-inst:{sdk}")
 
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("libdragon SDK mismatch", result.stdout)
-		self.assertIn(PINNED_LIBDRAGON_COMMIT, result.stdout)
-		self.assertIn("0" * 40, result.stdout)
-
-	def test_modified_n64_makefile_is_rejected_even_with_pinned_version_metadata(self):
-		source = configured_sdk()
-		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
-			self.skipTest("a complete N64 SDK is required for the provenance fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
-		makefile = sdk / "include/n64.mk"
-		makefile.unlink()
-		makefile.write_bytes((source / "include/n64.mk").read_bytes() + b"\n# modified\n")
-
-		result = run_build(self.app, f"-n64-inst:{sdk}")
-
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("pinned n64.mk SHA-256", result.stdout)
-
-	def test_sdk_with_dirty_libdragon_provenance_is_rejected(self):
-		source = configured_sdk()
-		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
-			self.skipTest("a complete N64 SDK is required for the provenance fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
-		(sdk / "mips64-elf/include/libdragon.version").write_text(json.dumps({
-			"hash": PINNED_LIBDRAGON_COMMIT,
-			"dirty": True,
-		}), encoding="utf-8")
-
-		result = run_build(self.app, f"-n64-inst:{sdk}")
-
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("must be clean", result.stdout)
+				self.assertNotEqual(result.returncode, 0, result.stdout)
+				self.assertIn("custom-sdk-packaging-reached", result.stdout)
+				self.assertIn("intermediates were retained", result.stdout)
+				self.assertFalse((self.app / "app.z64").exists())
 
 	def test_missing_required_sdk_file_is_named(self):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
 			self.skipTest("a complete N64 SDK is required for the SDK fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
+		sdk = make_sdk_facade(self.root, source)
 		(sdk / "mips64-elf/lib/n64.ld").unlink()
 
 		result = run_build(self.app, f"-n64-inst:{sdk}")
@@ -284,7 +251,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
 			self.skipTest("a complete N64 SDK is required for the SDK fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
+		sdk = make_sdk_facade(self.root, source)
 		tool = sdk / "bin/n64sym"
 		tool.unlink()
 		tool.write_text("not executable\n", encoding="utf-8")
@@ -300,7 +267,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
 			self.skipTest("a complete N64 SDK is required for the SDK fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
+		sdk = make_sdk_facade(self.root, source)
 		assets = self.root / "assets with spaces"
 		assets.mkdir()
 		(assets / "message.txt").write_text("asset payload", encoding="utf-8")
@@ -315,7 +282,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
 			self.skipTest("a complete N64 SDK is required for the SDK fixture")
-		sdk = make_sdk_with_commit(self.root, source, PINNED_LIBDRAGON_COMMIT)
+		sdk = make_sdk_facade(self.root, source)
 		metadata = self.root / "metadata with spaces.ini"
 		metadata.write_text("[meta]\nname = Tool Test\n", encoding="utf-8")
 
@@ -409,7 +376,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(output.is_file(), result.stdout)
 
-	def test_inherited_compiler_and_linker_flags_do_not_reach_the_pinned_link(self):
+	def test_inherited_compiler_and_linker_flags_do_not_reach_the_sdk_link(self):
 		app = create_app(self.root, "inherited flags app")
 		output = app / "flags.z64"
 
@@ -429,7 +396,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertTrue(output.is_file(), result.stdout)
 
 	def test_inherited_make_ignore_errors_cannot_hide_packaging_failure(self):
-		sdk = make_sdk_with_commit(self.root, self.sdk, PINNED_LIBDRAGON_COMMIT)
+		sdk = make_sdk_facade(self.root, self.sdk)
 		tool = sdk / "bin/n64sym"
 		tool.unlink()
 		tool.write_text("#!/bin/sh\nexit 19\n", encoding="utf-8")
@@ -555,8 +522,6 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertIn(b"metadata.ini", rom)
 		self.assertIn(b"Odin N64 Metadata Test", rom)
 		self.assertIn(companion_payload.encode(), rom)
-		self.assertIn(b"libdragon.version", rom)
-		self.assertIn(b"toolchain.version", rom)
 
 		retention = re.search(r"Retained N64 build intermediates: (.+)", result.stdout)
 		self.assertIsNotNone(retention, result.stdout)
