@@ -183,7 +183,7 @@ with the selected installation. Keep historical test evidence unchanged.
 
 [tests/n64_validate.py](tests/n64_validate.py) runs compiler-owned checks only.
 Use `--list` to inspect stages and `--artifacts <parent>` for unique retained
-logs and a compiler identity manifest. It never builds LLVM or installs dependencies.
+logs. It never builds LLVM or installs dependencies.
 Build Odin separately using an explicit compatible `LLVM_CONFIG`.
 
 ### Quick: no SDK or emulator required

@@ -2,6 +2,8 @@
 """Guard standalone compiler validation ownership and failure behavior."""
 import importlib.util
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,26 @@ sys.modules[spec.name] = driver
 spec.loader.exec_module(driver)
 
 class ValidationContract(unittest.TestCase):
+    def test_source_snapshot_runs_checks_without_git_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checks = root / "tests/n64_validation"
+            checks.mkdir(parents=True)
+            (root / "odin").touch()
+            shutil.copy2(ROOT / "tests/n64_validate.py", root / "tests/n64_validate.py")
+            (checks / "check_documentation_links.py").write_text(
+                "print('snapshot check reached'); raise SystemExit(7)\n")
+            artifacts = root / "artifacts"
+
+            result = subprocess.run(
+                (sys.executable, str(root / "tests/n64_validate.py"), "quick", "--artifacts", str(artifacts)),
+                cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+            self.assertEqual(result.returncode, 7, result.stdout)
+            run = next(artifacts.iterdir())
+            self.assertIn("snapshot check reached", (run / "documentation-links.log").read_text())
+            self.assertFalse((run / "identity.json").exists())
+
     def test_quick_does_not_require_matching_toolchain_pins(self):
         stages = driver.quick_stages()
         self.assertNotIn("active pin drift", [stage.name for stage in stages])

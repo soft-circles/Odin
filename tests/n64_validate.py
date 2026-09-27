@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 import re
@@ -101,16 +100,12 @@ def main() -> int:
         if not os.environ.get("N64_INST") or not sdk.is_dir():
             parser.error("full mode requires explicit N64_INST; see N64_BUILD.md")
         if not os.environ.get("ARES_TEST") or not shutil.which(runner):
-            parser.error("full mode requires an executable ARES_TEST; use Odin64 for pinned cross-repository qualification")
+            parser.error("full mode requires an executable ARES_TEST; use Odin64 for cross-repository qualification")
     base = (args.artifacts or ODIN_ROOT / ".n64-validation-artifacts").expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
     artifacts = Path(tempfile.mkdtemp(prefix=f"{args.mode}-", dir=base))
     if args.mode == "full":
         stages += full_stages(sdk, runner, artifacts)
-    identity = {"mode": args.mode, "scope": "compiler-only", "release_qualified": False,
-        "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ODIN_ROOT, text=True).strip(),
-        "status": subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], cwd=ODIN_ROOT, text=True)}
-    (artifacts / "identity.json").write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
     print(f"Compiler validation artifacts: {artifacts}")
     return run_stages(stages, artifacts)
 
