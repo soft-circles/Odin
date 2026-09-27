@@ -145,7 +145,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 #if defined(GB_SYSTEM_WINDOWS)
 	gb_printf_err("The integrated N64 ROM build currently requires a POSIX host\n");
 	return false;
-#endif
+#else
 	if (request.lto_kind != LTO_None) {
 		gb_printf_err("-target:n64 does not support LTO in the libdragon build pipeline\n");
 		return false;
@@ -201,6 +201,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		}
 	}
 	return true;
+#endif
 }
 
 #if !defined(GB_SYSTEM_WINDOWS)
