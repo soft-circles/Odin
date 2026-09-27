@@ -23,11 +23,9 @@ class Stage:
     cwd: Path = ODIN_ROOT
     environment: dict[str, str] = field(default_factory=dict)
 
-def quick_stages(lock_path: Path | None = None) -> list[Stage]:
+def quick_stages() -> list[Stage]:
     environment = {"N64_VALIDATION_MODE": "quick", "ODIN": str(ODIN_ROOT / "odin")}
-    pins = {"ODIN_N64_TOOLCHAIN_LOCK": str(lock_path)} if lock_path else {}
     return [
-        Stage("active pin drift", (PYTHON, "tests/n64_validation/check_active_pins.py"), environment=pins),
         Stage("documentation links", (PYTHON, "tests/n64_validation/check_documentation_links.py")),
         Stage("validation contract", (PYTHON, "tests/n64_validation/test_validation_contract.py")),
         Stage("N64 build-module boundary", (PYTHON, "tests/n64_build/test_n64_module.py")),
@@ -47,7 +45,7 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
     }
     rom = str(artifacts / "runtime.z64")
     return [
-        Stage("validate pinned SDK", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
+        Stage("check SDK files and tools", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
         Stage("N64 public build suite", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("Odin O64 ABI differential", (PYTHON, "tests/o64_abi/differential.py"), environment=environment),
         Stage("linked O64 ABI ROM", ("make", "-C", "tests/o64_abi/interop", "clean", "all", "check"), environment=environment),

@@ -2,7 +2,7 @@
 
 ## Dependencies
 
-- Pinned libdragon SDK: use the [N64 setup](N64_BUILD.md#install-the-pinned-libdragon-sdk).
+- Libdragon SDK: use the [N64 setup](N64_BUILD.md#install-the-libdragon-sdk).
   The queue and synchronous `DMAOut` contracts come from its `rsp_queue.inc` and
   `rsp_dma.inc`. Set `N64_INST` to select this SDK for tests.
 - Odin64 integration: use the engine repository's `tests/n64/rspq` fixtures for

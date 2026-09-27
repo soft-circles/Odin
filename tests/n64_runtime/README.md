@@ -12,7 +12,7 @@ import Odin64 or require a graphics binding.
 "$ARES_TEST" tests/n64_runtime/runtime.test.js runtime.z64 --timeout 30
 ```
 
-Build/run requires the [pinned SDK](../../N64_BUILD.md). Ordered EMUX sentinels
+Build/run requires an [installed SDK](../../N64_BUILD.md). Ordered EMUX sentinels
 verify lifecycle behavior; they are not a process-exit-status API. Framebuffer,
 input and binding integration coverage lives in
 [Odin64](https://github.com/soft-circles/Odin64).

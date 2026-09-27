@@ -13,6 +13,10 @@ sys.modules[spec.name] = driver
 spec.loader.exec_module(driver)
 
 class ValidationContract(unittest.TestCase):
+    def test_quick_does_not_require_matching_toolchain_pins(self):
+        stages = driver.quick_stages()
+        self.assertNotIn("active pin drift", [stage.name for stage in stages])
+
     def test_quick_is_sdk_free_and_binding_independent(self):
         stages = driver.quick_stages()
         text = repr(stages)
