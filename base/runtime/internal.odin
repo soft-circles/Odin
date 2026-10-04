@@ -257,9 +257,23 @@ conditional_mem_zero :: proc "contextless" (data: rawptr, n_: int) #no_bounds_ch
 	}
 	n := uint(n_)
 
+	// `data` need not be word aligned (e.g. the tail of a resized []byte), and
+	// targets such as MIPS trap on unaligned word loads, so clear the bytes up
+	// to the first word boundary individually.
+	misalignment := uint(uintptr(data) & (size_of(uintptr) - 1))
+	n_head := misalignment == 0 ? 0 : min(size_of(uintptr) - misalignment, n)
+	p_head := ([^]byte)(data)[:n_head]
+	for &p_byte in p_head {
+		if p_byte != 0 {
+			p_byte = 0
+		}
+	}
+
+	aligned := rawptr(uintptr(data) + uintptr(n_head))
+	n -= n_head
 	n_words := n / size_of(uintptr)
-	p_words := ([^]uintptr)(data)[:n_words]
-	p_bytes := ([^]byte)(data)[size_of(uintptr) * n_words:n]
+	p_words := ([^]uintptr)(aligned)[:n_words]
+	p_bytes := ([^]byte)(aligned)[size_of(uintptr) * n_words:n]
 	for &p_word in p_words {
 		if p_word != 0 {
 			p_word = 0
