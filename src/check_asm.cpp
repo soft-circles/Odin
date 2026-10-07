@@ -4070,6 +4070,8 @@ gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, De
 		check_asm_template(&g_asm_riscv, c, e, d);
 	} else if (build_context.metrics.arch == TargetArch_arm64) {
 		check_asm_template(&g_asm_arm64, c, e, d);
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		check_asm_template(&g_asm_mips, c, e, d);
 	} else {
 		error(e->token, "asm templates are not currently supported for this target");
 	}
@@ -4081,6 +4083,7 @@ gb_internal bool check_asm_template_features_bind_to_caller(void) {
 	case TargetArch_amd64:    return asm_hook_template_features_bind_to_caller(&g_asm_amd64, 0);
 	case TargetArch_riscv64:  return asm_hook_template_features_bind_to_caller(&g_asm_riscv, 0);
 	case TargetArch_arm64:    return asm_hook_template_features_bind_to_caller(&g_asm_arm64, 0);
+	case TargetArch_mips32be: return asm_hook_template_features_bind_to_caller(&g_asm_mips,  0);
 	default:                  break;
 	}
 	return false;
