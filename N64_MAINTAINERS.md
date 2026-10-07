@@ -36,6 +36,21 @@ in target-tagged `base/runtime/*_n64.odin` files. Bound C declarations and their
 ABI assertions belong in the independent Odin64 repository's `libdragon/` and
 `tests/abi/libdragon/`, not this compiler's vendor collection.
 
+CPU `asm` templates for `TargetArch_mips32be` sit beside that flow:
+
+- [`src/asm_tables_mips.cpp`](src/asm_tables_mips.cpp) is the MIPS III
+  (VR4300) instruction table: mnemonics, registers, operand types, form rows
+  and clobber records. Its header comment is the reference for the jump,
+  delay-slot, hazard, `$at` and HI/LO policies.
+- [`src/check_asm.cpp`](src/check_asm.cpp) and
+  [`src/check_asm_cfg.cpp`](src/check_asm_cfg.cpp) are the generic checker. The
+  MIPS table supplies slot ranges and the literal-write policy through its
+  optional table hooks.
+- `lbAsmGenerate_mips` in [`src/llvm_backend_asm.cpp`](src/llvm_backend_asm.cpp)
+  writes the LLVM inline-asm string and constraint list.
+
+The user contract is [`MIPS_ASM.md`](MIPS_ASM.md).
+
 ## Interfaces
 
 The external interface is deliberately small:
@@ -171,6 +186,85 @@ C callback, interrupt, or timer entry to install an Odin context. Do not expose
 callback-taking APIs until their context, reentrancy, stack, allocator, and
 failure rules have a separate design and hardware validation.
 
+## CPU asm templates
+
+The amd64, arm64 and riscv64 tables are generated from `core:rexcode`. The MIPS
+table is hand-written: upstream Odin has no MIPS target, and rexcode's MIPS ISA
+has no clobber semantics. It keeps the generated riscv64 table's sections,
+enums, `Encoding`/`Clobber` records and `AsmCtx` interface, so a generated
+table can replace it without touching the checker or backend.
+
+To add an instruction:
+
+1. Add an `X(ENUM, "spelling")` row to `ASM_MIPS_MNEMONICS` in its group. FPU
+   spellings use `_` for `.`.
+2. Add one `R(...)` form row per operand shape, adjacent to the mnemonic's
+   other rows and in mnemonic order. A row gives the shape, fixed encoding bits
+   and mask, feature and `Clobber` record. Add a shape or a `MIPS_C_*` clobber
+   macro only when no existing one fits. `init` asserts the ordering and that
+   every mnemonic has a form.
+3. Use a VR4300 feature (`MIPS_I`, `MIPS_II`, `MIPS_III`, `COP0`, `FPU`,
+   `MACRO`) only for instructions the VR4300 implements. Anything else takes
+   its LLVM feature (`MIPS4`, `MIPS32`, ...), which keeps it rejected unless
+   that feature is enabled.
+4. Add an exported proc to [tests/n64_asm/coverage](tests/n64_asm/coverage)
+   with the instruction's word in the test's encoding table; the suite reads
+   `ASM_MIPS_MNEMONICS` and fails when a mnemonic has no coverage proc. Add
+   constraint expectations when it has implicit registers or effects, a case
+   to `regress/` if it touches a MIPS-specific trap, and rejected forms to
+   `bad_check/` (checker), `bad_features/` (later-ISA) or `bad_backend/`
+   (wrong-class literals and pins the generator also rejects). Integer branch forms also run through the test's small
+   MIPS interpreter, which checks taken and not-taken results with delay slots.
+
+Preserve these guarantees:
+
+- Every MIPS template clobbers `~{$1}`, and `%at` is not in the register table.
+  LLVM allocates `$at` to operands while assembler macros expand through it.
+- Pins and clobbers use numeric constraints: pins `{$4}`, `{hi}`, `{lo}`;
+  clobbers `~{$8}`, `~{$f4}`, `~{$fcc0}`, `~{hi}`, `~{lo}`. A named GPR
+  constraint such as `{$t1}` asserts in LLVM's Mips backend. FPR pins lower
+  to `{$f12}`-style constraints.
+- Literal registers are written `$$N`/`$$fN`; `$N` is an operand reference.
+- Labels are numeric locals (`N:`, `Nb`, `Nf`). Branch and jump targets are
+  template labels only.
+- Delay slots belong to the assembler under `.set reorder`. Nothing in the
+  table or backend inserts or expects an explicit slot instruction. Hazards
+  inside a template are not filled; the generator only pads HI/LO hazards that
+  would straddle the template boundary.
+- `%ra`, `%hi`, `%lo` and `%fcc0` stay tracked: their writes clobber
+  automatically and unproduced reads are errors.
+  `implicit_register_writes_are_full_width` makes each implicit write define
+  the whole register.
+- Slot ranges come from `memory_disp_range` and `immediate_range`, and
+  `operand_value_reject_reason` limits `cache` to VR4300 operations.
+- The 32-bit GPR slots (`OP_GPR32`) reject 64-bit parameters.
+  `literal_register_width_agnostic` exempts literal registers from that check.
+- `register_write_needs_clobber` requires a pin or `#clobber` for a literal
+  write to an allocatable GPR or FPR. `%ra` is tracked instead, and
+  `$zero`, `$k0`, `$k1`, `$gp` and `$sp` are exempt.
+- `jalr` reads and writes memory in its clobber record, and
+  `destination_must_differ_from_sources` makes the generator emit `=&`
+  outputs so `rd` never equals `rs`.
+- `#clobber` of a COP0 or COP1-control register lowers to `~{memory}`.
+  `pin_reject_reason` makes `odin check` reject pins to those registers and
+  to `%fcc0`; the generator keeps the same checks as a backstop.
+- Two-operand `div`/`divu`/`ddiv`/`ddivu` are emitted as `div $zero, rs, rt`.
+- Feature gating stays: `feature_name_from_form` names no feature for VR4300
+  forms and the LLVM feature for later-ISA forms, which the checker rejects
+  unless the build or the template enables that feature. Because
+  `template_features_bind_to_caller` is true, a call to a feature-enabling
+  template is rejected unless the calling procedure or the build enables it.
+
+Table hooks the generic checker asks for (all optional, SFINAE-detected in
+`check_asm.cpp`; a table without one keeps the old behaviour): `register_is_float`
+types a literal FPR as `f32`/`f64`; `literal_register_reject_reason` and
+`pin_reject_reason` reject wrong-class literals and impossible pins at check
+time; `register_unavailable_reason` explains `%at`; `template_features_bind_to_caller`
+makes a call to a feature-enabling template require the feature on the caller
+or the build; `pinned_integer_operand_min_bits` on the generator widens narrow
+pinned operands to 32 bits, since LLVM's MIPS backend asserts on an i8/i16
+explicit-register constraint.
+
 ## Setup defaults
 
 [Odin64's toolchain.lock.toml](https://github.com/soft-circles/Odin64/blob/main/toolchain.lock.toml)
@@ -195,6 +289,19 @@ python3 tests/n64_validate.py quick
 Checks cover local documentation links, validation contracts, module
 boundaries, public options/failures, SDK-validator behavior and compilation of
 [tests/n64_runtime](tests/n64_runtime) and [tests/n64_core_mem](tests/n64_core_mem).
+The "CPU asm templates" stage runs
+[tests/n64_asm/test_n64_asm.py](tests/n64_asm/test_n64_asm.py). With any LLVM it
+checks the LLVM IR asm strings and constraints, checker and generator
+rejections, target-feature diagnostics and the known-bug reproductions.
+Instruction words are read from ELF32 objects, which only the MIPS O64 LLVM
+fork writes. With stock LLVM, which writes an ELF64 n64-ABI object, the object
+tests skip with "compiler emits ELF64: not the MIPS O64 LLVM fork". This
+covers the encodings, the branch interpreter, delay slots, labels and the
+`ext` encodings in the target-feature tests. CI builds Odin with stock LLVM, so
+CI does not check encodings; run the suite with a fork build before merging
+template changes. When `N64_INST` or `MIPS_O64_OBJDUMP` is set, or in full
+mode, an ELF64 object fails these tests instead of skipping them. The "asm
+template ROM probe" stage type-checks [tests/n64_asm/rom](tests/n64_asm/rom).
 No project-local binding is required.
 
 ### Full: compiler SDK and runtime checks
@@ -206,7 +313,11 @@ N64_INST=/absolute/sdk ARES_TEST=/absolute/ares-test \\
 
 Missing tools fail instead of skipping. Full mode repeats quick checks, validates
 the SDK, runs public build/packaging tests, the Odin/GCC differential, linked O64
-ABI ROM, and standalone runtime lifecycle. Fixture logs are retained on failure.
+ABI ROM, and standalone runtime lifecycle. It then builds the asm template ROM
+and runs [tests/n64_asm/rom.test.js](tests/n64_asm/rom.test.js), which checks
+cache writeback/invalidate, a call into generated code, a call after rewriting
+that code in place, which fails if the I-cache is not invalidated, its negative
+control and CP0 Count. Fixture logs are retained on failure.
 Runner provisioning is documented in [tests/o64_abi](tests/o64_abi).
 
 The separate [Odin64 driver](https://github.com/soft-circles/Odin64#verify)

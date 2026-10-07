@@ -14,6 +14,7 @@ DOCUMENTS = (
 	"README.md",
 	"N64_BUILD.md",
 	"RSP_ASSEMBLY.md",
+	"MIPS_ASM.md",
 	"N64_MAINTAINERS.md",
 	"examples/README.md",
 	"vendor/README.md",
