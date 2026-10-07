@@ -1,5 +1,11 @@
 // check_asm_cfg.cpp
 
+// A register code (an entry of a table's register_codes) held outside the table's own
+// template code. Wide enough for every table: arm64's codes are u32, the others u16.
+// Templates keep codes at the table's element type (AsmTableRegCode in check_asm.cpp),
+// which a static_assert there checks fits.
+typedef u32 AsmRegCode;
+
 enum {
 	ASM_WIDTH_REG_COUNT = 16
 };
@@ -116,11 +122,28 @@ struct AsmCfg {
 	PtrMap<Entity *, i32> entity_to_index;
 	Array<u16>            decl_pin_bit;
 	u64                   universe_pm;
+
+	// Literal-register write check, for tables that declare register_write_needs_clobber.
+	// The register codes the body may write without an error: the #clobber and #preserve
+	// registers as declared, before implicit clobbers are folded into the same set.
+	Array<AsmRegCode> declared_write_reg_codes;
+	// Register codes already reported, so a register written several times errors once.
+	Array<AsmRegCode> reported_write_reg_codes;
+	// Input parameters already reported as written, so each errors once.
+	Array<Entity *> reported_input_writes;
+
+	// Some instruction failed to check and carries no read/write facts, so a missing
+	// definition may just be that instruction's. Definite-assignment diagnostics are
+	// skipped rather than reported against values the failed instruction may set.
+	bool has_unchecked_instructions;
 };
 
 gb_internal void asm_cfg_init(AsmCfg *cfg) {
 	map_init(&cfg->entity_to_index);
 	cfg->decl_pin_bit.allocator = heap_allocator();
+	cfg->declared_write_reg_codes.allocator = heap_allocator();
+	cfg->reported_write_reg_codes.allocator = heap_allocator();
+	cfg->reported_input_writes.allocator = heap_allocator();
 	cfg->can_be_pure = true;
 };
 
@@ -135,6 +158,9 @@ gb_internal void asm_cfg_destroy(AsmCfg *cfg) {
 	array_free(&cfg->insts);
 	map_destroy(&cfg->entity_to_index);
 	array_free(&cfg->decl_pin_bit);
+	array_free(&cfg->declared_write_reg_codes);
+	array_free(&cfg->reported_write_reg_codes);
+	array_free(&cfg->reported_input_writes);
 }
 
 gb_internal i32 asm_cfg_label_block_index(Entity *entity) {
@@ -336,6 +362,12 @@ gb_internal bool check_asm_cfg_block_leaves(AsmCfg *cfg, i32 bi) {
 }
 
 template <typename AsmCtx>
+gb_internal bool check_asm_cfg_reg_cannot_be_pinned(AsmCtx *asm_ctx, char const *rname) {
+	auto r = asm_ctx->register_lookup(make_string_c(rname));
+	return r && asm_ctx->reg_is_non_allocateable(r);
+}
+
+template <typename AsmCtx>
 gb_internal void check_asm_cfg_report_undef_reg(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *tmpl_entity,
                                                 AstAsmInstruction *instr, String name, u16 bit) {
 	char const *rname = asm_ctx->clobber_reg_bit_name(bit);
@@ -364,6 +396,12 @@ gb_internal void check_asm_cfg_report_undef_reg(AsmCtx *asm_ctx, AsmCfg *cfg, En
 		      "'%.*s' implicitly reads %%%s, which is bound to the %s parameter '%.*s', "
 		      "but nothing writes %%%s on all paths reaching here; write to it (e.g. into '%.*s') first",
 		      LIT(name), rname, role, LIT(owner), rname, LIT(owner));
+	} else if (check_asm_cfg_reg_cannot_be_pinned(asm_ctx, rname)) {
+		// No parameter can be pinned to it (MIPS %fcc0), so only the body can set it.
+		error(instr->name,
+		      "'%.*s' implicitly reads %%%s, but nothing in this template produces a value for it "
+		      "on all paths reaching here; write %%%s first",
+		      LIT(name), rname, rname);
 	} else {
 		error(instr->name,
 		      "'%.*s' implicitly reads %%%s, but nothing in this template produces a value for it "
@@ -692,7 +730,7 @@ gb_internal void check_asm_cfg_analyse(AsmCtx *asm_ctx, AsmCfg *cfg, CheckerCont
 		}
 	}
 
-	{ // NOTE(bill): read-before-write, definite-assignment across the whole CFG
+	if (!cfg->has_unchecked_instructions) { // NOTE(bill): read-before-write, definite-assignment across the whole CFG
 		PtrSet<Entity *> reported_params = {};
 		defer (ptr_set_destroy(&reported_params));
 
@@ -843,7 +881,7 @@ gb_internal void check_asm_cfg_analyse(AsmCtx *asm_ctx, AsmCfg *cfg, CheckerCont
 		}
 
 		// NOTE(bill): Outputs must be assigned on every path that returns
-		if (any_exit && !diverging) {
+		if (any_exit && !diverging && !cfg->has_unchecked_instructions) {
 			for_array(i, decls) {
 				auto const &ed = decls[i];
 				if (ed.param_group != AsmTemplateEntityDeclParamGroup_Output) {
