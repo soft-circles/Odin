@@ -31,6 +31,8 @@ def quick_stages() -> list[Stage]:
         Stage("N64 public options and failure paths", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("SDK validator unit tests", (PYTHON, "tests/o64_abi/test_validate_sdk.py")),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
+        Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
+        Stage("asm template ROM probe", ("./odin", "check", "tests/n64_asm/rom", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("core:mem target check", ("./odin", "check", "tests/n64_core_mem", "-target:n64", "-no-entry-point", "-vet", "-warnings-as-errors")),
     ]
@@ -43,6 +45,7 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
         "MIPS_O64_OBJDUMP": str(sdk / "bin/mips64-elf-objdump"),
     }
     rom = str(artifacts / "runtime.z64")
+    asm_rom = str(artifacts / "asm.z64")
     return [
         Stage("check SDK files and tools", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
         Stage("N64 public build suite", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
@@ -50,6 +53,8 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
         Stage("linked O64 ABI ROM", ("make", "-C", "tests/o64_abi/interop", "clean", "all", "check"), environment=environment),
         Stage("build standalone runtime ROM", ("./odin", "build", "tests/n64_runtime", "-target:n64", f"-out:{rom}"), environment=environment),
         Stage("standalone runtime lifecycle", (runner, "tests/n64_runtime/runtime.test.js", rom, "--timeout", "30"), environment=environment),
+        Stage("build asm template ROM", ("./odin", "build", "tests/n64_asm/rom", "-target:n64", f"-out:{asm_rom}"), environment=environment),
+        Stage("asm template ROM run", (runner, "tests/n64_asm/rom.test.js", asm_rom, "--timeout", "30"), environment=environment),
     ]
 
 def run_stages(stages: list[Stage], artifacts: Path) -> int:
