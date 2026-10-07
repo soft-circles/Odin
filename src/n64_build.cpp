@@ -74,6 +74,22 @@ gb_internal bool n64_sdk_tool_is_executable(String const &path) {
 #endif
 }
 
+gb_internal String n64_sanitized_rom_title(String const &source) {
+	gbString title = gb_string_make_reserve(permanent_allocator(), 21);
+	for (isize index = 0; index < source.len && gb_string_length(title) < 20; index += 1) {
+		char c = cast(char)source[index];
+		if (gb_char_is_alphanumeric(c) || c == ' ' || c == '-' || c == '_') {
+			title = gb_string_append_length(title, &c, 1);
+		} else {
+			title = gb_string_appendc(title, "_");
+		}
+	}
+	if (gb_string_length(title) == 0) {
+		title = gb_string_appendc(title, "Odin N64");
+	}
+	return make_string_c(title);
+}
+
 // A/B switch for the B1 spike: ODIN_N64_USE_MAKE=1 selects the old
 // generated-Makefile path; the default spawns the packaging tools directly.
 gb_internal bool n64_use_make(void) {
@@ -193,7 +209,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 
 	String sdk_root = request.settings.sdk_root;
 	if (sdk_root.len == 0) {
-		gb_printf_err("N64 SDK is not configured; use -n64-inst:<path> or set the N64_INST environment variable\n");
+		gb_printf_err("N64 SDK is not configured; use -n64-inst:<path>, set the N64_INST environment variable, or install the SDK at <odin root>/n64\n");
 		return false;
 	}
 	if (!n64_validate_sdk_root(sdk_root)) {
@@ -527,22 +543,6 @@ gb_internal bool n64_stage_link_inputs(N64BuildStage *stage, N64BuildRequest *re
 		}
 	}
 	return true;
-}
-
-gb_internal String n64_sanitized_rom_title(String const &source) {
-	gbString title = gb_string_make_reserve(permanent_allocator(), 21);
-	for (isize index = 0; index < source.len && gb_string_length(title) < 20; index += 1) {
-		char c = cast(char)source[index];
-		if (gb_char_is_alphanumeric(c) || c == ' ' || c == '-' || c == '_') {
-			title = gb_string_append_length(title, &c, 1);
-		} else {
-			title = gb_string_appendc(title, "_");
-		}
-	}
-	if (gb_string_length(title) == 0) {
-		title = gb_string_appendc(title, "Odin N64");
-	}
-	return make_string_c(title);
 }
 
 gb_internal bool n64_write_makefile(N64BuildStage const &stage, N64BuildRequest const &request) {
