@@ -22,8 +22,9 @@ class Stage:
     cwd: Path = ODIN_ROOT
     environment: dict[str, str] = field(default_factory=dict)
 
-def quick_stages() -> list[Stage]:
+def quick_stages(artifacts: Path = Path("/artifacts")) -> list[Stage]:
     environment = {"N64_VALIDATION_MODE": "quick", "ODIN": str(ODIN_ROOT / "odin")}
+    runtime_objects = str(artifacts / "runtime-obj")
     return [
         Stage("documentation links", (PYTHON, "tests/n64_validation/check_documentation_links.py")),
         Stage("validation contract", (PYTHON, "tests/n64_validation/test_validation_contract.py")),
@@ -34,6 +35,7 @@ def quick_stages() -> list[Stage]:
         Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
         Stage("asm template ROM probe", ("./odin", "check", "tests/n64_asm/rom", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
+        Stage("runtime probe code generation", ("./odin", "build", "tests/n64_runtime", "-target:n64", "-build-mode:obj", f"-out:{runtime_objects}")),
         Stage("core:mem target check", ("./odin", "check", "tests/n64_core_mem", "-target:n64", "-no-entry-point", "-vet", "-warnings-as-errors")),
     ]
 
@@ -90,10 +92,10 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list stages without running checks")
     parser.add_argument("--artifacts", type=Path, help="parent directory for unique retained logs")
     args = parser.parse_args()
-    stages = quick_stages()
     sdk = Path(os.environ.get("N64_INST", "/missing-sdk")).expanduser().resolve()
     runner = os.environ.get("ARES_TEST", "ares-test")
     if args.list:
+        stages = quick_stages()
         if args.mode == "full":
             stages += full_stages(sdk, runner, Path("/artifacts"))
         for stage in stages:
@@ -109,6 +111,7 @@ def main() -> int:
     base = (args.artifacts or ODIN_ROOT / ".n64-validation-artifacts").expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
     artifacts = Path(tempfile.mkdtemp(prefix=f"{args.mode}-", dir=base))
+    stages = quick_stages(artifacts)
     if args.mode == "full":
         stages += full_stages(sdk, runner, artifacts)
     print(f"Compiler validation artifacts: {artifacts}")
