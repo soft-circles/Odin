@@ -66,7 +66,7 @@ struct lbAsmGenerate {
 		}
 	}
 
-	void destroy() {
+	virtual void destroy() {
 		gb_string_free(this->asm_string);
 		gb_string_free(this->constraints);
 		map_destroy(&this->label_numbers);
@@ -151,6 +151,80 @@ struct lbAsmGenerate {
 		array_add(call_args, v);
 	}
 
+	// Width in bits of a register operand of Odin type `t` that travels in an
+	// integer register (integers, booleans, pointers); 0 for floats and vectors.
+	static unsigned integer_operand_bits(Type *t) {
+		Type *ct = core_type(t);
+		if (is_type_integer(ct) || is_type_boolean(ct) || is_type_internally_pointer_like(ct)) {
+			return cast(unsigned)(type_size_of(ct)*8);
+		}
+		return 0;
+	}
+
+	// The integer width, in bits, at which register operand `e` of Odin type `t`
+	// crosses the asm boundary, or 0 to pass it as `t` itself. Inputs are extended
+	// to it (widen_operand_value) and results truncated back to `t`
+	// (narrow_result_value). Default: integer and boolean operands narrower than
+	// integer_operand_min_bits() are widened to it, pinned or not.
+	virtual unsigned operand_boundary_bits(AsmTemplateEntityDecl const &e, Type *t) {
+		if (e.pin_flag.len != 0) {
+			return 0;
+		}
+		unsigned min_bits = this->integer_operand_min_bits();
+		unsigned bits     = integer_operand_bits(t);
+		if (bits == 0 || bits >= min_bits) {
+			return 0;
+		}
+		return min_bits;
+	}
+
+	// `v` as an integer of `bits` bits: a pointer as its address; an integer
+	// sign-extended if signed, zero-extended otherwise (booleans too); or truncated.
+	virtual LLVMValueRef widen_operand_value(lbProcedure *p, lbValue v, unsigned bits) {
+		LLVMContextRef ctx = p->module->ctx;
+		LLVMValueRef x = v.value;
+		if (LLVMGetTypeKind(LLVMTypeOf(x)) == LLVMPointerTypeKind) {
+			x = LLVMBuildPtrToInt(p->builder, x, LLVMIntTypeInContext(ctx, cast(unsigned)(type_size_of(v.type)*8)), "");
+		}
+		LLVMTypeRef want = LLVMIntTypeInContext(ctx, bits);
+		unsigned have = LLVMGetIntTypeWidth(LLVMTypeOf(x));
+		if (have == bits) {
+			return x;
+		}
+		if (have > bits) {
+			return LLVMBuildTrunc(p->builder, x, want, "");
+		}
+		Type *ct = core_type(v.type);
+		if (is_type_integer(ct) && !is_type_unsigned(ct)) {
+			return LLVMBuildSExt(p->builder, x, want, "");
+		}
+		return LLVMBuildZExt(p->builder, x, want, "");
+	}
+
+	// A result returned as a wider integer (operand_boundary_bits), back as `rt`.
+	LLVMValueRef narrow_result_value(lbProcedure *p, LLVMValueRef v, Type *rt) {
+		LLVMTypeRef want = lb_type(p->module, rt);
+		if (LLVMGetTypeKind(want) == LLVMPointerTypeKind) {
+			LLVMTypeRef addr = LLVMIntTypeInContext(p->module->ctx, cast(unsigned)(type_size_of(rt)*8));
+			if (LLVMTypeOf(v) != addr) {
+				v = LLVMBuildTrunc(p->builder, v, addr, "");
+			}
+			return LLVMBuildIntToPtr(p->builder, v, want, "");
+		}
+		if (LLVMTypeOf(v) == want) {
+			return v;
+		}
+		return LLVMBuildTrunc(p->builder, v, want, "");
+	}
+
+	// A tied input must have its output's LLVM type `want`, widened or not.
+	LLVMValueRef tied_input_value(lbProcedure *p, lbValue v, LLVMTypeRef want) {
+		if (LLVMTypeOf(v.value) == want || LLVMGetTypeKind(want) != LLVMIntegerTypeKind || integer_operand_bits(v.type) == 0) {
+			return v.value;
+		}
+		return this->widen_operand_value(p, v, LLVMGetIntTypeWidth(want));
+	}
+
 	lbValue emit_call(lbProcedure *p, Array<lbValue> const &args) {
 		lbModule *m = p->module;
 		LLVMContextRef ctx = m->ctx;
@@ -228,17 +302,23 @@ struct lbAsmGenerate {
 				raw("=");
 				// early-clobber: keep scratch, and any output a later instruction could
 				// read past, off an input's register.
-				if (is_alloc_scratch || tmpl_node->instructions.count > 1) {
+				if (is_alloc_scratch || this->outputs_early_clobber()) {
 					raw("&");
 				}
 			}
-			if (e.pin.len != 0) {
-				clobber("{", e.pin, "}");
+			Type *odin_ty  = is_alloc_scratch ? e.entity->type : this->result_type_of(e);
+			if (char const *letter = this->pinned_operand_moved_in_body(e, odin_ty)) {
+				raw(letter);
+			} else if (e.pin.len != 0) {
+				this->constraint_reg("{", e.pin, "}");
 			} else {
 				raw(this->class_letter(e.reg_class));
 			}
 
 			LLVMTypeRef ty = is_alloc_scratch ? lb_type(m, e.entity->type) : this->output_llvm_type(m, e);
+			if (unsigned bits = this->operand_boundary_bits(e, odin_ty)) {
+				ty = LLVMIntTypeInContext(ctx, bits); // truncated back after the call
+			}
 
 			ret_slot[i] = cast(i32)ret_types.count;
 			array_add(&ret_types, ty);
@@ -272,17 +352,33 @@ struct lbAsmGenerate {
 				i32 n = op_number[e.tie];
 				GB_ASSERT(n >= 0);
 				constraints = gb_string_append_fmt(constraints, "%d", n);
-				add_input_value(&param_types, &call_args, v.value);
+				// A matching input must have its output's type. When either side
+				// crosses the boundary widened, extend (or truncate) the input to the
+				// output's boundary type; otherwise pass it as it is.
+				AsmTemplateEntityDecl const &tied = (*ops)[e.tie];
+				bool widened = this->operand_boundary_bits(e, v.type) != 0;
+				if (tied.param_group == AsmTemplateEntityDeclParamGroup_Output && tied.result_index >= 0) {
+					widened |= this->operand_boundary_bits(tied, this->result_type_of(tied)) != 0;
+				}
+				GB_ASSERT(ret_slot[e.tie] >= 0);
+				LLVMValueRef in = widened ? this->tied_input_value(p, v, ret_types[ret_slot[e.tie]]) : v.value;
+				add_input_value(&param_types, &call_args, in);
 			} else {
 				switch (e.kind) {
 				case AsmTemplateEntityDecl_Register:
 				case AsmTemplateEntityDecl_Memory:
-					if (e.pin.len != 0) {
-						clobber("{", e.pin, "}");
+					if (char const *letter = this->pinned_operand_moved_in_body(e, v.type)) {
+						raw(letter);
+					} else if (e.pin.len != 0) {
+						this->constraint_reg("{", e.pin, "}");
 					} else {
 						raw(this->class_letter(e.reg_class));
 					}
-					add_input_value(&param_types, &call_args, v.value);
+					if (unsigned bits = e.kind == AsmTemplateEntityDecl_Register ? this->operand_boundary_bits(e, v.type) : 0) {
+						add_input_value(&param_types, &call_args, this->widen_operand_value(p, v, bits));
+					} else {
+						add_input_value(&param_types, &call_args, v.value);
+					}
 					break;
 				case AsmTemplateEntityDecl_Immediate: {
 					Type *ct = core_type(v.type);
@@ -322,6 +418,7 @@ struct lbAsmGenerate {
 		// Build the template text
 		u32 op_flags = this->default_operand_write_flags();
 		bool reverse = this->reverse_operand_order();
+		this->write_body_prologue(op_number);
 		for_array(i, tmpl_node->instructions) {
 			this->curr_instr_pos = cast(i32)i;
 
@@ -400,6 +497,7 @@ struct lbAsmGenerate {
 				break;
 			}
 		}
+		this->write_body_epilogue(op_number);
 
 		bool memory_clobbered_already = false;
 		// Pass 3: clobbers (Scratch group only; unpinned register scratch already
@@ -425,7 +523,7 @@ struct lbAsmGenerate {
 			switch (e.kind) {
 			case AsmTemplateEntityDecl_Register: // pinned -> real clobber
 				GB_ASSERT(e.pin.len != 0);
-				clobber("~{", e.pin, "}");
+				this->constraint_reg("~{", e.pin, "}");
 				string_set_update(&emitted_reg_clobbers, e.pin);
 				break;
 			case AsmTemplateEntityDecl_Memory:   // general memory clobber
@@ -444,7 +542,7 @@ struct lbAsmGenerate {
 				continue;
 			}
 			sep();
-			clobber("~{", reg, "}");
+			this->constraint_reg("~{", reg, "}");
 			string_set_update(&emitted_reg_clobbers, reg);
 		}
 
@@ -456,6 +554,7 @@ struct lbAsmGenerate {
 			sep();
 			raw("~{memory}");
 		}
+		this->emit_target_clobbers();
 
 		// Build the callee type
 		// NOTE(bill): Even though the user has given a signature, this might not actually match what
@@ -522,6 +621,10 @@ struct lbAsmGenerate {
 				v = LLVMBuildExtractValue(p->builder, call, cast(unsigned)ret_slot[i], "");
 			}
 
+			if (this->operand_boundary_bits(e, this->result_type_of(e)) != 0) {
+				v = this->narrow_result_value(p, v, this->result_type_of(e));
+			}
+
 			// A flag output is delivered as i8; coerce it to the declared result type.
 			// zext (not sext) is correct: a flag output is 0 or 1.
 			if (e.pin_flag.len != 0) {
@@ -569,6 +672,49 @@ struct lbAsmGenerate {
 	// architectural condition-code register). amd64 overrides with the x86 triple.
 	virtual void emit_flags_clobber() {
 		// empty
+	}
+
+	// A register named in a constraint ('{reg}' pin or '~{reg}' clobber). The default
+	// spells it as written; targets whose LLVM backend wants another spelling override.
+	virtual void constraint_reg(char const *start, String reg, char const *end) {
+		clobber(start, reg, end);
+	}
+
+	// Narrowest integer, in bits, that a register operand may cross the asm
+	// boundary as. Integer and boolean register operands narrower than this, pinned
+	// or not, are passed widened and their results truncated (see
+	// operand_boundary_bits). Default 0: every operand keeps its own type.
+	virtual unsigned integer_operand_min_bits() {
+		return 0;
+	}
+
+	// Template text written before the first and after the last body line (each
+	// line, '\t'-indented, ends in '\n' / starts with '\n'). Default: none.
+	virtual void write_body_prologue(Slice<i32> const &op_number) {
+		// empty
+	}
+	virtual void write_body_epilogue(Slice<i32> const &op_number) {
+		// empty
+	}
+
+	// For a pinned operand the target's LLVM backend cannot take in its pinned
+	// register: the class letter to request it with instead, the body moving it
+	// in (prologue) or out (epilogue). nullptr: use the '{pin}' constraint.
+	virtual char const *pinned_operand_moved_in_body(AsmTemplateEntityDecl const &e, Type *t) {
+		return nullptr;
+	}
+
+	// Clobbers every template on this target carries. Default: none.
+	virtual void emit_target_clobbers() {
+		// empty
+	}
+
+	// Must every output be early-clobber ('=&'), i.e. kept off the inputs' registers?
+	// Default: when there is more than one instruction, since a later one could read
+	// an input after an earlier one wrote an output. Targets with single instructions
+	// whose destination must differ from their sources add those.
+	virtual bool outputs_early_clobber() {
+		return tmpl_node->instructions.count > 1;
 	}
 
 
@@ -1778,10 +1924,701 @@ struct lbAsmGenerate_arm64 : lbAsmGenerate {
 	}
 };
 
+// MIPS III (VR4300) under the o64 ABI, driven by asm_tables_mips.cpp. Same shape
+// as riscv64: dst-first operand order, `offset(base)` memory operands, no flags
+// register. MIPS-specific details (see the asm_tables_mips.cpp header):
+//   * `$` starts an operand reference in an LLVM inline-asm string, so literal
+//     registers are written `$$N` / `$$fN`.
+//   * LLVM's Mips backend only parses numeric register constraints ('{$4}',
+//     '{$f12}', '{$fcc0}', '{hi}', '{lo}'); a named one ('{$a0}') trips an
+//     assertion. Pins and clobbers use numbers.
+//   * LLVM wraps every inline-asm block in `.set push; .set at; .set macro;
+//     .set reorder` but still allocates $at to operands. Every template clobbers
+//     $at so an assembler macro expansion can never overwrite an operand. The
+//     same `.set reorder` lets the assembler fill branch delay slots.
+//   * Two-operand div/divu/ddiv/ddivu are LLVM assembler macros that also write
+//     `mflo rs`; they are always emitted as `div $zero, rs, rt`.
+//   * LLVM keeps a value narrower than 64 bits sign-extended from bit 31 in its
+//     64-bit GPR. Integer operands narrower than 32 bits cross the boundary as
+//     i32, and an output that an instruction may leave with another upper half
+//     (gpr_word_write) as i64; both are truncated back to the declared type.
+//   * The VR4300 HI/LO hazard is padded with `nop`s at the template boundary
+//     (write_body_prologue/epilogue).
+//   * LLVM takes '{hi}'/'{lo}' as 32-bit registers, so a %hi/%lo operand that
+//     crosses as i64 goes through a GPR, moved by mthi/mtlo and mfhi/mflo that
+//     the generator adds around the body (pinned_operand_moved_in_body).
+struct lbAsmGenerate_mips : lbAsmGenerate {
+	bool in_memory_operand;
+
+	// Indexed like `ops`: may the register operand hold something other than a
+	// sign-extended 32-bit word once the template has run? See analyse_word_writes.
+	Array<bool> not_word;
+	bool        not_word_analysed;
+	bool        hilo_not_word; // the same for HI/LO
+
+	void destroy() override {
+		if (this->not_word.data != nullptr) {
+			array_free(&this->not_word);
+		}
+		lbAsmGenerate::destroy();
+	}
+
+	bool reverse_operand_order() override {
+		return false;
+	}
+
+	u32 default_operand_write_flags() override {
+		return WriteOperandFlag_NONE;
+	}
+
+	// i8/i16 operands would be any-extended into their GPR (and an explicit
+	// '{$N}'/'{hi}'/'{lo}' asserts in getRegClassFor for them), so every integer
+	// and boolean register operand crosses as at least i32.
+	unsigned integer_operand_min_bits() override {
+		return 32;
+	}
+
+	// An output narrower than 64 bits that the body may leave with an arbitrary
+	// upper half is requested as i64; the trunc re-sign-extends it (`sll rd, rs, 0`).
+	unsigned operand_boundary_bits(AsmTemplateEntityDecl const &e, Type *t) override {
+		unsigned bits = integer_operand_bits(t);
+		bool is_result = e.param_group == AsmTemplateEntityDeclParamGroup_Output && e.result_index >= 0 && e.pin_flag.len == 0;
+		if (is_result && bits != 0 && bits < 64) {
+			this->analyse_word_writes();
+			if (this->not_word[e.total_index]) {
+				return 64;
+			}
+		}
+		return lbAsmGenerate::operand_boundary_bits(e, t);
+	}
+
+	// Through i32 first: a value narrower than 32 bits is extended per its
+	// signedness, then sign-extended to 64 bits when a 64-bit output is tied to
+	// it, so its register holds exactly what an untied i32 input's would.
+	LLVMValueRef widen_operand_value(lbProcedure *p, lbValue v, unsigned bits) override {
+		if (bits <= 32 || integer_operand_bits(v.type) >= 64) {
+			return lbAsmGenerate::widen_operand_value(p, v, bits);
+		}
+		LLVMValueRef word = lbAsmGenerate::widen_operand_value(p, v, 32);
+		return LLVMBuildSExt(p->builder, word, LLVMIntTypeInContext(p->module->ctx, bits), "");
+	}
+
+	// The `ops` index of the register parameter `op` names, or -1: an identifier (a
+	// width-view resolves to its source) or a literal register a parameter is pinned to.
+	isize operand_decl_index(Ast *op) {
+		if (op->tav.mode == Addressing_Constant) {
+			return -1;
+		}
+		if (op->kind == Ast_Ident) {
+			Entity *e = entity_of_node(op);
+			if (e == nullptr) {
+				return -1;
+			}
+			for (AsmTemplateEntityDecl const &d : *ops) {
+				if (d.entity == e) {
+					return d.view_of >= 0 ? d.view_of : d.total_index;
+				}
+			}
+			return -1;
+		}
+		if (op->kind == Ast_AsmRegister) {
+			Asm_mips::Register r = g_asm_mips.register_lookup(op->AsmRegister.name.string);
+			if (r == Asm_mips::REG_INVALID) {
+				return -1;
+			}
+			for (AsmTemplateEntityDecl const &d : *ops) {
+				if (d.pin.len == 0 || d.view_of >= 0) {
+					continue;
+				}
+				Asm_mips::Register pr = g_asm_mips.register_lookup(d.pin);
+				if (pr != Asm_mips::REG_INVALID && g_asm_mips.register_codes[pr] == g_asm_mips.register_codes[r]) {
+					return d.total_index;
+				}
+			}
+		}
+		return -1;
+	}
+
+	// Does the register operand `op` hold a sign-extended word? An unpinned literal
+	// register other than %zero holds something the template cannot see.
+	bool operand_is_word(Ast *op) {
+		isize idx = this->operand_decl_index(op);
+		if (idx >= 0) {
+			return !this->not_word[idx];
+		}
+		if (op->kind == Ast_AsmRegister) {
+			return g_asm_mips.register_lookup(op->AsmRegister.name.string) == Asm_mips::REG_ZERO;
+		}
+		return true;
+	}
+
+	static bool is_gpr_slot(Asm_mips::OperandType t) {
+		return t == Asm_mips::OP_GPR || t == Asm_mips::OP_GPR32;
+	}
+
+	static bool is_hilo_pin(String const &pin) {
+		return pin == "hi" || pin == "lo";
+	}
+
+	// Fill not_word: which register operands, and HI/LO, may end up holding
+	// something other than a sign-extended word. Flow-insensitive: an operand any
+	// instruction may write a doubleword into is marked, as is anything written
+	// from it by a WordIfSources instruction, until nothing changes. Inputs start
+	// as words when they are 32 bits or narrower (they cross as i32).
+	void analyse_word_writes() {
+		if (this->not_word_analysed) {
+			return;
+		}
+		this->not_word_analysed = true;
+		array_init(&this->not_word, heap_allocator(), ops->count);
+		for_array(i, *ops) {
+			AsmTemplateEntityDecl const &d = (*ops)[i];
+			bool nw = false;
+			if (d.param_group == AsmTemplateEntityDeclParamGroup_Input && d.kind == AsmTemplateEntityDecl_Register) {
+				unsigned bits = integer_operand_bits(d.entity->type);
+				nw = bits == 0 || bits > 32;
+			}
+			this->not_word[i] = nw;
+			if (nw && is_hilo_pin(d.pin)) {
+				this->hilo_not_word = true;
+			}
+		}
+
+		u8 const hilo = Asm_mips::ClobberReg_HI | Asm_mips::ClobberReg_LO;
+		for (bool changed = true; changed; ) {
+			changed = false;
+			for (Ast *node : tmpl_node->instructions) {
+				if (node->kind != Ast_AsmInstruction) {
+					continue;
+				}
+				AstAsmInstruction *in = &node->AsmInstruction;
+				if (in->mnemonic == 0 || in->valid_form_index < 0) {
+					continue;
+				}
+				auto forms    = g_asm_mips.encoding_forms(in->mnemonic);
+				auto clobbers = g_asm_mips.clobber_forms(in->mnemonic);
+				if (in->valid_form_index >= forms.count) {
+					continue;
+				}
+				Asm_mips::Encoding const &form = forms[in->valid_form_index];
+				Asm_mips::Clobber  const &cl   = clobbers[in->valid_form_index];
+
+				bool sources_word = true;
+				for_array(k, in->operands) {
+					int slot = g_asm_mips.form_explicit_slot(form, cast(int)k);
+					if (slot >= 0 && (cl.read & (1u<<slot)) != 0 && is_gpr_slot(form.ops[slot])) {
+						sources_word = sources_word && this->operand_is_word(in->operands[k]);
+					}
+				}
+				for_array(k, in->operands) {
+					int slot = g_asm_mips.form_explicit_slot(form, cast(int)k);
+					if (slot < 0 || (cl.written & (1u<<slot)) == 0 || !is_gpr_slot(form.ops[slot])) {
+						continue;
+					}
+					isize idx = this->operand_decl_index(in->operands[k]);
+					if (idx < 0 || this->not_word[idx]) {
+						continue;
+					}
+					bool word = false;
+					switch (g_asm_mips.gpr_word_write(form, form.ops[slot])) {
+					case Asm_mips::WordWrite_Doubleword:    word = false;                 break;
+					case Asm_mips::WordWrite_Word:          word = true;                  break;
+					case Asm_mips::WordWrite_WordIfSources: word = sources_word;          break;
+					case Asm_mips::WordWrite_FromHiLo:      word = !this->hilo_not_word;  break;
+					}
+					if (!word) {
+						this->not_word[idx] = true;
+						changed = true;
+					}
+				}
+				if ((cl.implicit_wr & hilo) != 0 && !this->hilo_not_word) {
+					bool word = false;
+					switch (g_asm_mips.hilo_word_write(in->mnemonic)) {
+					case Asm_mips::WordWrite_Word:          word = true;         break;
+					case Asm_mips::WordWrite_WordIfSources: word = sources_word; break;
+					default:                                word = false;        break;
+					}
+					if (!word) {
+						this->hilo_not_word = true;
+						changed = true;
+					}
+				}
+			}
+		}
+		if (this->hilo_not_word) {
+			for_array(i, *ops) {
+				if (is_hilo_pin((*ops)[i].pin)) {
+					this->not_word[i] = true;
+				}
+			}
+		}
+	}
+
+	// VR4300: an `mfhi`/`mflo` followed within two instructions by a HI/LO write
+	// (mult/div family, mthi/mtlo) leaves the read's result unpredictable. Inside
+	// a template that is the author's job; at its edges the neighbour is compiler
+	// code, so pad with nops (see the asm_tables_mips.cpp header).
+	enum { HILO_HAZARD_DISTANCE = 2 };
+
+	struct BodyNode {
+		int  words;       // machine instructions it assembles to, at least
+		bool writes_hilo;
+		bool reads_hilo;
+	};
+	// A label or directive counts as no instruction, an `li` as one, a branch or
+	// jump as two (the assembler's delay-slot nop): never more than it emits, so
+	// the padding is never short.
+	BodyNode body_node(Ast *node) {
+		BodyNode b = {};
+		if (node->kind != Ast_AsmInstruction) {
+			return b;
+		}
+		AstAsmInstruction *in = &node->AsmInstruction;
+		b.words = 1;
+		if (in->mnemonic == 0 || in->valid_form_index < 0) {
+			return b;
+		}
+		auto clobbers = g_asm_mips.clobber_forms(in->mnemonic);
+		if (in->valid_form_index >= clobbers.count) {
+			return b;
+		}
+		Asm_mips::Clobber const &cl = clobbers[in->valid_form_index];
+		u8 const hilo = Asm_mips::ClobberReg_HI | Asm_mips::ClobberReg_LO;
+		b.writes_hilo = (cl.implicit_wr & hilo) != 0;
+		b.reads_hilo  = (cl.implicit_rd & hilo) != 0;
+		if (g_asm_mips.has_delay_slot(in->mnemonic, cl)) {
+			b.words += 1;
+		}
+		return b;
+	}
+
+	// LLVM parses '{hi}'/'{lo}' as the 32-bit HI0/LO0 whatever the value type: a
+	// 64-bit input loses its upper half (`sll; mtlo`) and a 64-bit result is
+	// assumed to have a zero upper half (`r >> 32` folds to 0). A %hi/%lo operand
+	// that crosses as i64 therefore goes through a GPR: inputs are moved in with
+	// mthi/mtlo before the body, results out with mfhi/mflo after it. A tied input
+	// follows its output.
+	char const *pinned_operand_moved_in_body(AsmTemplateEntityDecl const &e, Type *t) override {
+		if (!is_hilo_pin(e.pin) || e.view_of >= 0) {
+			return nullptr;
+		}
+		if (e.param_group == AsmTemplateEntityDeclParamGroup_Input && e.tie >= 0) {
+			AsmTemplateEntityDecl const &out = (*ops)[e.tie];
+			if (out.param_group != AsmTemplateEntityDeclParamGroup_Output || out.result_index < 0) {
+				return nullptr;
+			}
+			return this->pinned_operand_moved_in_body(out, this->result_type_of(out));
+		}
+		if (e.param_group != AsmTemplateEntityDeclParamGroup_Input && e.param_group != AsmTemplateEntityDeclParamGroup_Output) {
+			return nullptr; // a pinned scratch is a clobber
+		}
+		if (integer_operand_bits(t) == 64 || this->operand_boundary_bits(e, t) == 64) {
+			return "r";
+		}
+		return nullptr;
+	}
+
+	bool is_moved_hilo_input(AsmTemplateEntityDecl const &e) {
+		return e.param_group == AsmTemplateEntityDeclParamGroup_Input && e.kind == AsmTemplateEntityDecl_Register
+		    && this->pinned_operand_moved_in_body(e, e.entity->type) != nullptr;
+	}
+	bool is_moved_hilo_output(AsmTemplateEntityDecl const &e) {
+		return e.param_group == AsmTemplateEntityDeclParamGroup_Output && e.result_index >= 0
+		    && this->pinned_operand_moved_in_body(e, this->result_type_of(e)) != nullptr;
+	}
+
+	// A moved-in input writes HI/LO, which a '{hi}'/'{lo}' input did not.
+	void emit_target_clobbers() override {
+		sep();
+		raw("~{$1}");
+		bool done_hi = false;
+		bool done_lo = false;
+		for (String const &reg : tmpl_entity->AsmTemplate.clobber_registers_set) {
+			done_hi |= reg == "hi";
+			done_lo |= reg == "lo";
+		}
+		for (AsmTemplateEntityDecl const &e : *ops) {
+			if (e.param_group == AsmTemplateEntityDeclParamGroup_Scratch && e.view_of < 0) {
+				done_hi |= e.pin == "hi";
+				done_lo |= e.pin == "lo";
+			}
+		}
+		for (AsmTemplateEntityDecl const &e : *ops) {
+			if (e.view_of >= 0 || !this->is_moved_hilo_input(e)) {
+				continue;
+			}
+			bool *done = e.pin == "hi" ? &done_hi : &done_lo;
+			if (!*done) {
+				*done = true;
+				sep();
+				this->constraint_reg("~{", e.pin, "}");
+			}
+		}
+	}
+
+	// VR4300 HI/LO hazard at the template's start: nops so that
+	// HILO_HAZARD_DISTANCE instructions precede the first HI/LO write (the
+	// moved-in inputs' mthi/mtlo, else the body's). Any path that reaches a write
+	// through a taken branch already has the branch and its delay slot before it.
+	void write_body_prologue(Slice<i32> const &op_number) override {
+		bool moves = false;
+		for (AsmTemplateEntityDecl const &e : *ops) {
+			moves |= e.view_of < 0 && this->is_moved_hilo_input(e);
+		}
+		int pad = moves ? HILO_HAZARD_DISTANCE : 0;
+		int before = 0;
+		for (Ast *node : tmpl_node->instructions) {
+			if (moves || before >= HILO_HAZARD_DISTANCE) {
+				break;
+			}
+			BodyNode b = this->body_node(node);
+			if (b.writes_hilo) {
+				pad = HILO_HAZARD_DISTANCE - before;
+				break;
+			}
+			before += b.words;
+		}
+		for (int n = 0; n < pad; n++) {
+			write_cstr("\tnop\n");
+		}
+		for_array(i, *ops) {
+			AsmTemplateEntityDecl const &e = (*ops)[i];
+			if (e.view_of < 0 && this->is_moved_hilo_input(e)) {
+				GB_ASSERT(op_number[i] >= 0);
+				asm_string = gb_string_append_fmt(asm_string, "\t%s $%d\n", e.pin == "hi" ? "mthi" : "mtlo", op_number[i]);
+			}
+		}
+	}
+
+	// ... and at its end: nops so that HILO_HAZARD_DISTANCE instructions follow
+	// the last HI/LO read (the moved-out results' mfhi/mflo, else the body's).
+	void write_body_epilogue(Slice<i32> const &op_number) override {
+		bool moves = false;
+		for_array(i, *ops) {
+			AsmTemplateEntityDecl const &e = (*ops)[i];
+			if (e.view_of < 0 && this->is_moved_hilo_output(e)) {
+				GB_ASSERT(op_number[i] >= 0);
+				asm_string = gb_string_append_fmt(asm_string, "\n\t%s $%d", e.pin == "hi" ? "mfhi" : "mflo", op_number[i]);
+				moves = true;
+			}
+		}
+		int after = moves ? 0 : HILO_HAZARD_DISTANCE;
+		if (!moves) {
+			int seen = 0;
+			for (isize i = tmpl_node->instructions.count-1; i >= 0 && seen < HILO_HAZARD_DISTANCE; i--) {
+				BodyNode b = this->body_node(tmpl_node->instructions[i]);
+				if (b.reads_hilo) {
+					after = seen;
+					break;
+				}
+				seen += b.words;
+			}
+		}
+		for (int n = after; n < HILO_HAZARD_DISTANCE; n++) {
+			write_cstr("\n\tnop");
+		}
+	}
+
+	char const *class_letter(AsmRegClass rc) override {
+		switch (rc) {
+		case AsmRegClass_Integer: return "r"; // GPR32 for <= 32-bit values, GPR64 for 64-bit ones
+		case AsmRegClass_Float:   return "f"; // FGR32 for f32, FGR64 for f64 (mips3 is FR=1)
+		default:
+			GB_PANIC("asm: unknown reg class for mips");
+			return "r";
+		}
+	}
+
+	bool is_indirect_control_transfer(AstAsmInstruction *instr) override {
+		return false;
+	}
+
+	AsmTemplateEntityDecl *decl_pinned_to(String reg) {
+		for (AsmTemplateEntityDecl &e : *ops) {
+			if (e.pin == reg) {
+				return &e;
+			}
+		}
+		return nullptr;
+	}
+
+	// Register name -> LLVM constraint spelling: '$N', '$fN', '$fcc0', 'hi', 'lo'.
+	void constraint_reg(char const *start, String reg, char const *end) override {
+		bool is_clobber = start[0] == '~';
+		Asm_mips::Register r = g_asm_mips.register_lookup(reg);
+		GB_ASSERT_MSG(r != Asm_mips::REG_INVALID, "asm: unchecked mips register %.*s", LIT(reg));
+		u16 cls = g_asm_mips.reg_class(g_asm_mips.register_codes[r]);
+
+		char buf[16] = {};
+		bool spellable = g_asm_mips.constraint_spelling(r, buf, gb_size_of(buf));
+		if (spellable && (is_clobber || cls != Asm_mips::REG_CLASS_FCC)) {
+			clobber(start, make_string_c(buf), end);
+			return;
+		}
+		if (is_clobber) {
+			// `#clobber %c0_status`: LLVM has no COP0/COP1-control register to name.
+			// The template changes machine state the compiler cannot see, and a
+			// memory clobber is the barrier closest to that.
+			raw("~{memory}");
+			return;
+		}
+
+		// A pin LLVM cannot honour. The checker already rejects these
+		// (pin_reject_reason); never hand them to LLVM, which would either crash
+		// ($fcc0) or silently use GPR N (COP0).
+		AsmTemplateEntityDecl *ed = decl_pinned_to(reg);
+		char const *why = g_asm_mips.pin_reject_reason(r);
+		if (why == nullptr) {
+			why = "LLVM has no register constraint for it";
+		}
+		if (ed != nullptr && ed->entity != nullptr) {
+			error(ed->entity->token, "'asm' parameter '%.*s' cannot be pinned to %%%.*s: %s",
+			      LIT(ed->entity->token.string), LIT(reg), why);
+		} else {
+			error(tmpl_entity->token, "An 'asm' operand cannot be pinned to %%%.*s: %s", LIT(reg), why);
+		}
+		raw("r"); // keep the constraint string well-formed; the build has failed
+	}
+
+	bool outputs_early_clobber() override {
+		if (lbAsmGenerate::outputs_early_clobber()) {
+			return true;
+		}
+		for (Ast *node : tmpl_node->instructions) {
+			if (node->kind == Ast_AsmInstruction &&
+			    g_asm_mips.destination_must_differ_from_sources(node->AsmInstruction.mnemonic)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void write_constant_operand(Ast *op, u32 flags) override {
+		GB_ASSERT(op->tav.mode == Addressing_Constant);
+		op->tav.value = exact_value_to_integer(op->tav.value);
+		ExactValue ev = op->tav.value;
+		switch (ev.kind) {
+		case ExactValue_Integer: {
+			i64 val = exact_value_to_i64(ev);
+			if (flags & WriteOperandFlag_Negate) {
+				val = -val;
+			}
+			this->write_i64(val);
+			break;
+		}
+		case ExactValue_Float:
+			error(op, "Floating-point literals that cannot be represented as an integer are not supported within asm operands");
+			break;
+		default:
+			GB_PANIC("Unsupported asm immediate literal %s", expr_to_string(op));
+			break;
+		}
+	}
+
+	// The operand type of the slot the current operand fills, or OP_NONE.
+	Asm_mips::OperandType current_slot() {
+		AstAsmInstruction *in = this->curr_instr;
+		if (in == nullptr || in->mnemonic == 0 || in->valid_form_index < 0) {
+			return Asm_mips::OP_NONE;
+		}
+		auto forms = g_asm_mips.encoding_forms(in->mnemonic);
+		if (in->valid_form_index >= forms.count) {
+			return Asm_mips::OP_NONE;
+		}
+		int slot = g_asm_mips.form_explicit_slot(forms[in->valid_form_index], cast(int)this->curr_operand_index);
+		if (slot < 0) {
+			return Asm_mips::OP_NONE;
+		}
+		return forms[in->valid_form_index].ops[slot];
+	}
+
+	void write_register(AstAsmRegister *reg, Ast *op) {
+		Asm_mips::Register r = g_asm_mips.register_lookup(reg->name.string);
+		GB_ASSERT(r != Asm_mips::REG_INVALID);
+
+		// The checker rejects `%c0_status`, `%hi` or `%fcr31` in a GPR slot
+		// (literal_register_reject_reason) but not as a memory base. Spelled
+		// numerically either would silently mean GPR 12/0/31.
+		Asm_mips::OperandType slot = this->in_memory_operand ? Asm_mips::OP_GPR : this->current_slot();
+		bool ok = slot == Asm_mips::OP_NONE || g_asm_mips.operand_type_accepts_register(slot, r);
+
+		char buf[16] = {};
+		if (ok && g_asm_mips.operand_spelling(r, buf, gb_size_of(buf))) {
+			write_cstr(buf);
+			return;
+		}
+		String name = this->curr_instr ? this->curr_instr->name->Ident.token.string : str_lit("asm");
+		if (this->in_memory_operand) {
+			error(op, "'%.*s' memory base %%%.*s must be a general-purpose register",
+			      LIT(name), LIT(reg->name.string));
+		} else {
+			error(op, "'%.*s' operand-%td cannot be %%%.*s, it must be %s",
+			      LIT(name), this->curr_operand_index, LIT(reg->name.string), g_asm_mips.operand_type_register_description(slot));
+		}
+		write_cstr("$$0");
+	}
+
+	void write_operand(Slice<i32> const &op_number, Ast *op, u32 flags) override {
+		if (op->tav.mode == Addressing_Constant) {
+			this->write_constant_operand(op, flags);
+			return;
+		}
+		if (flags & WriteOperandFlag_Negate) {
+			flags &= ~WriteOperandFlag_Negate;
+			write_cstr("-");
+		}
+		switch (op->kind) {
+		case_ast_node(i, Ident, op);
+			// GPRs and FPRs have no named sub-registers, so a width-view is just
+			// the source operand's register.
+			Entity *e = entity_of_node(op);
+			auto *ed = entity_op(e);
+			i32 idx = (ed->view_of >= 0) ? op_number[ed->view_of] : op_number[ed->total_index];
+			GB_ASSERT(idx >= 0);
+			asm_string = gb_string_append_fmt(asm_string, "$%d", idx);
+		case_end;
+		case_ast_node(mem_op, AsmMemoryOperand, op);
+			this->write_memory_operand(op_number, mem_op, flags);
+		case_end;
+		case_ast_node(label, AsmLabelDecl, op);
+			this->write_label(&label->name->Ident);
+		case_end;
+		case_ast_node(reg, AsmRegister, op);
+			this->write_register(reg, op);
+		case_end;
+		default:
+			GB_PANIC("TODO: mips write_operand for '%s'", expr_to_string(op));
+			break;
+		}
+	}
+
+	// `offset(base)`: a signed 16-bit displacement and one base register. The
+	// displacement is the folded constant plus any `$`-immediate parameter terms
+	// (`[p + OFF]`), written as an expression the assembler evaluates. An offset
+	// outside 16 bits makes the assembler expand the access through $at.
+	void write_memory_operand(Slice<i32> const &op_number, AstAsmMemoryOperand *mem_op, u32 flags) override {
+		GB_ASSERT_MSG(mem_op->segment_override == nullptr, "asm: MIPS has no segment overrides");
+		auto const &cl = mem_op->classify;
+		GB_ASSERT_MSG(cl.index == nullptr && cl.scale == nullptr, "asm: MIPS memory operands have no index/scale");
+		GB_ASSERT_MSG(cl.label == nullptr, "asm: MIPS memory operands cannot be labels");
+
+		isize start_len = gb_string_length(asm_string);
+		for (Ast *term_ast : mem_op->terms) {
+			if (term_ast == nullptr || term_ast->kind != Ast_AsmMemoryTerm) {
+				continue;
+			}
+			auto *term = &term_ast->AsmMemoryTerm;
+			if (term->scale != nullptr || term->operand == nullptr || term->operand->kind != Ast_Ident) {
+				continue;
+			}
+			Entity *e = entity_of_node(term->operand);
+			if (e == nullptr || e->kind != Entity_Variable) {
+				continue;
+			}
+			auto *ed = entity_op(e);
+			if (ed->kind != AsmTemplateEntityDecl_Immediate) {
+				continue;
+			}
+			i32 idx = op_number[ed->total_index];
+			GB_ASSERT(idx >= 0);
+			bool first = gb_string_length(asm_string) == start_len;
+			if (term->op.kind == Token_Sub) {
+				write_cstr("-");
+			} else if (!first) {
+				write_cstr("+");
+			}
+			asm_string = gb_string_append_fmt(asm_string, "$%d", idx);
+		}
+		if (cl.has_disp_const && cl.disp_total != 0) {
+			if (gb_string_length(asm_string) != start_len && cl.disp_total > 0) {
+				write_cstr("+");
+			}
+			write_i64(cl.disp_total);
+		} else if (gb_string_length(asm_string) == start_len) {
+			write_cstr("0");
+		}
+
+		write_cstr("(");
+		if (cl.base != nullptr) {
+			this->in_memory_operand = true;
+			this->write_operand(op_number, cl.base, flags);
+			this->in_memory_operand = false;
+		} else {
+			write_cstr("$$0");
+		}
+		write_cstr(")");
+	}
+
+	String flag_output_cc_suffix(String const &pin_flag) override {
+		return {};
+	}
+
+	// FPU mnemonics are spelled with '.' (add.s, cvt.d.w); Odin identifiers use '_'.
+	void write_instruction_mnemonic(AstAsmInstruction *instr) override {
+		String name = instr->name->Ident.token.string;
+		for (isize i = 0; i < name.len; i++) {
+			char c = cast(char)name.text[i];
+			write_char(c == '_' ? '.' : c);
+		}
+		switch (instr->mnemonic) {
+		case Asm_mips::M_DIV:
+		case Asm_mips::M_DIVU:
+		case Asm_mips::M_DDIV:
+		case Asm_mips::M_DDIVU:
+			// `div rs, rt` is an LLVM macro (zero/overflow checks + `mflo rs`);
+			// `div $zero, rs, rt` is the bare HI/LO-writing instruction.
+			if (instr->operands.count == 2) {
+				write_cstr(" $$0,");
+			}
+			break;
+		}
+	}
+
+	// Numeric local labels (`N:` / `Nf` / `Nb`), as on arm64: `$` would collide with
+	// operand references and `.L` names are not local inside an inline-asm string.
+	void prescan_label_positions() override {
+		map_init(&label_def_pos);
+		i32 pos = 0;
+		for (Ast *node : tmpl_node->instructions) {
+			if (node->kind == Ast_AsmLabelDecl) {
+				Entity *le = node->AsmLabelDecl.name->Ident.entity;
+				if (le != nullptr) {
+					map_set(&label_def_pos, le, pos);
+				}
+			}
+			pos += 1;
+		}
+	}
+	i32 mips_label_number(AstIdent *label_ident) {
+		Entity *le = label_ident->entity;
+		GB_ASSERT(le != nullptr);
+		if (i32 *n = map_get(&label_numbers, le)) {
+			return *n;
+		}
+		i32 n = ++next_label_number;
+		map_set(&label_numbers, le, n);
+		return n;
+	}
+	void write_label_def(AstIdent *label_ident) override {
+		asm_string = gb_string_append_fmt(asm_string, "%d:", this->mips_label_number(label_ident));
+	}
+	void write_label_ref(AstIdent *label_ident) override {
+		Entity *le = label_ident->entity;
+		i32 n = this->mips_label_number(label_ident);
+		i32 def_pos = -1;
+		if (i32 *p = map_get(&label_def_pos, le)) {
+			def_pos = *p;
+		}
+		bool forward = def_pos > this->curr_instr_pos;
+		asm_string = gb_string_append_fmt(asm_string, "%d%c", n, forward ? 'f' : 'b');
+	}
+};
+
 gb_internal lbValue lb_emit_asm_template_call(lbProcedure *p, Entity *entity, Array<lbValue> const &args) {
 	lbAsmGenerate_amd64   generator_amd64   = {};
 	lbAsmGenerate_arm64   generator_arm64 = {};
 	lbAsmGenerate_riscv64 generator_riscv64 = {};
+	lbAsmGenerate_mips    generator_mips    = {};
 	lbAsmGenerate *generator = nullptr;
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		generator = &generator_amd64;
@@ -1789,6 +2626,8 @@ gb_internal lbValue lb_emit_asm_template_call(lbProcedure *p, Entity *entity, Ar
 		generator = &generator_arm64;
 	} else if (build_context.metrics.arch == TargetArch_riscv64) {
 		generator = &generator_riscv64;
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		generator = &generator_mips;
 	} else {
 		compiler_error("Architecture does not support asm templates, yet");
 	}

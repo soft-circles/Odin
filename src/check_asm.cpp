@@ -1,4 +1,20 @@
+#include <type_traits>
+
 #include "check_asm_cfg.cpp"
+
+// The element type of a table's register_codes: u16 for most tables, u32 for arm64,
+// whose system-register codes need more than 16 bits. Code-matching paths carry codes
+// at this type, so no table's codes are narrowed and two distinct codes never collide.
+template <typename AsmCtx>
+using AsmTableRegCode = typename std::decay<decltype(AsmCtx::register_codes[0])>::type;
+
+template <typename AsmCtx, typename Register>
+gb_internal AsmTableRegCode<AsmCtx> asm_register_code(AsmCtx *asm_ctx, Register r) {
+	static_assert(std::is_unsigned<AsmTableRegCode<AsmCtx>>::value &&
+	              sizeof(AsmTableRegCode<AsmCtx>) <= sizeof(AsmRegCode),
+	              "AsmRegCode must hold every register code of every table");
+	return asm_ctx->register_codes[r];
+}
 
 // Bit-width the operand's Odin type occupies in a register/immediate slot.
 // Integers/floats/bools/pointers -> their size; #simd -> total vector width. 0 if unknown.
@@ -22,6 +38,204 @@ gb_internal bool check_asm_target_supports_label_memory_operand(void) {
 		return true;
 	}
 	return false;
+}
+
+// Optional table hooks.
+//
+// A table opts in to one of these by declaring the member. The first overload is only
+// viable when the member exists (its return type names it); the second takes `long`
+// where the call passes `0`, so it loses whenever the first is viable. A table without
+// the member therefore keeps the behaviour from before the hook existed, and needs no
+// edit to keep compiling.
+
+// bool memory_disp_range(Encoding const &form, OperandType slot, i64 *min_, i64 *max_) const;
+//
+// Returns true, with the inclusive bounds, when a constant displacement in memory slot
+// `slot` of `form` must lie within [*min_, *max_]. Returning false means "no limit
+// beyond the generic signed 32-bit check".
+template <typename AsmCtx>
+gb_internal auto asm_hook_memory_disp_range(AsmCtx *asm_ctx, typename AsmCtx::Encoding const &form,
+                                            typename AsmCtx::OperandType slot, i64 *min_, i64 *max_, int)
+	-> decltype(asm_ctx->memory_disp_range(form, slot, min_, max_)) {
+	return asm_ctx->memory_disp_range(form, slot, min_, max_);
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_memory_disp_range(AsmCtx *, typename AsmCtx::Encoding const &,
+                                            typename AsmCtx::OperandType, i64 *, i64 *, long) {
+	return false;
+}
+
+// bool immediate_range(Encoding const &form, OperandType slot, i64 *min_, i64 *max_) const;
+//
+// Returns true, with the inclusive bounds, when a constant in immediate slot `slot` of
+// `form` must lie within [*min_, *max_]. When declared it replaces the generic width
+// check for that slot, which accepts both the signed and the unsigned reading of the
+// bit pattern (so 40000 and -1 both "fit" 16 bits). Returning false keeps that check.
+template <typename AsmCtx>
+gb_internal auto asm_hook_immediate_range(AsmCtx *asm_ctx, typename AsmCtx::Encoding const &form,
+                                          typename AsmCtx::OperandType slot, i64 *min_, i64 *max_, int)
+	-> decltype(asm_ctx->immediate_range(form, slot, min_, max_)) {
+	return asm_ctx->immediate_range(form, slot, min_, max_);
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_immediate_range(AsmCtx *, typename AsmCtx::Encoding const &,
+                                          typename AsmCtx::OperandType, i64 *, i64 *, long) {
+	return false;
+}
+
+// bool register_write_needs_clobber(Register r) const;
+//
+// Returns true when an explicit write to the literal register `r` (a %reg operand in a
+// slot the matched form writes) must be covered by a pin to an output or scratch
+// parameter, or by '#clobber'/'#preserve'. Registers are identified by register_codes,
+// so a table that opts in must give every name of one physical register the same code.
+// A table without the member never reports, and the registers in its tracked clobber
+// set keep being clobbered implicitly.
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_write_needs_clobber(AsmCtx *asm_ctx, typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->register_write_needs_clobber(r)) {
+	return asm_ctx->register_write_needs_clobber(r);
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_register_write_needs_clobber(AsmCtx *, typename AsmCtx::Register, long) {
+	return false;
+}
+
+// bool literal_register_width_agnostic() const;
+//
+// Returns true when a literal %reg carries no operand width: the slot, not the register
+// name, says how much of the register the instruction uses. A literal register of a
+// width-agnostic integer file (integer_reg_width_is_exact() == false) may then fill a
+// narrower integer slot, e.g. a 32-bit slot on a 64-bit register file, and a literal
+// float register (register_is_float) may fill a float slot of any width, e.g. a 32-bit
+// single view of a 64-bit FPR, even when float_reg_width_is_exact(). Parameters are still
+// compared by their Odin type. A table without the member types a literal register at
+// reg_size() and compares that, as before.
+template <typename AsmCtx>
+gb_internal auto asm_hook_literal_register_width_agnostic(AsmCtx *asm_ctx, int)
+	-> decltype(asm_ctx->literal_register_width_agnostic()) {
+	return asm_ctx->literal_register_width_agnostic();
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_literal_register_width_agnostic(AsmCtx *, long) {
+	return false;
+}
+
+// bool implicit_register_writes_are_full_width() const;
+//
+// Returns true when every implicit write of a tracked register (a form's implicit_wr)
+// defines the whole register, so a later explicit full-width read of it (the link
+// register after a call that writes it implicitly, say) sees it defined. A table without
+// the member records no width for implicit writes, and such a read reports that only the
+// low 0 bits are defined.
+template <typename AsmCtx>
+gb_internal auto asm_hook_implicit_register_writes_are_full_width(AsmCtx *asm_ctx, int)
+	-> decltype(asm_ctx->implicit_register_writes_are_full_width()) {
+	return asm_ctx->implicit_register_writes_are_full_width();
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_implicit_register_writes_are_full_width(AsmCtx *, long) {
+	return false;
+}
+
+// char const *operand_value_reject_reason(u16 mnemonic, int op, i64 value) const;
+//
+// Returns nullptr when the constant `value` is acceptable for explicit operand `op` of
+// `mnemonic`, or a reason, phrased to follow "immediate <value>", when the instruction
+// rejects that particular value although it fits the slot (a reserved encoding, say).
+// Asked only for operands that are constant integers once a form has matched.
+template <typename AsmCtx>
+gb_internal auto asm_hook_operand_value_reject_reason(AsmCtx *asm_ctx, u16 mnemonic, int op, i64 value, int)
+	-> decltype(asm_ctx->operand_value_reject_reason(mnemonic, op, value)) {
+	return asm_ctx->operand_value_reject_reason(mnemonic, op, value);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_operand_value_reject_reason(AsmCtx *, u16, int, i64, long) {
+	return nullptr;
+}
+
+// char const *register_unavailable_reason(String const &name) const;
+//
+// Returns nullptr, or why the register `name` (without its '%'), which is not in the
+// table, cannot be named in a template, phrased to follow "Register %<name> ". The
+// unknown-register error then reports that instead of a did-you-mean list. A table
+// without the member reports every name it lacks as unknown.
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_unavailable_reason(AsmCtx *asm_ctx, String const &name, int)
+	-> decltype(asm_ctx->register_unavailable_reason(name)) {
+	return asm_ctx->register_unavailable_reason(name);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_register_unavailable_reason(AsmCtx *, String const &, long) {
+	return nullptr;
+}
+
+// bool template_features_bind_to_caller() const;
+//
+// Returns true when LLVM's assembler checks each instruction against the target
+// features of the procedure the template is expanded into. A call is then valid only
+// when the calling procedure, or the build, enables every feature the template enables
+// with @(enable_target_feature): the template's own attribute satisfies the checker but
+// never reaches the caller, and the assembler would reject the body. A table without the
+// member keeps the template's attribute sufficient on its own, as before.
+template <typename AsmCtx>
+gb_internal auto asm_hook_template_features_bind_to_caller(AsmCtx *asm_ctx, int)
+	-> decltype(asm_ctx->template_features_bind_to_caller()) {
+	return asm_ctx->template_features_bind_to_caller();
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_template_features_bind_to_caller(AsmCtx *, long) {
+	return false;
+}
+
+// bool register_is_float(Register r) const;
+//
+// Returns true when the literal register `r` belongs to a scalar floating-point file, so
+// a 32/64-bit one is typed f32/f64 (float class) rather than u32/u64 (integer class).
+// That type is what a float slot and a pin of an f32/f64 parameter are compared against.
+// A table without the member types every 32/64-bit register as an unsigned integer.
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_is_float(AsmCtx *asm_ctx, typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->register_is_float(r)) {
+	return asm_ctx->register_is_float(r);
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_register_is_float(AsmCtx *, typename AsmCtx::Register, long) {
+	return false;
+}
+
+// char const *literal_register_reject_reason(OperandType slot, Register r) const;
+//
+// Returns nullptr when the literal register `r` may fill register slot `slot`, or a
+// description of what the slot needs, phrased to follow "it must be", when the slot's
+// class and width alone would not tell (a coprocessor or HI/LO register typed as an
+// integer reaching a general-purpose slot, say). Asked before the class and width
+// comparison. A table without the member relies on that comparison alone.
+template <typename AsmCtx>
+gb_internal auto asm_hook_literal_register_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::OperandType slot,
+                                                         typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->literal_register_reject_reason(slot, r)) {
+	return asm_ctx->literal_register_reject_reason(slot, r);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_literal_register_reject_reason(AsmCtx *, typename AsmCtx::OperandType,
+                                                                typename AsmCtx::Register, long) {
+	return nullptr;
+}
+
+// char const *pin_reject_reason(Register r) const;
+//
+// Returns nullptr when a parameter (input, output or scratch) may be pinned to `r`, or
+// the reason it cannot, phrased to follow "cannot be pinned to %r:". A table without the
+// member only rejects output pins to reg_is_non_allocateable registers.
+template <typename AsmCtx>
+gb_internal auto asm_hook_pin_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->pin_reject_reason(r)) {
+	return asm_ctx->pin_reject_reason(r);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_pin_reject_reason(AsmCtx *, typename AsmCtx::Register, long) {
+	return nullptr;
 }
 
 gb_internal bool is_valid_asm_parameter_type(Type *type) {
@@ -157,7 +371,7 @@ gb_internal void check_asm_pin_type_compat(AsmRegClass reg_class, i32 reg_w, Typ
 // nested memory sub-operands). Reads Ident.entity, which check_asm_instruction_operand
 // populates during operand checking.
 template <typename AsmCtx>
-gb_internal void check_asm_collect_refs(AsmCtx *asm_ctx, PtrSet<Entity *> *refs, Ast *expr, u16 *touched_regs_) {
+gb_internal void check_asm_collect_refs(AsmCtx *asm_ctx, PtrSet<Entity *> *refs, Ast *expr, u16 *touched_regs_, Array<AsmTableRegCode<AsmCtx>> *touched_codes_) {
 	if (expr == nullptr) {
 		return;
 	}
@@ -172,35 +386,43 @@ gb_internal void check_asm_collect_refs(AsmCtx *asm_ctx, PtrSet<Entity *> *refs,
 		// referenced in the body via its pinned register, not its identifier, so record
 		// the bit; the unused check maps decl pins back through this mask.
 		if (touched_regs_) *touched_regs_ |= asm_ctx->clobber_bit_for_reg_name(expr->AsmRegister.name.string);
+		if (touched_codes_) {
+			// Registers outside the tracked set have no bit; record their code so a pin
+			// to one can still be matched (asm_decl_index_pinned_to_untracked_reg).
+			auto r = asm_ctx->register_lookup(expr->AsmRegister.name.string);
+			if (r) {
+				array_add(touched_codes_, asm_register_code(asm_ctx, r));
+			}
+		}
 		return;
 
 	case Ast_AsmMemoryTerm: {
 		auto *t = &expr->AsmMemoryTerm;
-		check_asm_collect_refs(asm_ctx, refs, t->operand, touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, t->scale,   touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, t->operand, touched_regs_, touched_codes_);
+		check_asm_collect_refs(asm_ctx, refs, t->scale,   touched_regs_, touched_codes_);
 		return;
 	}
 
 	case Ast_AsmMemoryOperand: {
 		auto *m = &expr->AsmMemoryOperand;
-		check_asm_collect_refs(asm_ctx, refs, m->segment_override, touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, m->segment_override, touched_regs_, touched_codes_);
 		for (Ast *term : m->terms) {
-			check_asm_collect_refs(asm_ctx, refs, term, touched_regs_);
+			check_asm_collect_refs(asm_ctx, refs, term, touched_regs_, touched_codes_);
 		}
 		return;
 	}
 	case Ast_IndexExpr:
-		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.expr,  touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.index, touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.expr,  touched_regs_, touched_codes_);
+		check_asm_collect_refs(asm_ctx, refs, expr->IndexExpr.index, touched_regs_, touched_codes_);
 		return;
 
 	case Ast_UnaryExpr:
-		check_asm_collect_refs(asm_ctx, refs, expr->UnaryExpr.expr,  touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, expr->UnaryExpr.expr,  touched_regs_, touched_codes_);
 		return;
 
 	case Ast_BinaryExpr:
-		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.left,  touched_regs_);
-		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.right, touched_regs_);
+		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.left,  touched_regs_, touched_codes_);
+		check_asm_collect_refs(asm_ctx, refs, expr->BinaryExpr.right, touched_regs_, touched_codes_);
 		return;
 	}
 }
@@ -211,6 +433,9 @@ enum AsmMismatch : u8 {
 	AsmMismatch_ImmRange,  // constant immediate does not fit the slot width
 	AsmMismatch_ImmType,   // non-integer constant where an integer immediate is required
 	AsmMismatch_NamedReg,  // slot only a named hardware register can fill
+	AsmMismatch_DispRange, // memory displacement outside the range the table declares for the slot
+	AsmMismatch_ImmBounds, // constant immediate outside the range the table declares for the slot
+	AsmMismatch_LiteralReg, // literal register the table says cannot fill the slot (literal_register_reject_reason)
 };
 
 // Does a constant immediate value fit a slot of `bits` width (0 == unconstrained)?
@@ -322,6 +547,15 @@ gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::
 		return true;
 	}
 
+	bool literal_reg = operand->expr != nullptr && operand->expr->kind == Ast_AsmRegister;
+	if (literal_reg && slot_kind == AsmOperand_Register) {
+		auto r = asm_ctx->register_lookup(operand->expr->AsmRegister.name.string);
+		if (r && asm_hook_literal_register_reject_reason(asm_ctx, slot, r, 0) != nullptr) {
+			if (mismatch_) *mismatch_ = AsmMismatch_LiteralReg;
+			return false;
+		}
+	}
+
 	// Determine the type whose width/class we actually measure.
 	//
 	// Memory operands encode their *access* type as a pointer: `[p]:u8` -> `^u8`,
@@ -384,6 +618,10 @@ gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::
 			}
 		} else if (want_class == AsmRegClass_Float &&
 		           got_class  == AsmRegClass_Float && !is_memory &&
+		           literal_reg && asm_hook_literal_register_width_agnostic(asm_ctx, 0)) {
+			// a float register name carries no width; the slot picks the view
+		} else if (want_class == AsmRegClass_Float &&
+		           got_class  == AsmRegClass_Float && !is_memory &&
 		           !asm_ctx->float_reg_width_is_exact()) {
 			// NOTE(bill): architectures such as RISC-V have registers which are
 			// always the architecture width
@@ -395,7 +633,9 @@ gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::
 		           !asm_ctx->integer_reg_width_is_exact()) {
 			// NOTE(bill): architectures such as RISC-V have registers which are
 			// always the architecture width
-			if (got_w > want_w) {
+			if (literal_reg && asm_hook_literal_register_width_agnostic(asm_ctx, 0)) {
+				// a register name carries no width on this register file
+			} else if (got_w > want_w) {
 				if (mismatch_) *mismatch_ = AsmMismatch_Size;
 				return false;
 			}
@@ -580,6 +820,97 @@ gb_internal bool check_asm_is_immediate_param(Entity *tmpl_entity, Operand const
 }
 
 
+// Does a memory operand's folded constant displacement fit the range the table declares
+// for this slot (asm_hook_memory_disp_range)? An operand with no constant displacement,
+// a label, or a $-immediate term cannot be checked here and passes.
+template <typename AsmCtx>
+gb_internal bool check_asm_memory_disp_fits(AsmCtx *asm_ctx, typename AsmCtx::Encoding const &form,
+                                            typename AsmCtx::OperandType slot, Operand const *operand,
+                                            Array<AsmTemplateEntityDecl> const &decls,
+                                            i64 *disp_, i64 *min_, i64 *max_) {
+	Ast *e = operand->expr;
+	if (e == nullptr || e->kind != Ast_AsmMemoryOperand) {
+		return true;
+	}
+	auto const *m = &e->AsmMemoryOperand;
+	if (!m->classify.has_disp_const || m->classify.label != nullptr) {
+		return true;
+	}
+	for (Ast *term : m->terms) {
+		if (term == nullptr || term->kind != Ast_AsmMemoryTerm || term->AsmMemoryTerm.scale != nullptr) {
+			continue;
+		}
+		Entity *pe = entity_of_node(term->AsmMemoryTerm.operand);
+		if (pe != nullptr && pe->kind == Entity_Variable &&
+		    check_asm_find_kind(pe, decls) == AsmTemplateEntityDecl_Immediate) {
+			return true; // part of the displacement is a $-immediate, bound per instantiation
+		}
+	}
+
+	i64 lo = 0;
+	i64 hi = 0;
+	if (!asm_hook_memory_disp_range(asm_ctx, form, slot, &lo, &hi, 0)) {
+		return true;
+	}
+	i64 disp = m->classify.disp_total;
+	if (disp_) *disp_ = disp;
+	if (min_)  *min_  = lo;
+	if (max_)  *max_  = hi;
+	return lo <= disp && disp <= hi;
+}
+
+// "a signed 16-bit <noun> (-32768..=32767)", "an unsigned 12-bit <noun> (0..=4095)",
+// or "the <noun> range -256..=255" for a range that is not a whole bit-width.
+gb_internal gbString asm_describe_range(i64 lo, i64 hi, char const *noun) {
+	for (int bits = 1; bits < 63; bits++) {
+		i64 half = cast(i64)1 << (bits-1);
+		if (lo == -half && hi == half-1) {
+			return gb_string_make(heap_allocator(), gb_bprintf("a signed %d-bit %s (%lld..=%lld)", bits, noun, cast(long long)lo, cast(long long)hi));
+		}
+		if (lo == 0 && hi == (cast(i64)1 << bits)-1) {
+			return gb_string_make(heap_allocator(), gb_bprintf("an unsigned %d-bit %s (0..=%lld)", bits, noun, cast(long long)hi));
+		}
+	}
+	return gb_string_make(heap_allocator(), gb_bprintf("the %s range %lld..=%lld", noun, cast(long long)lo, cast(long long)hi));
+}
+
+// Checks a constant immediate against the range the table declares for this slot
+// (asm_hook_immediate_range). Returns 1 if it fits, 0 if not, and -1 when the table
+// declares no range or the operand is not a constant integer, leaving the generic check.
+template <typename AsmCtx>
+gb_internal int check_asm_immediate_table_range(AsmCtx *asm_ctx, typename AsmCtx::Encoding const &form,
+                                                typename AsmCtx::OperandType slot, Operand const *operand,
+                                                i64 *min_, i64 *max_) {
+	if (operand->mode != Addressing_Constant) {
+		return -1;
+	}
+	ExactValue ev = operand->value;
+	if (ev.kind == ExactValue_Float) {
+		ev = exact_value_to_integer(ev);
+	}
+	i64 v = 0;
+	if (ev.kind == ExactValue_Bool) {
+		v = ev.value_bool ? 1 : 0;
+	} else if (ev.kind == ExactValue_Integer) {
+		if (mp_count_bits(&ev.value_integer) > 63) {
+			v = mp_isneg(&ev.value_integer) ? I64_MIN : I64_MAX; // outside any declarable range
+		} else {
+			v = exact_value_to_i64(ev);
+		}
+	} else {
+		return -1; // a non-integer: the generic check reports it
+	}
+
+	i64 lo = 0;
+	i64 hi = 0;
+	if (!asm_hook_immediate_range(asm_ctx, form, slot, &lo, &hi, 0)) {
+		return -1;
+	}
+	if (min_) *min_ = lo;
+	if (max_) *max_ = hi;
+	return (lo <= v && v <= hi) ? 1 : 0;
+}
+
 template <typename AsmCtx>
 gb_internal void check_asm_specs(AsmCtx *asm_ctx, CheckerContext *ctx, Scope *scope, Slice<Ast *> const &specs, Array<AsmTemplateEntityDecl> *asm_template_entity_decls) {
 	StringSet pin_set = {};
@@ -645,6 +976,13 @@ gb_internal void check_asm_specs(AsmCtx *asm_ctx, CheckerContext *ctx, Scope *sc
 						if (reg->flag.string.len == 0) {
 							pin_reg_class = check_asm_reg_class_from_type(op.type);
 							pin_reg_w     = check_asm_operand_bit_width(op.type);
+
+							char const *why = asm_hook_pin_reject_reason(asm_ctx, asm_ctx->register_lookup(pin), 0);
+							if (why != nullptr) {
+								error(spec->value, "'asm' parameter '%.*s' cannot be pinned to %%%.*s: %s",
+								      LIT(spec->name->Ident.token.string), LIT(pin), why);
+								pin_reg_class = AsmRegClass_Unknown; // reported; skip the type comparison
+							}
 						}
 					}
 				}
@@ -917,10 +1255,10 @@ gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegiste
 			operand->type = t_u16;
 			break;
 		case 32:
-			operand->type = t_u32;
+			operand->type = asm_hook_register_is_float(asm_ctx, r, 0) ? t_f32 : t_u32;
 			break;
 		case 64:
-			operand->type = t_u64;
+			operand->type = asm_hook_register_is_float(asm_ctx, r, 0) ? t_f64 : t_u64;
 			break;
 		case 80:
 			error(asm_reg->name, "80-bit width asm registers are not supported");
@@ -942,6 +1280,11 @@ gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegiste
 		return true;
 	}
 
+	if (char const *reason = asm_hook_register_unavailable_reason(asm_ctx, name, 0)) {
+		error(asm_reg->name, "Register %%%.*s %s", LIT(name), reason);
+		return false;
+	}
+
 	ERROR_BLOCK();
 	error(asm_reg->name, "Unknown register for this target platform: %%%.*s", LIT(name));
 	{
@@ -950,7 +1293,7 @@ gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegiste
 		for (auto const &entry : asm_ctx->register_map) {
 			did_you_mean_append(&dym, entry.key);
 		}
-		check_did_you_mean_print(&dym);
+		check_did_you_mean_print(&dym, "%");
 	}
 	return false;
 }
@@ -1092,6 +1435,16 @@ gb_internal CheckMnemomicResult check_mnemonic_name(AsmCtx *asm_ctx, AstAsmInstr
 	return CheckMnemomic_Invalid;
 }
 
+// An operand whose own check already failed and reported (an unknown register, an
+// undeclared name). Matching it against forms would only add errors about a value
+// that does not exist, such as "got 0-bit unknown register".
+gb_internal bool check_asm_operand_failed(Operand const &o) {
+	if (o.expr == nullptr || o.type != t_invalid) {
+		return false;
+	}
+	return o.expr->kind == Ast_AsmRegister || o.expr->kind == Ast_Ident;
+}
+
 gb_internal bool check_asm_instr_targets_internal_label(AstAsmInstruction *instr) {
 	bool saw_label = false;
 	for (Ast *op : instr->operands) {
@@ -1151,7 +1504,164 @@ gb_internal void check_operand_constraints(AsmCtx *asm_ctx, Slice<Operand> const
 		case AsmOperandConstraint_None:
 			break;
 		}
+
+		if (mp_count_bits(&ev.value_integer) <= 63) {
+			char const *reason = asm_hook_operand_value_reject_reason(asm_ctx, mnemonic, cast(int)i, exact_value_to_i64(ev), 0);
+			if (reason != nullptr) {
+				gbString vs = exact_value_to_string(ev);
+				error(op->expr, "'%.*s' operand-%td immediate %s %s", LIT(name), i, vs, reason);
+				gb_string_free(vs);
+			}
+		}
 	}
+}
+
+// The parameter pinned to the same register as the literal %`reg_name`, or -1. Only
+// registers outside the table's tracked clobber set are matched here, by register_codes:
+// a tracked register already reaches its pin through the clobber bit. Tied parameters
+// share a pin, so `prefer` picks the input (for a read) or the output (for a write).
+template <typename AsmCtx>
+gb_internal i32 asm_decl_index_pinned_to_untracked_reg(AsmCtx *asm_ctx, Array<AsmTemplateEntityDecl> const &decls,
+                                                       String const &reg_name, AsmTemplateEntityDeclParamGroup prefer) {
+	if (asm_ctx->clobber_bit_for_reg_name(reg_name) != 0) {
+		return -1;
+	}
+	auto r = asm_ctx->register_lookup(reg_name);
+	if (!r) {
+		return -1;
+	}
+	AsmTableRegCode<AsmCtx> code = asm_register_code(asm_ctx, r);
+	i32 found = -1;
+	for_array(i, decls) {
+		auto const &ed = decls[i];
+		if (ed.pin.len == 0 || ed.pin_flag.len != 0 || ed.entity == nullptr) {
+			continue;
+		}
+		auto pr = asm_ctx->register_lookup(ed.pin);
+		if (!pr || asm_register_code(asm_ctx, pr) != code) {
+			continue;
+		}
+		if (ed.param_group == prefer) {
+			return cast(i32)i;
+		}
+		if (found < 0) {
+			found = cast(i32)i;
+		}
+	}
+	return found;
+}
+
+// An instruction writes the parameter decls[di] by name. The compiler gives an input
+// parameter no output constraint and no clobber, so it assumes the register still holds
+// the argument afterwards and may keep using it. Only a tied input ([a -> r]) has a
+// register the template may overwrite, so a write to any other input, or to a width-view
+// of one, is an error. Outputs and scratch registers are the template's to write.
+gb_internal void check_asm_input_parameter_write(AsmCfg *cfg, Array<AsmTemplateEntityDecl> const &decls,
+                                                 String const &mnemonic, i32 di, Ast *node) {
+	if (di < 0 || di >= decls.count) {
+		return;
+	}
+	i32 si = decls[di].view_of >= 0 ? decls[di].view_of : di;
+	if (si < 0 || si >= decls.count) {
+		return;
+	}
+	auto const &input = decls[si];
+	if (input.param_group != AsmTemplateEntityDeclParamGroup_Input || input.tie >= 0 ||
+	    input.kind == AsmTemplateEntityDecl_Immediate || input.entity == nullptr) {
+		return;
+	}
+	for (Entity *e : cfg->reported_input_writes) {
+		if (e == input.entity) {
+			return;
+		}
+	}
+	array_add(&cfg->reported_input_writes, input.entity);
+
+	String input_name  = input.entity->token.string;
+	String output_name = {};
+	for (auto const &ed : decls) {
+		if (ed.param_group == AsmTemplateEntityDeclParamGroup_Output && ed.tie < 0 &&
+		    ed.pin_flag.len == 0 && ed.entity != nullptr) {
+			output_name = ed.entity->token.string;
+			break;
+		}
+	}
+
+	gbString what = gb_string_make(heap_allocator(), "");
+	if (si != di) {
+		String view_name = decls[di].entity != nullptr ? decls[di].entity->token.string : str_lit("?");
+		what = gb_string_append_fmt(what, "'%.*s', a view of the input parameter '%.*s'", LIT(view_name), LIT(input_name));
+	} else {
+		what = gb_string_append_fmt(what, "the input parameter '%.*s'", LIT(input_name));
+	}
+	if (output_name.len != 0) {
+		error(node, "'%.*s' writes %s; the compiler assumes an input keeps its value. "
+		            "Tie it to an output ('%.*s -> %.*s') or copy it to a scratch register first",
+		      LIT(mnemonic), what, LIT(input_name), LIT(output_name));
+	} else {
+		error(node, "'%.*s' writes %s; the compiler assumes an input keeps its value. "
+		            "Tie it to an output ('%.*s -> <output>') or copy it to a scratch register first",
+		      LIT(mnemonic), what, LIT(input_name));
+	}
+	gb_string_free(what);
+}
+
+// An instruction writes the literal register in `reg_expr`. A register in the table's
+// tracked clobber set is clobbered implicitly, which tells the compiler about the write.
+// Any other register is not, so writing one that holds an untied input is an error on
+// every target, as writing the input by name is (check_asm_input_parameter_write). When
+// the table asks for it (asm_hook_register_write_needs_clobber), every write must be one
+// the compiler is told about: the register is pinned to an output, a scratch, or a tied
+// input, or it is declared with #clobber/#preserve. Otherwise the compiler may keep a live
+// value there across the template.
+template <typename AsmCtx>
+gb_internal void check_asm_literal_register_write(AsmCtx *asm_ctx, AsmCfg *cfg, Array<AsmTemplateEntityDecl> const &decls,
+                                                  String const &mnemonic, Ast *reg_expr) {
+	String reg_name = reg_expr->AsmRegister.name.string;
+	auto r = asm_ctx->register_lookup(reg_name);
+	if (!r) {
+		return;
+	}
+	bool needs_clobber = asm_hook_register_write_needs_clobber(asm_ctx, r, 0);
+	if (!needs_clobber && asm_ctx->clobber_bit_for_reg_name(reg_name) != 0) {
+		return; // clobbered implicitly
+	}
+	AsmTableRegCode<AsmCtx> code = asm_register_code(asm_ctx, r);
+	for (AsmRegCode c : cfg->declared_write_reg_codes) {
+		if (c == code) {
+			return;
+		}
+	}
+	for (AsmRegCode c : cfg->reported_write_reg_codes) {
+		if (c == code) {
+			return;
+		}
+	}
+
+	for (auto const &ed : decls) {
+		if (ed.pin.len == 0 || ed.pin_flag.len != 0 || ed.entity == nullptr) {
+			continue;
+		}
+		auto pr = asm_ctx->register_lookup(ed.pin);
+		if (!pr || asm_register_code(asm_ctx, pr) != code) {
+			continue;
+		}
+		if (ed.param_group == AsmTemplateEntityDeclParamGroup_Input && ed.tie < 0) {
+			array_add(&cfg->reported_write_reg_codes, cast(AsmRegCode)code);
+			error(reg_expr, "'%.*s' writes %%%.*s, which holds the input '%.*s'; the compiler assumes an input keeps its value, "
+			                "so tie '%.*s' to an output or copy it into a scratch register before writing",
+			      LIT(mnemonic), LIT(reg_name), LIT(ed.entity->token.string), LIT(ed.entity->token.string));
+		}
+		return; // an output, scratch, or tied input: the constraints already cover the write
+	}
+
+	if (!needs_clobber) {
+		return;
+	}
+	array_add(&cfg->reported_write_reg_codes, cast(AsmRegCode)code);
+	error(reg_expr, "'%.*s' writes %%%.*s, which is not pinned to an output or scratch parameter; "
+	                "add '#clobber %%%.*s' so the compiler does not keep a live value in it",
+	      LIT(mnemonic), LIT(reg_name), LIT(reg_name));
 }
 
 template <typename AsmCtx>
@@ -1505,8 +2015,14 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 	for_array(form_index, forms) {
 		auto &form = forms[form_index];
 
-		if (is_pseudo && cast(int)form.explicit_count() < target_explicit_count) {
-			continue;
+		if (is_pseudo) {
+			// A pseudo-instruction takes its alias's argument count and fills the target
+			// form's other slots itself (riscv64 `mv rd, rs` is `addi rd, rs, 0`), so the
+			// user's operands are counted against the alias, not the target form.
+			if (cast(int)form.explicit_count() < target_explicit_count ||
+			    operands.count != target_explicit_count) {
+				continue;
+			}
 		} else if (operands.count != cast(int)form.explicit_count()) {
 			continue;
 		}
@@ -1539,6 +2055,18 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 					if (!spot_ok && (m == AsmMismatch_Size || m == AsmMismatch_ImmRange) && wb_ > 0 && gb_ > 0) {
 						int d = cast(int)wb_ - cast(int)gb_;
 						width_dist += (d < 0) ? -d : d;
+					}
+				}
+				if (spot_ok && src == AsmOperand_Memory &&
+				    !check_asm_memory_disp_fits(asm_ctx, form, type, operand, tmpl_entity->AsmTemplate.decls, nullptr, nullptr, nullptr)) {
+					spot_ok = false;
+					m = AsmMismatch_DispRange;
+				}
+				if (dst == AsmOperand_Immediate) {
+					int in_range = check_asm_immediate_table_range(asm_ctx, form, type, operand, nullptr, nullptr);
+					if (in_range >= 0) {
+						spot_ok = in_range == 1;
+						m = spot_ok ? AsmMismatch_None : AsmMismatch_ImmBounds;
 					}
 				}
 			}
@@ -1759,6 +2287,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				u16 b = asm_ctx->clobber_bit_for_reg_name(e->AsmRegister.name.string);
 				produced |= b;
 				explicit_writes |= b;
+				check_asm_literal_register_write(asm_ctx, cfg, ate->decls, name, e);
 				continue;
 			}
 			// NOTE(bill): A lane operand `v[idx]` is an IndexExpr with no entity of its own
@@ -1767,11 +2296,12 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				op_expr = op_expr->IndexExpr.expr;
 			}
 			Entity *pe = entity_of_node(op_expr);
- 			if (pe != nullptr && pe->kind == Entity_Variable) {
- 				i32 di = -1;
- 				check_asm_find_group(pe, ate->decls, &di);
- 				pinned_param_writes |= asm_decl_resolve_pin_bit(asm_ctx, ate->decls, di);
- 			}
+			if (pe != nullptr && pe->kind == Entity_Variable) {
+				i32 di = -1;
+				check_asm_find_group(pe, ate->decls, &di);
+				pinned_param_writes |= asm_decl_resolve_pin_bit(asm_ctx, ate->decls, di);
+				check_asm_input_parameter_write(cfg, ate->decls, name, di, operands[i].expr);
+			}
 		}
 
 		if (is_pseudo &&
@@ -1817,6 +2347,20 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			self_zeroing = all_same;
 		}
 
+
+		if (asm_hook_implicit_register_writes_are_full_width(asm_ctx, 0)) {
+			u16 implicit_written = cast(u16)clobber.implicit_wr & asm_ctx->CLOBBER_REGS_NAMED;
+			for (u16 bit = 1; bit != 0; bit <<= 1) {
+				i32 idx = asm_reg_index_from_bit(bit);
+				if ((implicit_written & bit) == 0 || idx < 0) {
+					continue;
+				}
+				auto r = asm_ctx->register_lookup(make_string_c(asm_ctx->clobber_reg_bit_name(bit)));
+				if (r) {
+					facts->gen_reg_w.e[idx] = cast(u8)asm_ctx->reg_size(r);
+				}
+			}
+		}
 
 		for_array(i, operands) { // Sub-register widths for explicit named-register operands
 			auto const &op = operands[i];
@@ -1870,9 +2414,32 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 					if (be != nullptr && be->kind == Entity_Variable) {
 						array_add(&facts->gen_params,  be);
 						array_add(&facts->read_params, be);
+						i32 bdi = -1;
+						check_asm_find_group(be, ate->decls, &bdi);
+						check_asm_input_parameter_write(cfg, ate->decls, name, bdi, m->classify.base);
 					}
 				}
 			}
+			if (operands[i].expr != nullptr && operands[i].expr->kind == Ast_AsmRegister) {
+				// A literal %reg that a parameter is pinned to stands for that parameter
+				// (`[r = %a0] { addi %a0, a, 1 }` assigns r). Tracked registers get this
+				// through their clobber bit; this covers the rest.
+				String reg_name = operands[i].expr->AsmRegister.name.string;
+				if (!self_zeroing && (cast(u16)clobber.read & (1u << slot))) {
+					i32 di = asm_decl_index_pinned_to_untracked_reg(asm_ctx, ate->decls, reg_name, AsmTemplateEntityDeclParamGroup_Input);
+					if (di >= 0) {
+						array_add(&facts->read_params, ate->decls[di].entity);
+					}
+				}
+				if (cast(u16)clobber.written & (1u << slot)) {
+					i32 di = asm_decl_index_pinned_to_untracked_reg(asm_ctx, ate->decls, reg_name, AsmTemplateEntityDeclParamGroup_Output);
+					if (di >= 0) {
+						array_add(&facts->gen_params, ate->decls[di].entity);
+					}
+				}
+				continue;
+			}
+
 			Entity *pe = entity_of_node(operands[i].expr);
 			if (pe == nullptr || pe->kind != Entity_Variable) {
 				continue;
@@ -2002,6 +2569,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 	AsmMismatch mismatch [MAX_VARIANT_COUNT] = {};
 	i32         want_bits[MAX_VARIANT_COUNT] = {};
 	i32         got_bits [MAX_VARIANT_COUNT] = {};
+	i64         disp_val [MAX_VARIANT_COUNT] = {};
+	i64         disp_min [MAX_VARIANT_COUNT] = {}; // also an immediate's declared range (AsmMismatch_ImmBounds)
+	i64         disp_max [MAX_VARIANT_COUNT] = {};
 	if (best_form >= 0) {
 		auto &form = forms[best_form];
 		for_array(i, operands) {
@@ -2020,6 +2590,19 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				i32 wb_ = 0;
 				i32 gb_ = 0;
 				bool ok = check_asm_operand_size_class(asm_ctx, type, &operands[i], &m, &wb_, &gb_);
+				if (ok && src == AsmOperand_Memory && i < MAX_VARIANT_COUNT &&
+				    !check_asm_memory_disp_fits(asm_ctx, form, type, &operands[i], tmpl_entity->AsmTemplate.decls,
+				                                &disp_val[i], &disp_min[i], &disp_max[i])) {
+					ok = false;
+					m  = AsmMismatch_DispRange;
+				}
+				if (dst == AsmOperand_Immediate && i < MAX_VARIANT_COUNT) {
+					int in_range = check_asm_immediate_table_range(asm_ctx, form, type, &operands[i], &disp_min[i], &disp_max[i]);
+					if (in_range >= 0) {
+						ok = in_range == 1;
+						m  = ok ? AsmMismatch_None : AsmMismatch_ImmBounds;
+					}
+				}
 				valid_spots[i] = ok;
 				if (!ok && i < MAX_VARIANT_COUNT) {
 					mismatch[i]  = m;
@@ -2054,7 +2637,19 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		end_error_block();
 		begin_error_block();
 
-		if (m == AsmMismatch_ImmRange) {
+		if (m == AsmMismatch_DispRange) {
+			gbString range = asm_describe_range(disp_min[i], disp_max[i], "offset");
+			error(operands[i].expr, "'%.*s' operand-%td memory displacement %lld does not fit in %s",
+			      LIT(name), i, cast(long long)disp_val[i], range);
+			gb_string_free(range);
+		} else if (m == AsmMismatch_ImmBounds) {
+			gbString range = asm_describe_range(disp_min[i], disp_max[i], "immediate");
+			gbString vs    = exact_value_to_string(operands[i].value);
+			error(operands[i].expr, "'%.*s' operand-%td immediate %s does not fit in %s",
+			      LIT(name), i, vs, range);
+			gb_string_free(vs);
+			gb_string_free(range);
+		} else if (m == AsmMismatch_ImmRange) {
 			ExactValue ev = operands[i].value;
 			gbString vs = exact_value_to_string(ev);
 			i32 bits_required = 0;
@@ -2080,12 +2675,27 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			      LIT(name), i,
 			      want_bits[i], LIT(asm_reg_class_strings[dst_reg_class]), LIT(asm_operand_kind_strings[dst]),
 			      got_bits[i],  LIT(asm_reg_class_strings[src_reg_class]), LIT(asm_operand_kind_strings[src]));
+		} else if (m == AsmMismatch_LiteralReg) {
+			auto slot = operand_slot_type(forms[best_form], cast(int)i);
+			String reg = operands[i].expr->AsmRegister.name.string;
+			char const *want = asm_hook_literal_register_reject_reason(asm_ctx, slot, asm_ctx->register_lookup(reg), 0);
+			error(operands[i].expr, "'%.*s' operand-%td cannot be %%%.*s, it must be %s",
+			      LIT(name), i, LIT(reg), want ? want : "a different register");
 		} else if (m == AsmMismatch_NamedReg) {
 			auto slot = operand_slot_type(forms[best_form], cast(int)i);
-			error(operands[i].expr, "'%.*s' operand-%td must be a named %.*s register, got a %.*s",
-			      LIT(name), i,
-			      LIT(asm_ctx->named_reg_class_string(asm_ctx->operand_type_named_reg_class(slot))),
-			      LIT(asm_operand_kind_strings[src]));
+			String cls = asm_ctx->named_reg_class_string(asm_ctx->operand_type_named_reg_class(slot));
+			Ast *e = operands[i].expr;
+			Entity *pe = entity_of_node(e);
+			if (e->kind == Ast_AsmRegister) {
+				error(e, "'%.*s' operand-%td must be a named %.*s register, got %%%.*s",
+				      LIT(name), i, LIT(cls), LIT(e->AsmRegister.name.string));
+			} else if (pe != nullptr && pe->kind == Entity_Variable) {
+				error(e, "'%.*s' operand-%td must be a named %.*s register, got the parameter '%.*s', which the compiler allocates",
+				      LIT(name), i, LIT(cls), LIT(pe->token.string));
+			} else {
+				error(e, "'%.*s' operand-%td must be a named %.*s register, got a %.*s",
+				      LIT(name), i, LIT(cls), LIT(asm_operand_kind_strings[src]));
+			}
 		} else if (dst == AsmOperand_Immediate) {
 			error(operands[i].expr, "'%.*s' operand-%td must be an assemble-time constant or a $ immediate parameter, got a %.*s",
 			      LIT(name), i, LIT(asm_operand_kind_strings[src]));
@@ -2981,6 +3591,12 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		// add normalizations for the registers too
 		for (String const &reg : *clobber_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				// A register outside the table's tracked set (e.g. riscv64 %t0) has no
+				// canonical alias to add. clobber_reg_bit_name(0) is the placeholder "<reg>",
+				// which would otherwise reach the LLVM constraint string as ~{<reg>}.
+				continue;
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(clobber_registers_set, rname);
@@ -2989,6 +3605,9 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 
 		for (String const &reg : *preserve_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				continue; // untracked register: keep its own name, as above
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(preserve_registers_set, rname);
@@ -3069,6 +3688,21 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 	asm_cfg_init(&cfg);
 	defer (asm_cfg_destroy(&cfg));
 
+	// Snapshot the declared #clobber/#preserve registers for the literal-write check,
+	// before the instructions fold their implicit clobbers into the same set.
+	for (String const &reg : ate->clobber_registers_set) {
+		auto r = asm_ctx->register_lookup(reg);
+		if (r) {
+			array_add(&cfg.declared_write_reg_codes, cast(AsmRegCode)asm_register_code(asm_ctx, r));
+		}
+	}
+	for (String const &reg : ate->preserve_registers_set) {
+		auto r = asm_ctx->register_lookup(reg);
+		if (r) {
+			array_add(&cfg.declared_write_reg_codes, cast(AsmRegCode)asm_register_code(asm_ctx, r));
+		}
+	}
+
 	Array<Operand> operands = {};
 	operands.allocator = heap_allocator();
 	array_reserve(&operands, 16);
@@ -3094,7 +3728,17 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 				array_add(&operands, operand);
 			}
 
-			if (res == CheckMnemomic_Prefix) {
+			bool operands_checked = true;
+			for (Operand const &o : operands) {
+				operands_checked &= !check_asm_operand_failed(o);
+			}
+			if (!operands_checked && res != CheckMnemomic_Prefix && res != CheckMnemomic_Invalid) {
+				// Already reported against the operand itself.
+				all_instructions_good = false;
+				cfg.saw_any_instructions = true;
+				previous_prefix = 0;
+				previous_prefix_instr = nullptr;
+			} else if (res == CheckMnemomic_Prefix) {
 				if (instr->operands.count != 0) {
 					error(instr->name, "A prefix must not have any operands, and be separate from the instruction it is prefixing");
 				}
@@ -3137,6 +3781,7 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 				previous_prefix_instr = nullptr;
 			} else {
 				// invalid mnemonic already reported; a pending prefix now has no target
+				all_instructions_good = false;
 				previous_prefix = 0;
 				previous_prefix_instr = nullptr;
 			}
@@ -3258,12 +3903,21 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 				// ignore
 			} else if (ed.pin.len != 0) {
 				auto r = asm_ctx->register_lookup(ed.pin);
-				if (asm_ctx->reg_is_non_allocateable(r)) {
-					error(ed.entity->token,
-					      "'asm' output '%.*s' is pinned to a register '%%%.*s' which cannot be an output; "
-					      "read it into a general-purpose register in the body instead "
-					      "(e.g. on AMD64, 'mov %%rax, %%%.*s' with the output pinned to %%rax)",
-					      LIT(ed.entity->token.string), LIT(ed.pin), LIT(ed.pin));
+				if (r && asm_hook_pin_reject_reason(asm_ctx, r, 0) != nullptr) {
+					// already reported where the pin was declared
+				} else if (asm_ctx->reg_is_non_allocateable(r)) {
+					if (build_context.metrics.arch == TargetArch_amd64) {
+						error(ed.entity->token,
+						      "'asm' output '%.*s' is pinned to a register '%%%.*s' which cannot be an output; "
+						      "read it into a general-purpose register in the body instead "
+						      "(e.g. on AMD64, 'mov %%rax, %%%.*s' with the output pinned to %%rax)",
+						      LIT(ed.entity->token.string), LIT(ed.pin), LIT(ed.pin));
+					} else {
+						error(ed.entity->token,
+						      "'asm' output '%.*s' is pinned to a register '%%%.*s' which cannot be an output; "
+						      "copy it into the output in the body instead",
+						      LIT(ed.entity->token.string), LIT(ed.pin));
+					}
 				}
 			}
 		}
@@ -3272,6 +3926,7 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 	// NOTE(bill): After the linear collection pass of the mnemonics,
 	// now do the CFG building, analysis, and liveness checks (only if everything was correct)
 
+	cfg.has_unchecked_instructions = !all_instructions_good;
 	check_asm_cfg_build(asm_ctx, &cfg, d->init_expr, entity);
 	check_asm_cfg_analyse(asm_ctx, &cfg, ctx, entity);
 	check_asm_cfg_liveness(asm_ctx, &cfg, entity, /*emit_dead_writes*/all_instructions_good);
@@ -3302,15 +3957,23 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		ptr_set_init(&refs);
 		defer (ptr_set_destroy(&refs));
 		u16 touched_regs = 0;
+		auto touched_codes = array_make<AsmTableRegCode<AsmCtx>>(heap_allocator());
+		defer (array_free(&touched_codes));
 
 		for (Ast *instruction_ : at->instructions) {
 			if (instruction_->kind == Ast_AsmInstruction) {
 				for (Ast *op : instruction_->AsmInstruction.operands) {
-					check_asm_collect_refs(asm_ctx, &refs, op, &touched_regs);
+					check_asm_collect_refs(asm_ctx, &refs, op, &touched_regs, &touched_codes);
+				}
+				// A tracked register the matched form reads implicitly (mflo reads %lo,
+				// mfhi reads %hi) is a read of whatever is pinned to it.
+				AsmInstructionFacts *facts = instruction_->AsmInstruction.facts;
+				if (facts != nullptr) {
+					touched_regs |= facts->read_regs;
 				}
 			} else if (instruction_->kind == Ast_AsmDirective) {
 				for (Ast *op : instruction_->AsmDirective.operands) {
-					check_asm_collect_refs(asm_ctx, &refs, op, &touched_regs);
+					check_asm_collect_refs(asm_ctx, &refs, op, &touched_regs, &touched_codes);
 				}
 			}
 		}
@@ -3322,9 +3985,9 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 			if ((!is_scratch && !is_immediate && !is_input) || ed.entity == nullptr) {
 				continue;
 			}
-			// Used if its identifier is referenced OR (for a pinned scratch) its pinned
-			// register is touched in the body. Immediates are never register-touched, so
-			// they fall through to the entity check as before.
+			// Used if its identifier is referenced OR (for a pinned input or scratch) its
+			// pinned register is named or implicitly read in the body. Immediates are never
+			// register-touched, so they fall through to the entity check as before.
 			if (ptr_set_exists(&refs, ed.entity)) {
 				continue;
 			}
@@ -3332,6 +3995,17 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 				u16 pin_bit = asm_ctx->clobber_bit_for_reg_name(ed.pin);
 				if (pin_bit != 0 && (touched_regs & pin_bit) != 0) {
 					continue;
+				}
+				auto pr = asm_ctx->register_lookup(ed.pin);
+				if (pin_bit == 0 && pr) {
+					// An untracked pin has no bit; match it by register code instead.
+					bool touched = false;
+					for (auto code : touched_codes) {
+						touched |= code == asm_register_code(asm_ctx, pr);
+					}
+					if (touched) {
+						continue;
+					}
 				}
 			}
 			if (ed.tie >= 0) {
@@ -3396,7 +4070,21 @@ gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, De
 		check_asm_template(&g_asm_riscv, c, e, d);
 	} else if (build_context.metrics.arch == TargetArch_arm64) {
 		check_asm_template(&g_asm_arm64, c, e, d);
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		check_asm_template(&g_asm_mips, c, e, d);
 	} else {
 		error(e->token, "asm templates are not currently supported for this target");
 	}
+}
+
+// See asm_hook_template_features_bind_to_caller.
+gb_internal bool check_asm_template_features_bind_to_caller(void) {
+	switch (build_context.metrics.arch) {
+	case TargetArch_amd64:    return asm_hook_template_features_bind_to_caller(&g_asm_amd64, 0);
+	case TargetArch_riscv64:  return asm_hook_template_features_bind_to_caller(&g_asm_riscv, 0);
+	case TargetArch_arm64:    return asm_hook_template_features_bind_to_caller(&g_asm_arm64, 0);
+	case TargetArch_mips32be: return asm_hook_template_features_bind_to_caller(&g_asm_mips,  0);
+	default:                  break;
+	}
+	return false;
 }

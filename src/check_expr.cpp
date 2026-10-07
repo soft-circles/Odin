@@ -9720,6 +9720,61 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 					}
 				}
 			}
+
+			// An 'asm' template is assembled as part of its caller. Where the assembler
+			// checks instructions against the enclosing function's features, the
+			// template's own attribute never reaches it, so the caller must enable them.
+			if (pt->Proc.calling_convention == ProcCC_InlineAsm && check_asm_template_features_bind_to_caller()) {
+				String caller_enabled  = {};
+				String caller_required = {};
+				Type *caller = c->curr_proc_sig != nullptr ? base_type(c->curr_proc_sig) : nullptr;
+				if (caller != nullptr && caller->kind == Type_Proc) {
+					caller_enabled  = caller->Proc.enable_target_feature;
+					caller_required = caller->Proc.require_target_feature;
+				}
+
+				// Is `feature` (bare) enabled by the comma-list `list`, with or without a '+'?
+				auto list_enables = [](String const &list, String const &feature) -> bool {
+					String_Iterator it = {list, 0};
+					String str = {};
+					while (string_split_iterator_next(&it, ',', &str)) {
+						if (string_starts_with(str, '+')) {
+							str = substring(str, 1, str.len);
+						}
+						if (str == feature) {
+							return true;
+						}
+					}
+					return false;
+				};
+
+				String_Iterator it = {pt->Proc.enable_target_feature, 0};
+				String feature = {};
+				while (string_split_iterator_next(&it, ',', &feature)) {
+					if (string_starts_with(feature, '+')) {
+						feature = substring(feature, 1, feature.len);
+					}
+					if (feature.len == 0 || string_starts_with(feature, '-') ||
+					    check_target_feature_is_enabled(feature, nullptr) ||
+					    list_enables(caller_enabled, feature) || list_enables(caller_required, feature)) {
+						continue;
+					}
+					ERROR_BLOCK();
+					gbString name = expr_to_string(call->CallExpr.proc);
+					if (caller == nullptr) {
+						error(call, "'asm' template '%s' enables target feature '%.*s', which this file-scope call cannot have; "
+						      "enable it globally via '-target-features:\"%.*s\"' or a matching micro-architecture",
+						      name, LIT(feature), LIT(feature));
+					} else {
+						error(call, "'asm' template '%s' enables target feature '%.*s', but the calling procedure does not; "
+						      "a template is assembled as part of its caller, so enable it there "
+						      "(e.g. @(enable_target_feature=\"%.*s\")) or globally via '-target-features:\"%.*s\"'",
+						      name, LIT(feature), LIT(feature), LIT(feature));
+					}
+					gb_string_free(name);
+					break;
+				}
+			}
 		}
 	}
 

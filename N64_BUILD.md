@@ -8,7 +8,7 @@ odin build . -target:n64
 ```
 
 The application supplies `main :: proc()`. The compiler supplies the N64 entry
-bridge and runtime, then drives a validated libdragon SDK to link and package
+bridge and runtime, then drives the selected libdragon SDK to link and package
 the ROM. Projects do not need a C entry point, Makefile, or manifest.
 
 For the narrow raw libdragon API, see
@@ -16,6 +16,7 @@ For the narrow raw libdragon API, see
 also read [`N64_MAINTAINERS.md`](N64_MAINTAINERS.md).
 
 For separate checked RSP queue commands, see [Handwritten RSP assembly](RSP_ASSEMBLY.md).
+For `asm` templates in CPU code, see [CPU asm templates](MIPS_ASM.md).
 
 ## Supported hosts
 
@@ -72,19 +73,21 @@ the exact fork revision above. If `build_odin.sh` reports that no supported
 falling back to an unrelated host LLVM installation. The resulting `./odin`
 binary is the compiler used by the commands below.
 
-## Install the pinned libdragon SDK
+## Install the libdragon SDK
 
-The required libdragon revision is
-`c79a52b42ac790e06e797aede43914dd8754cd5f`. Do not build from a moving branch:
-Odin checks the installed revision, its clean provenance, and the exact
-`n64.mk` packaging recipe before every executable build.
+The setup example uses libdragon revision
+`c79a52b42ac790e06e797aede43914dd8754cd5f` as a default. Odin checks that the
+selected SDK contains the required libraries, linker script, Makefile and
+executable tools. Other revisions and local changes are allowed; build errors
+and the ABI/runtime tests expose compatibility problems. SDK version metadata
+and a particular `n64.mk` hash are not required.
 
 1. Install the libdragon GCC toolchain by following the official
    [installation guide](https://github.com/DragonMinded/libdragon/wiki/Installing-libdragon)
    or using the official
    [toolchain release](https://github.com/DragonMinded/libdragon/releases/tag/toolchain-continuous-prerelease).
    Choose an installation directory and export it as `N64_INST`.
-2. Check out the exact libdragon source revision and install its library and
+2. Check out the default libdragon source revision and install its library and
    host tools into that same directory:
 
    ```sh
@@ -97,9 +100,7 @@ Odin checks the installed revision, its clean provenance, and the exact
    Building the toolchain from source is also supported by the pinned
    checkout's `tools/build-toolchain.sh`; follow the upstream installation
    guide for its host prerequisites.
-3. Keep the checkout clean while running the install. A dirty source checkout
-   produces dirty installed provenance, which Odin rejects intentionally. The
-   upstream `./build.sh` also builds the complete libdragon example suite; that
+3. The upstream `./build.sh` also builds the complete libdragon example suite; that
    is optional for Odin and may download additional example assets.
 
 Select the installed SDK for subsequent builds in either of these ways:
@@ -177,7 +178,7 @@ they apply only to executable ROM output.
 | `-out:<path>` | Output file path, with optional `.z64` suffix | Package-directory name plus `.z64` |
 
 Valid save types are `none`, `eeprom4k`, `eeprom16k`, `sram256k`,
-`sram768k`, `sram1m`, and `flashram`. The pinned header format cannot combine
+`sram768k`, `sram1m`, and `flashram`. The N64 header format cannot combine
 `-n64-rtc` with either EEPROM type.
 
 Controller ports use semicolons because one controller declaration can contain
@@ -311,6 +312,37 @@ ordinary replaceable Odin allocator values.
 The current runtime is single-threaded and has no TLS runtime. Callback,
 interrupt, timer, thread, and TLS context propagation are not supported.
 
+## CPU asm templates
+
+Odin `asm` templates compile for the N64 CPU on `-target:n64` and
+`-target:freestanding_mips32be`. They accept the VR4300 (MIPS III) instruction
+set, including COP0, `cache`, TLB, HI/LO and the COP1 FPU:
+
+```odin
+dcache_hit_wb_inv_line :: asm(p: rawptr) { cache 0x15, [p] }
+read_cp0_count         :: asm() -> (r: u32) { mfc0 r, %c0_count }
+```
+
+The contract, detailed in [CPU asm templates](MIPS_ASM.md), is:
+
+- Registers use ABI names (`%t0`, `%a1`), FPR names (`%f12`), COP0 names
+  (`%c0_status`) and `%hi`, `%lo`, `%fcc0`. FPR names fill FPU slots and pin
+  `f32`/`f64` parameters. `%at` is reserved for the assembler.
+- FPU mnemonics spell `.` as `_`: `add_s`, `cvt_d_w`, `c_olt_d`.
+- Write branches without a delay-slot instruction; the assembler fills each
+  slot with a `nop`. Branch and jump targets are template labels only.
+- CP0 and HI/LO hazards inside a template are not filled. Write their `nop`s
+  explicitly. The generator pads HI/LO hazards that would straddle the
+  template boundary.
+- A write to a literal GPR or FPR needs a pin or `#clobber`, and an input
+  parameter may be written only when it is tied to an output. COP0 access,
+  `cache` and `jalr` make a template volatile with a memory clobber.
+- 32-bit instructions such as `addu`, `sll` and `mtc0` take parameters of at
+  most 32 bits. Use the `d` forms for 64-bit values.
+- MIPS IV, MIPS32 and later instructions, out-of-range immediates and
+  displacements, `cache` operations the VR4300 lacks, wrong register classes
+  and impossible pins are compile errors, and `odin check` reports them all.
+
 ## Load and debug a ROM
 
 For ordinary development, use a current emulator with accurate N64 homebrew
@@ -347,13 +379,10 @@ replace an existing output.
 | Diagnostic | What to do next |
 | --- | --- |
 | `N64 SDK is not configured` | Set `N64_INST` or pass `-n64-inst:<directory>`. |
-| `missing required file` or `missing required executable tool` | Reinstall the pinned SDK into the selected root; do not assemble roots from unrelated installations. |
-| `libdragon SDK mismatch` for the revision or clean state | Check out the pinned commit in a clean libdragon tree and rerun `make install tools-install`. |
-| `pinned n64.mk SHA-256` mismatch | Restore `n64.mk` from the pinned checkout and reinstall it. |
-| Toolchain provenance warning | Confirm the host/binutils/GCC/newlib difference is intentional; release qualification uses the versions recorded by the Odin64 compatibility lock. |
+| `missing required file` or `missing required executable tool` | Install the missing SDK component or select the complete SDK root. |
 | `GNU make is required at /usr/bin/make` | Install GNU make so that exact path exists, or use a supported host image. |
-| `-n64-assets requires ... mkdfs` | Install the pinned libdragon host tools into the selected SDK. |
-| `-n64-metadata requires ... n64metadata` | Install the pinned libdragon host tools into the selected SDK. |
+| `-n64-assets requires ... mkdfs` | Install the libdragon host tools into the selected SDK. |
+| `-n64-metadata requires ... n64metadata` | Install the libdragon host tools into the selected SDK. |
 | RTC cannot be used with EEPROM | Remove `-n64-rtc` or choose a non-EEPROM save type. |
 | Invalid controller list | Use 1–4 semicolon-separated declarations; keep attachment commas inside one declaration. |
 | Metadata companion staging failure | Make every referenced path relative to the INI, remove `.`/`..`, and confirm the first referenced path component exists. |
@@ -374,6 +403,9 @@ are supported.
 - Odin validates and drives the SDK but does not install or update it.
 - Asset conversion beyond raw DragonFS directory packaging remains an external
   project concern.
+- CPU `asm` templates do not fill CP0 or HI/LO hazards inside a template,
+  cannot reserve a branch delay slot for a useful instruction, and cannot name
+  `%at`.
 
 ## Canonical samples and evidence
 
@@ -385,7 +417,8 @@ python3 tests/n64_validate.py quick
 ```
 
 The compiler-only full suite additionally exercises public ROM builds,
-O64 interop and the [standalone runtime probe](tests/n64_runtime):
+O64 interop, the [standalone runtime probe](tests/n64_runtime) and the
+[CPU asm template ROM](tests/n64_asm/rom):
 
 ```sh
 N64_INST=/absolute/sdk ARES_TEST=/absolute/ares-test python3 tests/n64_validate.py full

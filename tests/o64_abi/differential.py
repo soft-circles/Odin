@@ -11,7 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent))
-from n64_pins import N64_INST, load_phase0
+from n64_tools import N64_INST, load_phase0
 
 GCC = Path(os.environ.get("MIPS_O64_GCC", N64_INST / "bin/mips64-elf-gcc"))
 ODIN = Path(os.environ.get("ODIN", ROOT / "odin"))

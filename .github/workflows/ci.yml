@@ -117,6 +117,7 @@ jobs:
         with:
           name: n64-quick-validation-${{ github.run_id }}
           path: .n64-validation-artifacts/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
       - name: Odin version

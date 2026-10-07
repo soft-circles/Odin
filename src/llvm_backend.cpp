@@ -3255,6 +3255,12 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 			}
 			debugf("Generated File: %.*s\n", LIT(filepath_obj));
 		}
+
+		// An error LLVM reports through lb_llvm_diagnostic_handler during emission (an
+		// inline-asm parse error, say) does not make LLVMTargetMachineEmitToFile fail: the
+		// object is still written without the offending code. Check what the handler
+		// recorded, as the threaded path does once its pool drains.
+		lb_exit_if_worker_failed();
 	}
 	return true;
 }
