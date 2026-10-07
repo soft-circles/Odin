@@ -101,12 +101,12 @@ enum AstFileFlag : u32 {
 enum AstDelayQueueKind {
 	AstDelayQueue_Import,
 	AstDelayQueue_Expr,
-	AstDelayQueue_ForeignBlock,
 	AstDelayQueue_COUNT,
 };
 
 struct AstFile {
 	i32          id;
+	i32          index_in_pkg; // once the package's files are sorted by name, see `check_create_file_scopes`
 	u32          flags;
 	AstPackage * pkg;
 	Scope *      scope;
@@ -118,11 +118,15 @@ struct AstFile {
 	String       directory;
 
 	Tokenizer    tokenizer;
-	Array<Token> tokens;
+	Array<Token> lookahead; // read by peeking, before the parser reaches them
+	isize        lookahead_index;
+	isize        token_count;
 	isize        curr_token_index;
-	isize        prev_token_index;
+	Token        first_token;
 	Token        curr_token;
 	Token        prev_token; // previous non-comment
+	TokenPos     invalid_token_pos;
+	Array<Token> token_edits; // for `-strip-semicolon`
 	Token        package_token;
 	String       package_name;
 
@@ -144,15 +148,13 @@ struct AstFile {
 
 	isize total_file_decl_count;
 	isize delayed_decl_count;
+
 	Slice<Ast *> decls;
 	Array<Ast *> imports; // 'import'
 	isize        directive_count;
 
 	Ast *          curr_proc;
 	isize          error_count;
-	ParseFileError last_error;
-	f64            time_to_tokenize; // seconds
-	f64            time_to_parse;    // seconds
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
 	CommentGroup *line_comment;     // Comment after the semicolon
@@ -170,6 +172,22 @@ struct AstFile {
 
 	struct LLVMOpaqueMetadata *llvm_metadata;
 	struct LLVMOpaqueMetadata *llvm_metadata_scope;
+
+	//// Profiling /////
+
+	f64            time_to_load;        // seconds
+	f64            time_to_parse;       // seconds, tokenizing included, setting up the decls excluded
+	f64            time_to_setup_decls; // seconds, mostly finding and adding the imported packages
+	u64            cpu_time_to_load;
+	u64            cpu_time_to_parse;
+	u64            cpu_time_to_setup_decls;
+
+	//// Semantic Checking /////
+
+	Array<struct Entity *> collected_entities;
+	bool                   collected_entities_out_of_order;
+
+	Array<struct Entity *> type_alias_candidates; // see `correct_type_aliases_in_package`
 };
 
 enum AstForeignFileKind {
@@ -201,6 +219,8 @@ struct AstPackage {
 	bool                  is_single_file;
 	isize                 order;
 
+	std::atomic<isize>    files_to_parse; // and one more until they are all added, see `parser_package_file_done`
+
 	BlockingMutex         files_mutex;
 	BlockingMutex         foreign_files_mutex;
 	BlockingMutex         type_and_value_mutex;
@@ -215,11 +235,6 @@ struct AstPackage {
 	bool      is_extra;
 };
 
-
-struct ParseFileErrorNode {
-	ParseFileErrorNode *next, *prev;
-	ParseFileError      err;
-};
 
 struct Parser {
 	String                 init_fullpath;
@@ -236,15 +251,7 @@ struct Parser {
 
 	std::atomic<isize>     total_seen_load_directive_count;
 
-	// TODO(bill): What should this mutex be per?
-	//  * Parser
-	//  * Package
-	//  * File
-	BlockingMutex          file_decl_mutex;
-
-	BlockingMutex          file_error_mutex;
-	ParseFileErrorNode *   file_error_head;
-	ParseFileErrorNode *   file_error_tail;
+	WorkerTaskProc *       package_parsed_proc; // if set, a task for each package once its files are parsed
 };
 
 struct ParserWorkerData {

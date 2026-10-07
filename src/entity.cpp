@@ -76,7 +76,8 @@ enum EntityFlag : u64 {
 	EntityFlag_Init          = 1ull<<31,
 	EntityFlag_Subtype       = 1ull<<32,
 	EntityFlag_Fini          = 1ull<<33,
-	
+	EntityFlag_PolyConstArg  = 1ull<<34, // passed to a `$` parameter, so a local procedure may be called outside its parent
+
 	EntityFlag_CustomLinkName = 1ull<<40,
 	EntityFlag_CustomLinkage_Internal = 1ull<<41,
 	EntityFlag_CustomLinkage_Strong   = 1ull<<42,
@@ -142,6 +143,10 @@ enum ProcedureOptimizationMode : u8 {
 
 BlockingMutex global_type_name_objc_metadata_mutex;
 
+struct TypeNameObjCMetadata;
+
+gb_internal TypeNameObjCMetadata *entity_objc_metadata(struct Entity *e);
+
 struct TypeNameObjCMetadataEntry {
 	InternedString interned;
 	Entity *entity;
@@ -203,9 +208,11 @@ struct AsmTemplateEntityDecl {
 // An Entity is a named "thing" in the language
 struct Entity {
 	EntityKind  kind;
+	i32         global_graph_node; // 1 + the index of its node in the global groups' graph, 0 if it is none
 	u64         id;
 	std::atomic<u64>         flags;
 	std::atomic<EntityState> state;
+	Futex                    checking_thread; // 1 + the index of the thread in `check_entity_decl` for it, else 0
 	std::atomic<i32>         min_dep_count;
 	Token       token;
 	Scope *     scope;
@@ -443,6 +450,18 @@ gb_internal bool entity_has_deferred_procedure(Entity *e) {
 
 gb_global std::atomic<u64> global_entity_id;
 
+gb_global thread_local u64 entity_id_next;
+gb_global thread_local u64 entity_id_end;
+
+gb_internal u64 next_entity_id(void) {
+	if (entity_id_next == entity_id_end) {
+		enum {ENTITY_ID_BLOCK = 1024};
+		entity_id_next = global_entity_id.fetch_add(ENTITY_ID_BLOCK, std::memory_order_relaxed);
+		entity_id_end  = entity_id_next + ENTITY_ID_BLOCK;
+	}
+	return 1 + entity_id_next++;
+}
+
 // NOTE(bill): This exists to allow for bulk allocations of entities all at once to improve performance for type generation
 #define INTERNAL_ENTITY_INIT(e_, kind_, scope_, token_, type_) do {                  \
 	(e_)->kind   = (kind_);                                                      \
@@ -450,7 +469,7 @@ gb_global std::atomic<u64> global_entity_id;
 	(e_)->scope  = (scope_);                                                     \
 	(e_)->token  = (token_);                                                     \
 	(e_)->type   = (type_);                                                      \
-	(e_)->id     = 1 + global_entity_id.fetch_add(1);                            \
+	(e_)->id     = next_entity_id();                                             \
 	if ((token_).pos.file_id) {                                                  \
 		e_->file = thread_unsafe_get_ast_file_from_id((token_).pos.file_id); \
 	}                                                                            \
