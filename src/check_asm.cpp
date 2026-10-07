@@ -1505,8 +1505,14 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 	for_array(form_index, forms) {
 		auto &form = forms[form_index];
 
-		if (is_pseudo && cast(int)form.explicit_count() < target_explicit_count) {
-			continue;
+		if (is_pseudo) {
+			// A pseudo-instruction takes its alias's argument count and fills the target
+			// form's other slots itself (riscv64 `mv rd, rs` is `addi rd, rs, 0`), so the
+			// user's operands are counted against the alias, not the target form.
+			if (cast(int)form.explicit_count() < target_explicit_count ||
+			    operands.count != target_explicit_count) {
+				continue;
+			}
 		} else if (operands.count != cast(int)form.explicit_count()) {
 			continue;
 		}
