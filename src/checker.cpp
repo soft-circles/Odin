@@ -1301,6 +1301,7 @@ gb_internal void init_universal(void) {
 			{"Object",     BuildMode_Object},
 			{"Assembly",   BuildMode_Assembly},
 			{"LLVM_IR",    BuildMode_LLVM_IR},
+			{"RSP_Assembly", BuildMode_RSP_Assembly},
 		};
 
 		auto fields = add_global_enum_type(str_lit("Odin_Build_Mode_Type"), values, gb_count_of(values));
