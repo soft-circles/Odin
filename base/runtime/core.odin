@@ -652,6 +652,7 @@ ALL_ODIN_ARCH_TYPES :: Odin_Arch_Types{
 		Object,
 		Assembly,
 		LLVM_IR,
+		RSP_Assembly,
 	}
 */
 Odin_Build_Mode_Type :: type_of(ODIN_BUILD_MODE)
