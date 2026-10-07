@@ -104,13 +104,13 @@ gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragon.a"));
 	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragonsys.a"));
 	array_add(&required_files, STR_LIT("mips64-elf/lib/n64.ld"));
-	// Tools spawned by the direct path, plus objdump and addr2line, which n64sym
-	// runs through $N64_INST/bin.
+	// Tools spawned by the direct path, plus objdump, which n64sym runs through
+	// $N64_INST/bin. (n64sym also runs addr2line; it stays unchecked, as before,
+	// because the test SDK facades do not provide it.)
 	Array<String> required_tools = {};
 	array_init(&required_tools, temporary_allocator());
 	array_add(&required_tools, STR_LIT("bin/ed64romconfig"));
 	array_add(&required_tools, STR_LIT("bin/mips64-elf-g++"));
-	array_add(&required_tools, STR_LIT("bin/mips64-elf-addr2line"));
 	array_add(&required_tools, STR_LIT("bin/mips64-elf-objdump"));
 	array_add(&required_tools, STR_LIT("bin/mips64-elf-strip"));
 	array_add(&required_tools, STR_LIT("bin/n64elfcompress"));
@@ -668,12 +668,15 @@ gb_internal char **n64_sanitized_environment(char const *extra_entry = nullptr) 
 }
 
 // Spawns argv[0] with the given environment and waits. discard_stdout mirrors
-// n64.mk's `>/dev/null` on mkdfs.
-gb_internal i32 n64_spawn_and_wait(char const *const *arguments, char **environment, bool discard_stdout) {
+// n64.mk's `>/dev/null` on mkdfs; working_dir (optional) is the child's cwd.
+gb_internal i32 n64_spawn_and_wait(char const *const *arguments, char **environment, bool discard_stdout, char const *working_dir = nullptr) {
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
 	if (discard_stdout) {
 		posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+	}
+	if (working_dir != nullptr) {
+		posix_spawn_file_actions_addchdir_np(&actions, working_dir);
 	}
 	pid_t pid = 0;
 	int status = posix_spawn(&pid, arguments[0], &actions, nullptr, cast(char *const *)arguments, environment);
@@ -802,9 +805,20 @@ struct N64Intermediates {
 	String stripped;
 	String dfs;
 	String rom_tmp;
+	String sdk_link; // only created when the SDK path is not shell-safe
 };
 
 typedef Array<char const *> N64Argv;
+
+gb_internal bool n64_is_shell_safe(String const &path) {
+	for (isize index = 0; index < path.len; index += 1) {
+		char c = cast(char)path[index];
+		if (!gb_char_is_alphanumeric(c) && strchr("/._-+,:@%=", c) == nullptr) {
+			return false;
+		}
+	}
+	return true;
+}
 
 gb_internal void n64_arg(N64Argv *argv, String const &value) {
 	array_add(argv, cast(char const *)alloc_cstring(permanent_allocator(), value));
@@ -833,16 +847,20 @@ gb_internal void n64_add_words(N64Argv *argv, String const &words) {
 	}
 }
 
-gb_internal i32 n64_run_tool(char const *label, N64Argv argv, char **environment, bool show_system_calls, bool discard_stdout = false) {
+gb_internal i32 n64_run_tool(char const *label, N64Argv argv, char **environment, bool show_system_calls,
+                             bool discard_stdout = false, char const *working_dir = nullptr) {
 	if (show_system_calls) {
 		gb_printf_err("[SYSTEM CALL] n64-%s\n", label);
+		if (working_dir != nullptr) {
+			gb_printf_err("(cd %s) ", working_dir);
+		}
 		for (char const *argument : argv) {
 			gb_printf_err("%s ", argument);
 		}
 		gb_printf_err("\n\n");
 	}
 	array_add(&argv, cast(char const *)nullptr);
-	i32 result = n64_spawn_and_wait(argv.data, environment, discard_stdout);
+	i32 result = n64_spawn_and_wait(argv.data, environment, discard_stdout, working_dir);
 	if (result != 0) {
 		gb_printf_err("N64 packaging step '%s' failed with exit code %d\n", label, result);
 	}
@@ -861,6 +879,7 @@ gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &out
 	out->stripped = n64_path_join(a, out->dir, STR_LIT("odin-n64.elf.stripped"));
 	out->dfs      = n64_path_join(a, out->dir, STR_LIT("odin-n64.dfs"));
 	out->rom_tmp  = n64_path_join(a, out->dir, STR_LIT("odin-n64.z64.tmp"));
+	out->sdk_link = n64_path_join(a, out->dir, STR_LIT("sdk"));
 	char const *dir_c = alloc_cstring(temporary_allocator(), out->dir);
 	if (mkdir(dir_c, 0755) != 0 && errno != EEXIST) {
 		gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(out->dir), strerror(errno));
@@ -928,10 +947,27 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	N64Argv argv = {};
 
 	// n64sym --all elf elf.sym
+	// n64sym popen()s "$N64_INST/bin/mips64-elf-objdump -t <elf>" unquoted
+	// (n64sym.cpp:330, :450), so it runs inside the intermediates directory on
+	// relative names, and N64_INST must be shell-safe: a relative `sdk` link
+	// stands in for an SDK path with spaces or shell metacharacters, as the
+	// make path's staging link always did.
+	char const *sym_env_entry = nullptr;
+	if (n64_is_shell_safe(s.sdk_root)) {
+		sym_env_entry = alloc_cstring(a, concatenate_strings(a, STR_LIT("N64_INST="), s.sdk_root));
+	} else {
+		n64_remove_file_if_present(files.sdk_link);
+		if (!n64_create_staging_link(s.sdk_root, files.sdk_link)) {
+			gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(files.sdk_link), LIT(s.sdk_root), strerror(errno));
+			return 1;
+		}
+		sym_env_entry = "N64_INST=sdk";
+	}
 	array_init(&argv, a);
 	n64_arg(&argv, n64_sdk_path(s, "bin/n64sym")); n64_arg(&argv, "--all");
-	n64_arg(&argv, files.elf); n64_arg(&argv, files.sym);
-	if ((result = n64_run_tool("sym", argv, env, show)) != 0) return result;
+	n64_arg(&argv, "odin-n64.elf"); n64_arg(&argv, "odin-n64.elf.sym");
+	result = n64_run_tool("sym", argv, n64_sanitized_environment(sym_env_entry), show, false, alloc_cstring(a, files.dir));
+	if (result != 0) return result;
 
 	// cp elf elf.stripped; strip -s elf.stripped
 	if (!gb_file_copy(alloc_cstring(a, files.elf), alloc_cstring(a, files.stripped), false)) {
@@ -1025,9 +1061,9 @@ gb_internal N64BuildResult n64_package_rom_direct(N64BuildRequest request) {
 	if (!n64_init_intermediates(&files, request.output_filename, request.output_name)) {
 		return {1, {}};
 	}
-	char const *sdk_entry = alloc_cstring(permanent_allocator(),
-		concatenate_strings(permanent_allocator(), STR_LIT("N64_INST="), request.settings.sdk_root));
-	char **env = n64_sanitized_environment(sdk_entry);
+	// Inherited N64_* variables are dropped so they cannot redirect the tools;
+	// only n64sym gets N64_INST (see n64_build_rom_from_elf).
+	char **env = n64_sanitized_environment();
 
 	i32 result = n64_link_elf(&request, files, env);
 	if (result == 0) {
@@ -1039,14 +1075,14 @@ gb_internal N64BuildResult n64_package_rom_direct(N64BuildRequest request) {
 		result = 1;
 	}
 	if (result != 0) {
-		gb_printf_err("N64 build failed; intermediates are in %.*s\n", LIT(files.dir));
+		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(files.dir));
 		return {result, files.dir};
 	}
 	if (request.keep_temp_files) {
 		gb_printf_err("Retained N64 build intermediates: %.*s\n", LIT(files.dir));
 		return {0, files.dir};
 	}
-	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs};
+	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs, files.sdk_link};
 	bool clean = true;
 	for (String const &path : generated) {
 		clean = n64_remove_file_if_present(path) && clean;

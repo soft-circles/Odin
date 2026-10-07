@@ -15,6 +15,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ODIN_ROOT = HERE.parents[1]
 ODIN = Path(os.environ.get("ODIN", ODIN_ROOT / "odin")).resolve()
+# B1 spike: the compiler spawns the packaging tools directly unless
+# ODIN_N64_USE_MAKE=1 selects the generated-Makefile path.
+USE_MAKE = os.environ.get("ODIN_N64_USE_MAKE") == "1"
 REQUIRED_SDK_FILES = (
 	"include/n64.mk",
 	"mips64-elf/lib/libdragon.a",
@@ -209,7 +212,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(str(environment), result.stdout)
-		self.assertIn("include/n64.mk", result.stdout)
+		self.assertIn("include/n64.mk" if USE_MAKE else "mips64-elf/lib/n64.ld", result.stdout)
 
 	def test_sdk_metadata_and_recipe_do_not_block_real_packaging_failures(self):
 		for index, metadata in enumerate((None, "not JSON", '{"hash":"local-development","dirty":true}')):
@@ -221,6 +224,9 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 					path.touch(mode=0o755 if relative in REQUIRED_SDK_TOOLS else 0o644)
 				(sdk / "include/n64.mk").write_text(
 					"odin-n64.z64:\n\t@echo custom-sdk-packaging-reached\n\t@exit 37\n")
+				# The direct path never reads n64.mk; its first packaging step is the link.
+				(sdk / "bin/mips64-elf-g++").write_text(
+					"#!/bin/sh\necho custom-sdk-packaging-reached\nexit 37\n")
 				if metadata is not None:
 					for name in ("libdragon.version", "toolchain.version"):
 						path = sdk / "mips64-elf/include" / name
@@ -448,17 +454,22 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(output.is_file(), result.stdout)
 		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
-		self.assertIn("[SYSTEM CALL] n64-make", result.stdout)
+		self.assertIn("[SYSTEM CALL] n64-make" if USE_MAKE else "[SYSTEM CALL] n64-link", result.stdout)
 
 		retention = re.search(r"Retained N64 build intermediates: (.+)", result.stdout)
 		self.assertIsNotNone(retention, result.stdout)
 		stage = Path(retention.group(1).strip())
 		self.assertEqual(stage.parent, output.parent)
-		self.assertTrue(stage.name.startswith(".odin-n64-build-"), stage)
+		if USE_MAKE:
+			self.assertTrue(stage.name.startswith(".odin-n64-build-"), stage)
+		else:
+			self.assertEqual(stage.name, "runtime result.n64-build")
 		retained = [path for path in stage.rglob("*") if path.is_file()]
 		retained_names = {path.name for path in retained}
-		self.assertTrue(any(name == "Makefile" or name.endswith(".mk") for name in retained_names), retained_names)
-		for suffix in (".o", ".elf", ".elf.sym", ".elf.stripped", ".map"):
+		if USE_MAKE:
+			self.assertTrue(any(name == "Makefile" or name.endswith(".mk") for name in retained_names), retained_names)
+		suffixes = (".o", ".elf", ".elf.sym", ".elf.stripped", ".map") if USE_MAKE else (".elf", ".elf.sym", ".elf.stripped", ".map")
+		for suffix in suffixes:
 			self.assertTrue(any(name.endswith(suffix) for name in retained_names), (suffix, retained_names))
 
 		headless_runner = os.environ.get("ARES_TEST")
@@ -526,6 +537,14 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		retention = re.search(r"Retained N64 build intermediates: (.+)", result.stdout)
 		self.assertIsNotNone(retention, result.stdout)
 		stage = Path(retention.group(1).strip())
+		if not USE_MAKE:
+			# Direct path: header flags were checked in the ROM above; the INI and
+			# assets are passed in place, so nothing is staged beside them.
+			self.assertEqual(stage.name, "configured output.n64-build")
+			self.assertEqual({path.name for path in stage.iterdir()},
+			                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "odin-n64.dfs"})
+			self.assertIn(asset_payload, (stage / "odin-n64.dfs").read_bytes())
+			return
 		makefile = (stage / "Makefile").read_text(encoding="utf-8")
 		self.assertIn('override N64_ROM_TITLE := "Odin DFS 0.2!"', makefile)
 		self.assertIn("override N64_ROM_REGION := J", makefile)
