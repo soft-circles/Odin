@@ -115,8 +115,10 @@ odin build . -target:n64 \
   -n64-inst:/absolute/path/to/n64_toolchain
 ```
 
-`-n64-inst` takes precedence over `N64_INST`. Odin does not search for,
-download, or update the SDK automatically.
+`-n64-inst` takes precedence over `N64_INST`. When neither is set, Odin uses
+the `n64` directory in its root (`ODIN_ROOT`, or the directory that holds the
+`odin` executable) if that directory exists, so an SDK installed or linked
+there needs no configuration. Odin does not download or update the SDK.
 
 ## Visible quickstart
 
@@ -167,8 +169,8 @@ they apply only to executable ROM output.
 
 | Option | Accepted value | Default when omitted |
 | --- | --- | --- |
-| `-n64-inst:<directory>` | Existing installed SDK root | `N64_INST`; no search fallback |
-| `-n64-title:<title>` | 1–20 ASCII letters, digits, spaces, `-`, `_`, `.`, or `!` | Output name, sanitized and truncated to 20 characters; `Odin N64` if empty |
+| `-n64-inst:<directory>` | Existing installed SDK root | `N64_INST`, then `<odin root>/n64` if that directory exists |
+| `-n64-title:<title>` | 1–20 ASCII letters, digits, spaces, `-`, `_`, `.`, or `!` | Main package directory name, sanitized and truncated to 20 characters; `Odin N64` if empty |
 | `-n64-region:<letter>` | One ASCII letter, case-insensitive | No fixed region code; libdragon's region-free header remains enabled |
 | `-n64-save-type:<type>` | One save type listed below | No declared save hardware (`none`) |
 | `-n64-rtc` | Flag with no value | RTC declaration disabled |
@@ -378,7 +380,7 @@ replace an existing output.
 
 | Diagnostic | What to do next |
 | --- | --- |
-| `N64 SDK is not configured` | Set `N64_INST` or pass `-n64-inst:<directory>`. |
+| `N64 SDK is not configured` | Set `N64_INST`, pass `-n64-inst:<directory>`, or install the SDK at `<odin root>/n64`. |
 | `missing required file` or `missing required executable tool` | Install the missing SDK component or select the complete SDK root. |
 | `GNU make is required at /usr/bin/make` | Install GNU make so that exact path exists, or use a supported host image. |
 | `-n64-assets requires ... mkdfs` | Install the libdragon host tools into the selected SDK. |

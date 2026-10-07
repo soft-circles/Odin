@@ -15,8 +15,10 @@ The build flows through these owned seams:
 2. [`src/build_settings.cpp`](src/build_settings.cpp) selects the big-endian
    MIPS/O64 `n64` target and disables TLS for its single-threaded runtime.
 3. [`src/linker.cpp`](src/linker.cpp) reads `N64_INST` only when an explicit
-   `-n64-inst` was not supplied, translates compiler state into a complete
-   `N64PrepareBuildRequest`, and calls `n64_prepare_build`.
+   `-n64-inst` was not supplied, then falls back to `<odin root>/n64` when that
+   directory exists. It defaults `-n64-title` to the main package's directory
+   name, translates compiler state into a complete `N64PrepareBuildRequest`,
+   and calls `n64_prepare_build`.
 4. Odin compiles the application and the target-tagged runtime files in
    [`base/runtime`](base/runtime). [`entry_n64.odin`](base/runtime/entry_n64.odin)
    installs the context and exposes the C-ABI `main` required by libdragon.

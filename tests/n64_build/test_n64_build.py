@@ -187,6 +187,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn("N64_INST", result.stdout)
 		self.assertIn("-n64-inst", result.stdout)
+		self.assertIn("<odin root>/n64", result.stdout)
 
 	def test_explicit_sdk_option_takes_precedence_over_environment(self):
 		explicit = self.root / "explicit sdk"
@@ -213,6 +214,20 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(str(environment), result.stdout)
 		self.assertIn("include/n64.mk" if USE_MAKE else "mips64-elf/lib/n64.ld", result.stdout)
+
+	def test_sdk_falls_back_to_n64_in_the_odin_root(self):
+		odin_root = self.root / "odin root"
+		odin_root.mkdir()
+		for name in ("base", "core", "shared", "vendor"):
+			(odin_root / name).symlink_to(ODIN_ROOT / name, target_is_directory=True)
+		bundled = odin_root / "n64"
+		bundled.mkdir()
+
+		result = run_build(self.app, extra_env={"ODIN_ROOT": str(odin_root)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertNotIn("N64 SDK is not configured", result.stdout)
+		self.assertIn(f"N64 SDK {bundled.resolve()} is missing required file", result.stdout)
 
 	def test_sdk_metadata_and_recipe_do_not_block_real_packaging_failures(self):
 		for index, metadata in enumerate((None, "not JSON", '{"hash":"local-development","dirty":true}')):
@@ -614,6 +629,16 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			if path.is_file() and path not in {app / "main.odin", expected}
 		}
 		self.assertFalse(leftovers, f"unexpected intermediates without -keep-temp-files: {leftovers}")
+
+	def test_title_defaults_to_the_package_directory_not_the_output_name(self):
+		app = create_app(self.root, "title default app")
+		output = self.root / "renamed output" / "rom.z64"
+		output.parent.mkdir()
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes()[0x20:0x34].rstrip(b" \0"), b"title default app")
 
 
 if __name__ == "__main__":
