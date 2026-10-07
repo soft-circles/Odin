@@ -114,7 +114,9 @@ Darwin)
 
 	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags) ${darwin_sysroot}"
 	if [ -f "$($LLVM_CONFIG --libdir)/libLLVM.dylib" ]; then
-		LLVM_LIBS="-lLLVM"
+		# A source-built libLLVM.dylib has the install name @rpath/libLLVM.dylib (Homebrew's
+		# is absolute), so record the LLVM libdir as an rpath or dyld cannot load it.
+		LLVM_LIBS="-lLLVM -Wl,-rpath,$($LLVM_CONFIG --libdir)"
 	else
 		LLVM_LIBS="$($LLVM_CONFIG --link-static --libs core passes all-targets --system-libs)"
 	fi
