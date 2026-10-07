@@ -2981,6 +2981,9 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		// add normalizations for the registers too
 		for (String const &reg : *clobber_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				continue; // not a tracked register (e.g. riscv/mips t0): keep its own name
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(clobber_registers_set, rname);
@@ -2989,6 +2992,9 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 
 		for (String const &reg : *preserve_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				continue; // not a tracked register (e.g. riscv/mips t0): keep its own name
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(preserve_registers_set, rname);
@@ -3396,6 +3402,8 @@ gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, De
 		check_asm_template(&g_asm_riscv, c, e, d);
 	} else if (build_context.metrics.arch == TargetArch_arm64) {
 		check_asm_template(&g_asm_arm64, c, e, d);
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		check_asm_template(&g_asm_mips, c, e, d);
 	} else {
 		error(e->token, "asm templates are not currently supported for this target");
 	}

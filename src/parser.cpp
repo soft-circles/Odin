@@ -3024,10 +3024,11 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 	if (build_context.build_mode == BuildMode_RSP_Assembly ||
 	    build_context.metrics.arch == TargetArch_amd64 ||
 	    build_context.metrics.arch == TargetArch_riscv64 ||
-	    build_context.metrics.arch == TargetArch_arm64) {
+	    build_context.metrics.arch == TargetArch_arm64 ||
+	    build_context.metrics.arch == TargetArch_mips32be) {
 	    	// okay
 	} else {
-		syntax_error(token, "asm templates are currently only supported on -target:*_amd64 or -target:*_riscv64 or -target:*_arm64");
+		syntax_error(token, "asm templates are currently only supported on -target:*_amd64 or -target:*_riscv64 or -target:*_arm64 or -target:*_mips32be");
 	}
 
 	Ast *asm_template = alloc_ast_node(f, Ast_AsmTemplate);

@@ -233,7 +233,7 @@ struct lbAsmGenerate {
 				}
 			}
 			if (e.pin.len != 0) {
-				clobber("{", e.pin, "}");
+				this->constraint_reg("{", e.pin, "}");
 			} else {
 				raw(this->class_letter(e.reg_class));
 			}
@@ -278,7 +278,7 @@ struct lbAsmGenerate {
 				case AsmTemplateEntityDecl_Register:
 				case AsmTemplateEntityDecl_Memory:
 					if (e.pin.len != 0) {
-						clobber("{", e.pin, "}");
+						this->constraint_reg("{", e.pin, "}");
 					} else {
 						raw(this->class_letter(e.reg_class));
 					}
@@ -425,7 +425,7 @@ struct lbAsmGenerate {
 			switch (e.kind) {
 			case AsmTemplateEntityDecl_Register: // pinned -> real clobber
 				GB_ASSERT(e.pin.len != 0);
-				clobber("~{", e.pin, "}");
+				this->constraint_reg("~{", e.pin, "}");
 				string_set_update(&emitted_reg_clobbers, e.pin);
 				break;
 			case AsmTemplateEntityDecl_Memory:   // general memory clobber
@@ -444,7 +444,7 @@ struct lbAsmGenerate {
 				continue;
 			}
 			sep();
-			clobber("~{", reg, "}");
+			this->constraint_reg("~{", reg, "}");
 			string_set_update(&emitted_reg_clobbers, reg);
 		}
 
@@ -456,6 +456,7 @@ struct lbAsmGenerate {
 			sep();
 			raw("~{memory}");
 		}
+		this->emit_target_clobbers();
 
 		// Build the callee type
 		// NOTE(bill): Even though the user has given a signature, this might not actually match what
@@ -568,6 +569,17 @@ struct lbAsmGenerate {
 	// #clobber flags -> target constraint fragment. Default: nothing (RISC-V has no
 	// architectural condition-code register). amd64 overrides with the x86 triple.
 	virtual void emit_flags_clobber() {
+		// empty
+	}
+
+	// A register named in a constraint ('{reg}' pin or '~{reg}' clobber). The default
+	// spells it as written; targets whose LLVM backend wants another spelling override.
+	virtual void constraint_reg(char const *start, String reg, char const *end) {
+		clobber(start, reg, end);
+	}
+
+	// Clobbers every template on this target carries. Default: none.
+	virtual void emit_target_clobbers() {
 		// empty
 	}
 
@@ -1778,10 +1790,188 @@ struct lbAsmGenerate_arm64 : lbAsmGenerate {
 	}
 };
 
+// MIPS III (VR4300) under the o64 ABI. Same shape as riscv64: dst-first operand
+// order, `offset(base)` memory operands, no flags register. Three MIPS-specific
+// details:
+//   * `$` starts an operand reference in an LLVM inline-asm string, so literal
+//     registers are written `$$N`.
+//   * LLVM's Mips backend only parses numeric register constraints ('{$4}'); a
+//     named one ('{$a0}') trips an assertion. Pins and clobbers use numbers.
+//   * LLVM wraps every inline-asm block in `.set push; .set at; .set macro;
+//     .set reorder` but still allocates $at to operands. Every template clobbers
+//     $at so an assembler macro expansion can never overwrite an operand. The
+//     same `.set reorder` lets the assembler fill branch delay slots.
+struct lbAsmGenerate_mips : lbAsmGenerate {
+	bool reverse_operand_order() override {
+		return false;
+	}
+
+	u32 default_operand_write_flags() override {
+		return WriteOperandFlag_NONE;
+	}
+
+	char const *class_letter(AsmRegClass rc) override {
+		switch (rc) {
+		case AsmRegClass_Integer: return "r";
+		case AsmRegClass_Float:   return "f";
+		default:
+			GB_PANIC("asm: unknown reg class for mips");
+			return "r";
+		}
+	}
+
+	bool is_indirect_control_transfer(AstAsmInstruction *instr) override {
+		return false;
+	}
+
+	// Register name -> LLVM constraint spelling ('$N', or hi/lo as is).
+	void constraint_reg(char const *start, String reg, char const *end) override {
+		Asm_mips::Register r = g_asm_mips.register_lookup(reg);
+		if (r == Asm_mips::REG_INVALID) {
+			clobber(start, reg, end); // hi, lo
+			return;
+		}
+		GB_ASSERT(g_asm_mips.reg_class(g_asm_mips.register_codes[r]) == Asm_mips::REG_CLASS_GPR);
+		constraints = gb_string_appendc(constraints, start);
+		constraints = gb_string_append_fmt(constraints, "$%d", cast(int)g_asm_mips.reg_number(r));
+		constraints = gb_string_appendc(constraints, end);
+	}
+
+	void emit_target_clobbers() override {
+		sep();
+		raw("~{$1}");
+	}
+
+	void write_constant_operand(Ast *op, u32 flags) override {
+		GB_ASSERT(op->tav.mode == Addressing_Constant);
+		op->tav.value = exact_value_to_integer(op->tav.value);
+		ExactValue ev = op->tav.value;
+		switch (ev.kind) {
+		case ExactValue_Integer: {
+			i64 val = exact_value_to_i64(ev);
+			if (flags & WriteOperandFlag_Negate) {
+				val = -val;
+			}
+			this->write_i64(val);
+			break;
+		}
+		case ExactValue_Float:
+			error(op, "Floating-point literals that cannot be represented as an integer are not supported within asm operands");
+			break;
+		default:
+			GB_PANIC("Unsupported asm immediate literal %s", expr_to_string(op));
+			break;
+		}
+	}
+
+	void write_operand(Slice<i32> const &op_number, Ast *op, u32 flags) override {
+		if (op->tav.mode == Addressing_Constant) {
+			this->write_constant_operand(op, flags);
+			return;
+		}
+		if (flags & WriteOperandFlag_Negate) {
+			flags &= ~WriteOperandFlag_Negate;
+			write_cstr("-");
+		}
+		switch (op->kind) {
+		case_ast_node(i, Ident, op);
+			Entity *e = entity_of_node(op);
+			auto *ed = entity_op(e);
+			i32 idx = (ed->view_of >= 0) ? op_number[ed->view_of] : op_number[ed->total_index];
+			GB_ASSERT(idx >= 0);
+			asm_string = gb_string_append_fmt(asm_string, "$%d", idx);
+		case_end;
+		case_ast_node(mem_op, AsmMemoryOperand, op);
+			this->write_memory_operand(op_number, mem_op, flags);
+		case_end;
+		case_ast_node(label, AsmLabelDecl, op);
+			this->write_label(&label->name->Ident);
+		case_end;
+		case_ast_node(reg, AsmRegister, op);
+			Asm_mips::Register r = g_asm_mips.register_lookup(reg->name.string);
+			GB_ASSERT(r != Asm_mips::REG_INVALID);
+			asm_string = gb_string_append_fmt(asm_string, "$$%d", cast(int)g_asm_mips.reg_number(r));
+		case_end;
+		default:
+			GB_PANIC("TODO: mips write_operand for '%s'", expr_to_string(op));
+			break;
+		}
+	}
+
+	// `offset(base)`: signed 16-bit displacement + one base register.
+	void write_memory_operand(Slice<i32> const &op_number, AstAsmMemoryOperand *mem_op, u32 flags) override {
+		GB_ASSERT_MSG(mem_op->segment_override == nullptr, "asm: MIPS has no segment overrides");
+		auto const &cl = mem_op->classify;
+		GB_ASSERT_MSG(cl.index == nullptr && cl.scale == nullptr, "asm: MIPS memory operands have no index/scale");
+		GB_ASSERT_MSG(cl.label == nullptr, "asm: MIPS memory operands cannot be labels");
+		write_i64(cl.has_disp_const ? cl.disp_total : 0);
+		write_cstr("(");
+		if (cl.base != nullptr) {
+			this->write_operand(op_number, cl.base, flags);
+		} else {
+			write_cstr("$$0");
+		}
+		write_cstr(")");
+	}
+
+	String flag_output_cc_suffix(String const &pin_flag) override {
+		return {};
+	}
+
+	// FPU mnemonics are spelled with '.' (add.s, cvt.d.w); Odin identifiers use '_'.
+	void write_instruction_mnemonic(AstAsmInstruction *instr) override {
+		String name = instr->name->Ident.token.string;
+		for (isize i = 0; i < name.len; i++) {
+			char c = cast(char)name.text[i];
+			write_char(c == '_' ? '.' : c);
+		}
+	}
+
+	// Numeric local labels (`N:` / `Nf` / `Nb`), as on arm64: `$` would collide with
+	// operand references and `.L` names are not local inside an inline-asm string.
+	void prescan_label_positions() override {
+		map_init(&label_def_pos);
+		i32 pos = 0;
+		for (Ast *node : tmpl_node->instructions) {
+			if (node->kind == Ast_AsmLabelDecl) {
+				Entity *le = node->AsmLabelDecl.name->Ident.entity;
+				if (le != nullptr) {
+					map_set(&label_def_pos, le, pos);
+				}
+			}
+			pos += 1;
+		}
+	}
+	i32 mips_label_number(AstIdent *label_ident) {
+		Entity *le = label_ident->entity;
+		GB_ASSERT(le != nullptr);
+		if (i32 *n = map_get(&label_numbers, le)) {
+			return *n;
+		}
+		i32 n = ++next_label_number;
+		map_set(&label_numbers, le, n);
+		return n;
+	}
+	void write_label_def(AstIdent *label_ident) override {
+		asm_string = gb_string_append_fmt(asm_string, "%d:", this->mips_label_number(label_ident));
+	}
+	void write_label_ref(AstIdent *label_ident) override {
+		Entity *le = label_ident->entity;
+		i32 n = this->mips_label_number(label_ident);
+		i32 def_pos = -1;
+		if (i32 *p = map_get(&label_def_pos, le)) {
+			def_pos = *p;
+		}
+		bool forward = def_pos > this->curr_instr_pos;
+		asm_string = gb_string_append_fmt(asm_string, "%d%c", n, forward ? 'f' : 'b');
+	}
+};
+
 gb_internal lbValue lb_emit_asm_template_call(lbProcedure *p, Entity *entity, Array<lbValue> const &args) {
 	lbAsmGenerate_amd64   generator_amd64   = {};
 	lbAsmGenerate_arm64   generator_arm64 = {};
 	lbAsmGenerate_riscv64 generator_riscv64 = {};
+	lbAsmGenerate_mips    generator_mips    = {};
 	lbAsmGenerate *generator = nullptr;
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		generator = &generator_amd64;
@@ -1789,6 +1979,8 @@ gb_internal lbValue lb_emit_asm_template_call(lbProcedure *p, Entity *entity, Ar
 		generator = &generator_arm64;
 	} else if (build_context.metrics.arch == TargetArch_riscv64) {
 		generator = &generator_riscv64;
+	} else if (build_context.metrics.arch == TargetArch_mips32be) {
+		generator = &generator_mips;
 	} else {
 		compiler_error("Architecture does not support asm templates, yet");
 	}

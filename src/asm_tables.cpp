@@ -79,9 +79,11 @@ struct AsmOperandConstraint {
 #include "asm_tables_amd64.cpp"
 #include "asm_tables_riscv.cpp"
 #include "asm_tables_arm64.cpp"
+#include "asm_tables_mips.cpp"
 
 void init_asm_tables(i64 word_size_bytes) {
 	g_asm_amd64.init(word_size_bytes*8);
 	g_asm_riscv.init(word_size_bytes*8);
 	g_asm_arm64.init(word_size_bytes*8);
+	g_asm_mips.init(word_size_bytes*8);
 }

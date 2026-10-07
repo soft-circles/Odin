@@ -31,6 +31,7 @@ def quick_stages() -> list[Stage]:
         Stage("N64 public options and failure paths", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("SDK validator unit tests", (PYTHON, "tests/o64_abi/test_validate_sdk.py")),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
+        Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("core:mem target check", ("./odin", "check", "tests/n64_core_mem", "-target:n64", "-no-entry-point", "-vet", "-warnings-as-errors")),
     ]
