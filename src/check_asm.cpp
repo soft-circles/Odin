@@ -2981,6 +2981,12 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 		// add normalizations for the registers too
 		for (String const &reg : *clobber_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				// A register outside the table's tracked set (e.g. riscv64 %t0) has no
+				// canonical alias to add. clobber_reg_bit_name(0) is the placeholder "<reg>",
+				// which would otherwise reach the LLVM constraint string as ~{<reg>}.
+				continue;
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(clobber_registers_set, rname);
@@ -2989,6 +2995,9 @@ gb_internal void check_asm_template(AsmCtx *asm_ctx, CheckerContext *ctx, Entity
 
 		for (String const &reg : *preserve_registers_set) {
 			u16 bit = asm_ctx->clobber_bit_for_reg_name(reg);
+			if (bit == 0) {
+				continue; // untracked register: keep its own name, as above
+			}
 			String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
 			if (rname != reg) {
 				string_set_update(preserve_registers_set, rname);
