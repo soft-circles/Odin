@@ -240,6 +240,34 @@ verify_general_allocator :: proc() -> bool {
 		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_FREE\n")
 		return false
 	}
+
+	// Growing from a size that is not a multiple of the word size zeroes a
+	// tail that starts at an unaligned address; the VR4300 traps on unaligned
+	// word loads, so the zeroing must not use them there.
+	odd, odd_err := alloc(3, 1)
+	if odd_err != .None || odd == nil || !bytes_are_zero(odd, 3) {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_ODD_ALLOC\n")
+		if odd != nil {
+			_ = runtime.mem_free(odd)
+		}
+		return false
+	}
+	fill_bytes(odd, 3, 0x30)
+	odd_grown, odd_grow_err := resize(odd, 3, 101, 1)
+	if odd_grow_err != .None || odd_grown == nil ||
+	   !bytes_have_pattern(odd_grown, 3, 0x30) || !bytes_are_zero(rawptr(uintptr(odd_grown)+3), 98) {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_RESIZE_GROW_UNALIGNED\n")
+		if odd_grown != nil {
+			_ = runtime.mem_free(odd_grown)
+		} else {
+			_ = runtime.mem_free(odd)
+		}
+		return false
+	}
+	if runtime.mem_free(odd_grown) != .None {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:GENERAL_FREE\n")
+		return false
+	}
 	debugf(GENERAL_SENTINEL)
 	return true
 }

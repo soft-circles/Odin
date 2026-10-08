@@ -1468,3 +1468,27 @@ test_soa_array_append_inject_remove :: proc(t: ^testing.T) {
 		}
 	})
 }
+
+// conditional_mem_zero must clear exactly the requested range from any start
+// address, including ones that are not word aligned (e.g. the tail of a
+// resized []byte); the word loop must not start before an aligned address.
+@(test)
+test_conditional_mem_zero_unaligned :: proc(t: ^testing.T) {
+	GUARD :: 0xa5
+	buffer: [64]u8
+	for offset in 0..<16 {
+		for length in 0..=40 {
+			for &b in buffer {
+				b = GUARD
+			}
+			runtime.conditional_mem_zero(&buffer[8 + offset], length)
+			for b, i in buffer {
+				in_range := i >= 8 + offset && i < 8 + offset + length
+				expected: u8 = 0 if in_range else GUARD
+				if !testing.expectf(t, b == expected, "offset %d, length %d: byte %d is %x, want %x", offset, length, i, b, expected) {
+					return
+				}
+			}
+		}
+	}
+}
