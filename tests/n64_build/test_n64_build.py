@@ -16,7 +16,6 @@ HERE = Path(__file__).resolve().parent
 ODIN_ROOT = HERE.parents[1]
 ODIN = Path(os.environ.get("ODIN", ODIN_ROOT / "odin")).resolve()
 REQUIRED_SDK_FILES = (
-	"include/n64.mk",
 	"mips64-elf/lib/libdragon.a",
 	"mips64-elf/lib/libdragonsys.a",
 	"mips64-elf/lib/n64.ld",
@@ -24,9 +23,7 @@ REQUIRED_SDK_FILES = (
 REQUIRED_SDK_TOOLS = (
 	"bin/ed64romconfig",
 	"bin/mips64-elf-g++",
-	"bin/mips64-elf-gcc",
 	"bin/mips64-elf-objdump",
-	"bin/mips64-elf-size",
 	"bin/mips64-elf-strip",
 	"bin/n64elfcompress",
 	"bin/n64sym",
@@ -184,6 +181,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn("N64_INST", result.stdout)
 		self.assertIn("-n64-inst", result.stdout)
+		self.assertIn("<odin root>/n64", result.stdout)
 
 	def test_explicit_sdk_option_takes_precedence_over_environment(self):
 		explicit = self.root / "explicit sdk"
@@ -209,9 +207,23 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(str(environment), result.stdout)
-		self.assertIn("include/n64.mk", result.stdout)
+		self.assertIn("mips64-elf/lib/n64.ld", result.stdout)
 
-	def test_sdk_metadata_and_recipe_do_not_block_real_packaging_failures(self):
+	def test_sdk_falls_back_to_n64_in_the_odin_root(self):
+		odin_root = self.root / "odin root"
+		odin_root.mkdir()
+		for name in ("base", "core", "shared", "vendor"):
+			(odin_root / name).symlink_to(ODIN_ROOT / name, target_is_directory=True)
+		bundled = odin_root / "n64"
+		bundled.mkdir()
+
+		result = run_build(self.app, extra_env={"ODIN_ROOT": str(odin_root)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertNotIn("N64 SDK is not configured", result.stdout)
+		self.assertIn(f"N64 SDK {bundled.resolve()} is missing required file", result.stdout)
+
+	def test_sdk_metadata_does_not_block_real_packaging_failures(self):
 		for index, metadata in enumerate((None, "not JSON", '{"hash":"local-development","dirty":true}')):
 			with self.subTest(metadata=metadata):
 				sdk = self.root / f"custom sdk {index}"
@@ -219,8 +231,9 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 					path = sdk / relative
 					path.parent.mkdir(parents=True, exist_ok=True)
 					path.touch(mode=0o755 if relative in REQUIRED_SDK_TOOLS else 0o644)
-				(sdk / "include/n64.mk").write_text(
-					"odin-n64.z64:\n\t@echo custom-sdk-packaging-reached\n\t@exit 37\n")
+				# The link is the first packaging step.
+				(sdk / "bin/mips64-elf-g++").write_text(
+					"#!/bin/sh\necho custom-sdk-packaging-reached\nexit 37\n")
 				if metadata is not None:
 					for name in ("libdragon.version", "toolchain.version"):
 						path = sdk / "mips64-elf/include" / name
@@ -301,7 +314,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		if os.environ.get("N64_VALIDATION_MODE") == "quick":
 			raise unittest.SkipTest("end-to-end SDK builds are disabled in quick validation")
 		cls.sdk = configured_sdk()
-		if cls.sdk is None or not (cls.sdk / "include/n64.mk").is_file():
+		if cls.sdk is None or not (cls.sdk / "mips64-elf/lib/n64.ld").is_file():
 			raise unittest.SkipTest("set N64_INST to run N64 end-to-end build tests")
 
 	def setUp(self):
@@ -368,8 +381,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			f"-out:{output}",
 			extra_env={
 				"N64_GCCPREFIX": str(self.root / "unvalidated toolchain"),
-				"MAKEFLAGS": "-i",
-				"CCACHE": str(self.root / "unvalidated compiler wrapper"),
+				"N64_INST": str(self.root / "unvalidated sdk"),
 			},
 		)
 
@@ -395,7 +407,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(output.is_file(), result.stdout)
 
-	def test_inherited_make_ignore_errors_cannot_hide_packaging_failure(self):
+	def test_failing_packaging_tool_fails_the_build_and_keeps_intermediates(self):
 		sdk = make_sdk_facade(self.root, self.sdk)
 		tool = sdk / "bin/n64sym"
 		tool.unlink()
@@ -404,15 +416,11 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		app = create_app(self.root, "failing packaging app")
 		output = app / "must-not-exist.z64"
 
-		result = run_build(
-			app,
-			f"-n64-inst:{sdk}",
-			f"-out:{output}",
-			extra_env={"MAKEFLAGS": "-i"},
-		)
+		result = run_build(app, f"-n64-inst:{sdk}", f"-out:{output}")
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertFalse(output.exists(), result.stdout)
+		self.assertIn("N64 packaging step 'sym' failed with exit code 19", result.stdout)
 		self.assertIn("intermediates were retained", result.stdout)
 
 	def test_incompatible_generic_link_options_are_rejected(self):
@@ -428,7 +436,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 				self.assertNotEqual(result.returncode, 0, result.stdout)
 				self.assertIn(diagnostic, result.stdout)
 
-	def test_runtime_build_handles_spaced_paths_and_retains_the_packaging_graph(self):
+	def test_runtime_build_handles_spaced_paths_and_retains_the_intermediates(self):
 		app = self.root / "odin runtime source"
 		app.mkdir()
 		shutil.copy2(ODIN_ROOT / "tests/n64_runtime/runtime.odin", app / "runtime.odin")
@@ -448,18 +456,15 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(output.is_file(), result.stdout)
 		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
-		self.assertIn("[SYSTEM CALL] n64-make", result.stdout)
+		self.assertIn("[SYSTEM CALL] n64-link", result.stdout)
 
 		retention = re.search(r"Retained N64 build intermediates: (.+)", result.stdout)
 		self.assertIsNotNone(retention, result.stdout)
-		stage = Path(retention.group(1).strip())
-		self.assertEqual(stage.parent, output.parent)
-		self.assertTrue(stage.name.startswith(".odin-n64-build-"), stage)
-		retained = [path for path in stage.rglob("*") if path.is_file()]
-		retained_names = {path.name for path in retained}
-		self.assertTrue(any(name == "Makefile" or name.endswith(".mk") for name in retained_names), retained_names)
-		for suffix in (".o", ".elf", ".elf.sym", ".elf.stripped", ".map"):
-			self.assertTrue(any(name.endswith(suffix) for name in retained_names), (suffix, retained_names))
+		intermediates = Path(retention.group(1).strip())
+		self.assertEqual(intermediates.parent, output.parent)
+		self.assertEqual(intermediates.name, "runtime result.n64-build")
+		self.assertEqual({path.name for path in intermediates.iterdir()},
+		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped"})
 
 		headless_runner = os.environ.get("ARES_TEST")
 		if headless_runner:
@@ -474,7 +479,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			self.assertIn("runtime: ordered startup", headless.stdout)
 			self.assertIn("ODIN_N64_RUNTIME_CLEANUP:v2", headless.stdout)
 
-	def test_metadata_and_raw_assets_follow_the_generated_n64_make_graph(self):
+	def test_metadata_and_raw_assets_are_packaged_with_header_options(self):
 		app = create_app(self.root, "metadata and dfs app")
 		assets = app / "raw assets with spaces"
 		assets.mkdir()
@@ -485,9 +490,8 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		companion_directory = metadata_source / "localized copy"
 		companion_directory.mkdir()
 		companion = companion_directory / "description with spaces.txt"
-		companion_payload = "Relative metadata companion survived staging."
+		companion_payload = "Relative metadata companion was packaged."
 		companion.write_text(companion_payload, encoding="utf-8")
-		(metadata_source / "unrelated sibling.bin").write_bytes(b"must not be staged")
 		metadata = metadata_source / "extended metadata with spaces.ini"
 		metadata.write_text(
 			"[meta]\n"
@@ -525,28 +529,62 @@ class N64EndToEndBuildTests(unittest.TestCase):
 
 		retention = re.search(r"Retained N64 build intermediates: (.+)", result.stdout)
 		self.assertIsNotNone(retention, result.stdout)
-		stage = Path(retention.group(1).strip())
-		makefile = (stage / "Makefile").read_text(encoding="utf-8")
-		self.assertIn('override N64_ROM_TITLE := "Odin DFS 0.2!"', makefile)
-		self.assertIn("override N64_ROM_REGION := J", makefile)
-		self.assertIn("override N64_ROM_SAVETYPE := sram256k", makefile)
-		self.assertIn("override N64_ROM_RTC := 1", makefile)
-		self.assertIn("override N64_ROM_CONTROLLER1 := n64,pak=rumble", makefile)
-		self.assertIn("override N64_ROM_CONTROLLER4 := gamecube", makefile)
-		self.assertIn("override N64_ROM_METADATA := metadata/odin-input-0000.ini", makefile)
-		self.assertIn("$(filter-out --padding 0,$(N64_TOOLFLAGS)) --padding 0B", makefile)
-		self.assertIn("override N64_MKDFS_ROOT := assets", makefile)
-		self.assertIn("$(ROM): $(BUILD_DIR)/odin-n64.dfs", makefile)
-		self.assertEqual((stage / "metadata/odin-input-0000.ini").read_bytes(), metadata.read_bytes())
-		self.assertEqual((stage / "metadata/localized copy/description with spaces.txt").resolve(), companion.resolve())
-		self.assertEqual(
-			{path.name for path in (stage / "metadata").iterdir()},
-			{"odin-input-0000.ini", "localized copy"},
+		intermediates = Path(retention.group(1).strip())
+		# The INI and assets are passed in place, so only the tool outputs are
+		# left beside the ROM.
+		self.assertEqual(intermediates.name, "configured output.n64-build")
+		self.assertEqual({path.name for path in intermediates.iterdir()},
+		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "odin-n64.dfs"})
+		self.assertIn(asset_payload, (intermediates / "odin-n64.dfs").read_bytes())
+
+	def test_sdk_directory_with_spaces_reaches_n64sym_through_a_relative_link(self):
+		# A symlinked alias is resolved to the real SDK path; a real directory
+		# whose own name has a space is not, and n64sym may run objdump through
+		# a shell. Link each top-level SDK entry so the root itself is real.
+		sdk = self.root / "real sdk with spaces"
+		sdk.mkdir()
+		for entry in self.sdk.iterdir():
+			(sdk / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+		app = create_app(self.root, "spaced sdk app")
+		# Same file name in both builds: the output stem names the LLVM module.
+		output = self.root / "spaced sdk output" / "rom.z64"
+		reference = self.root / "reference output" / "rom.z64"
+		output.parent.mkdir()
+		reference.parent.mkdir()
+
+		result = run_build(app, f"-n64-inst:{sdk}", f"-out:{output}", "-keep-temp-files")
+		baseline = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{reference}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(baseline.returncode, 0, baseline.stdout)
+		link = output.parent / "rom.n64-build" / "sdk"
+		self.assertTrue(link.is_symlink(), result.stdout)
+		self.assertEqual(link.resolve(), sdk.resolve())
+		self.assertEqual(output.read_bytes(), reference.read_bytes())
+
+	def test_extra_linker_flags_reach_the_sdk_link(self):
+		app = create_app(self.root, "extra linker flags app")
+		output = app / "flags.z64"
+
+		result = run_build(
+			app,
+			f"-n64-inst:{self.sdk}",
+			f"-out:{output}",
+			"-extra-linker-flags:-Wl,--defsym=odin_n64_extra_flag_marker=0x1234  -Wl,--wrap=odin_n64_unused_symbol",
+			"-keep-temp-files",
+			"-show-system-calls",
 		)
-		self.assertEqual((stage / "assets").resolve(), assets.resolve())
-		dfs = stage / "build/odin-n64.dfs"
-		self.assertTrue(dfs.is_file(), result.stdout)
-		self.assertIn(asset_payload, dfs.read_bytes())
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertIn("-Wl,--defsym=odin_n64_extra_flag_marker=0x1234 -Wl,--wrap=odin_n64_unused_symbol", result.stdout)
+		symbols = subprocess.run(
+			[str(self.sdk / "bin/mips64-elf-nm"), str(app / "flags.n64-build" / "odin-n64.elf")],
+			text=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			check=True,
+		).stdout
+		self.assertRegex(symbols, r"00001234 A odin_n64_extra_flag_marker")
 
 	def test_runtime_builds_from_a_clean_odin_only_directory(self):
 		app = self.root / "clean runtime sample"
@@ -589,12 +627,21 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertTrue(expected.is_file(), result.stdout)
 		self.assertFalse((app / "default output app.bin").exists())
-		self.assertNotIn("[SYSTEM CALL] n64-make", result.stdout)
 		leftovers = {
 			path.name for path in app.rglob("*")
 			if path.is_file() and path not in {app / "main.odin", expected}
 		}
 		self.assertFalse(leftovers, f"unexpected intermediates without -keep-temp-files: {leftovers}")
+
+	def test_title_defaults_to_the_package_directory_not_the_output_name(self):
+		app = create_app(self.root, "title default app")
+		output = self.root / "renamed output" / "rom.z64"
+		output.parent.mkdir()
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes()[0x20:0x34].rstrip(b" \0"), b"title default app")
 
 
 if __name__ == "__main__":

@@ -15,22 +15,23 @@ The build flows through these owned seams:
 2. [`src/build_settings.cpp`](src/build_settings.cpp) selects the big-endian
    MIPS/O64 `n64` target and disables TLS for its single-threaded runtime.
 3. [`src/linker.cpp`](src/linker.cpp) reads `N64_INST` only when an explicit
-   `-n64-inst` was not supplied, translates compiler state into a complete
-   `N64PrepareBuildRequest`, and calls `n64_prepare_build`.
+   `-n64-inst` was not supplied, then falls back to `<odin root>/n64` when that
+   directory exists. It defaults `-n64-title` to the main package's directory
+   name, translates compiler state into a complete `N64PrepareBuildRequest`,
+   and calls `n64_prepare_build`.
 4. Odin compiles the application and the target-tagged runtime files in
    [`base/runtime`](base/runtime). [`entry_n64.odin`](base/runtime/entry_n64.odin)
    installs the context and exposes the C-ABI `main` required by libdragon.
 5. The linker adapter flattens compiled object paths and declared foreign
    libraries into an `N64BuildRequest` without exposing linker entities.
-6. [`src/n64_build.cpp`](src/n64_build.cpp) validates the SDK, stages inputs,
-   writes the private Makefile, starts a sanitized `/usr/bin/make` process,
-   retains failures, and atomically places the completed ROM.
-7. The selected libdragon `n64.mk` owns final static linking, symbols, stripping,
-   compression, DragonFS, header configuration, and extended metadata.
+6. [`src/n64_build.cpp`](src/n64_build.cpp) validates the SDK and spawns the
+   SDK's tools in the order libdragon's `n64.mk` would: static link, symbols,
+   stripping, compression, DragonFS, header configuration, and extended
+   metadata. It retains failures and atomically places the completed ROM.
 
 Target selection and option parsing stay in their existing compiler modules.
-N64 SDK availability checks, staging, generated graph details, subprocess policy,
-cleanup, and ROM placement belong in `src/n64_build.cpp`. General linker code
+N64 SDK availability checks, packaging steps, subprocess policy, cleanup, and
+ROM placement belong in `src/n64_build.cpp`. General linker code
 should contain only translation adapters. Runtime startup and allocation belong
 in target-tagged `base/runtime/*_n64.odin` files. Bound C declarations and their
 ABI assertions belong in the independent Odin64 repository's `libdragon/` and
@@ -74,9 +75,9 @@ n64_package_rom(N64BuildRequest) -> N64BuildResult
 `N64PrepareBuildRequest` contains already-parsed command, mode, relocation,
 linker, and ROM settings. `N64BuildRequest` contains those settings plus final
 output paths, compiled object paths, and flattened foreign libraries. The
-module must not read `build_context`, `LinkerData`, or `Entity`. Keep staging
-names, metadata discovery, Makefile syntax, process details, and cleanup order
-private to it.
+module must not read `build_context`, `LinkerData`, or `Entity`. Keep
+intermediate names, tool arguments, process details, and cleanup order private
+to it.
 
 The architecture regression in
 [`tests/n64_build/test_n64_module.py`](tests/n64_build/test_n64_module.py)
@@ -98,67 +99,64 @@ The compiler does not inspect revision, clean-state, recipe-hash or toolchain
 version metadata. SDK compatibility is exercised by compilation, packaging
 and the ABI/runtime tests.
 
-The packaging process removes inherited `PATH`, `SHELL`, make recursion and
-override variables, `CCACHE`/`CCACHE_*`, `V`, `D`, and every `N64_*` variable.
-It supplies a fixed system `PATH` and shell. The generated Makefile overrides
-the SDK, target, tool prefix, output paths, header inputs, cache, and verbosity.
-The process uses `posix_spawn` with a fixed argument vector rather than a shell
-command. These controls prevent an inherited make flag, compiler wrapper, or
-toolchain prefix from escaping the SDK that was validated.
+Each packaging tool is started with `posix_spawn`, an absolute path inside the
+validated SDK, and a fixed argument vector rather than a shell command. Its
+environment drops inherited `PATH`, `SHELL`, and every `N64_*` variable, and
+supplies a fixed system `PATH` and shell. Only `n64sym` receives `N64_INST`,
+set to the validated SDK, because it finds `objdump` and `addr2line` through
+it. These controls prevent an inherited toolchain prefix or SDK root from
+escaping the SDK that was validated.
 
 Preserve these guarantees when adding a tool or setting. A new environment
 input needs an explicit trust decision and a regression proving it cannot
 override a validated executable or hide a failed stage.
 
-## Generated stage and cleanup guarantees
+## Intermediates and cleanup guarantees
 
-Every executable build creates a mode-0700 directory beside the requested ROM:
+Every executable build uses one directory beside the requested ROM, named after
+it, and reuses it on the next build of the same output:
 
 ```text
-.odin-n64-build-XXXXXX/
-├── Makefile
-├── sdk -> <validated SDK>
-├── assets -> <requested raw directory>       # only with -n64-assets
-├── metadata/                                 # only with -n64-metadata
-│   ├── odin-input-0000.ini
-│   └── <referenced companion roots> -> ...
-├── odin-0000.o ...
-├── foreign-0000.o/.a ...
-├── odin-n64.z64                              # before final placement
-└── build/
-    ├── odin-n64.elf
-    ├── odin-n64.map
-    ├── odin-n64.elf.sym
-    ├── odin-n64.elf.stripped
-    └── odin-n64.dfs                          # when assets are present
+<rom>.n64-build/
+├── odin-n64.elf
+├── odin-n64.map
+├── odin-n64.elf.sym
+├── odin-n64.elf.stripped      # stripped, then compressed in place
+├── odin-n64.dfs               # only with -n64-assets
+├── odin-n64.z64.tmp           # before final placement
+└── sdk -> <validated SDK>     # only when the SDK path is not shell-safe
 ```
 
-Compiler object paths are sorted before staging because their original hash-map
-order is not stable between processes. Foreign `.o` and `.a` inputs keep their
-declared order. Do not weaken deterministic naming or input ordering without
-comparing ELF, symbol, and ROM hashes.
+`n64_package_rom` runs the steps of libdragon's `n64.mk` recipe for the
+`odin-n64.z64` goal in order: `mips64-elf-g++` link, `n64sym`, a copy and
+`mips64-elf-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
+`n64tool --toc`, `ed64romconfig` and `n64metadata` when metadata is present.
+The link flags copy `N64_C_AND_CXX_FLAGS` and `N64_LDFLAGS`, and the defaults
+`--category N`, `--regionfree` and `-c 1` copy the recipe's `?=` defaults.
+`n64tool --toc` records each input's basename in the ROM, so keep the
+`odin-n64.*` names. When a libdragon bump changes those recipe lines, mirror
+the change in `src/n64_build.cpp` and compare ELF, symbol and ROM hashes with
+a build made by the SDK's own `n64.mk`.
 
-After make succeeds, `rename` places the staged ROM at the final path. Only
+Compiler object and foreign inputs are linked in place. Compiler object paths
+are sorted first because their original hash-map order is not stable between
+processes. Foreign `.o` and `.a` inputs keep their declared order. Do not
+weaken input ordering without comparing ELF, symbol, and ROM hashes. The user's
+asset directory and metadata INI are passed to `mkdfs` and `n64metadata` in
+place; `n64metadata` resolves companion files against the INI's own directory.
+
+Older `n64sym` builds run `$N64_INST/bin/mips64-elf-objdump -t <elf>` through
+`popen` without quoting. So `n64sym` runs inside the intermediates directory on
+relative names. It receives the SDK root as `N64_INST` when that path is
+shell-safe, and otherwise a relative `sdk` link to it. Remove the link once
+every supported libdragon revision runs `objdump` through an argument vector.
+
+After every step succeeds, `rename` places the ROM at the final path. Only
 then may successful intermediates be removed. `-keep-temp-files` retains the
-entire graph. Validation failures before stage creation print direct SDK or
-option diagnostics; staging, packaging, and placement failures retain the
-useful stage and print its path. Cleanup failures are warnings and name the
-remaining directory.
-
-## Metadata companion staging
-
-The source INI is copied under a collision-free `odin-input-NNNN.ini` name.
-The scanner recognizes localized forms of `[meta]`, `[boxart]`, and `[cartart]`.
-It selects:
-
-- comma-separated `screenshots` entries and `long-desc` in meta sections;
-- `front`, `back`, `top`, `bottom`, `left`, and `right` in art sections.
-
-References must be relative and may not contain an empty, `.` or `..` path
-component. Only each reference's first component is linked into the metadata
-stage, which preserves subpaths without copying unrelated siblings. Keep the
-selection algorithm aligned with the pinned `n64metadata` semantics and add a
-public-build regression for each new field or section.
+directory. Validation failures before the directory exists print direct SDK or
+option diagnostics; packaging and placement failures retain the directory and
+print its path. Cleanup failures are warnings and name the remaining
+directory.
 
 ## Runtime, allocators, and callback context
 

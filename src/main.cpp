@@ -4587,7 +4587,7 @@ int main(int arg_count, char const **arg_ptr) {
 	if (!init_build_paths(init_filename)) {
 		return 1;
 	}
-	if (!n64_prepare_build_from_context()) {
+	if (!n64_prepare_build_from_context(init_filename)) {
 		return 1;
 	}
 

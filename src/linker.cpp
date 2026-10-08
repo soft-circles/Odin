@@ -15,17 +15,39 @@ gb_internal bool system_exec_command_line_app_output(char const *command, gbStri
 
 #include "n64_build.cpp"
 
-gb_internal bool n64_prepare_build_from_context(void) {
-	if (build_context.metrics.os == TargetOs_n64 &&
-	    build_context.command_kind == Command_build &&
-	    build_context.build_mode == BuildMode_Executable &&
-	    build_context.n64.sdk_root.len == 0) {
+gb_internal bool n64_prepare_build_from_context(String const &init_filename) {
+	bool n64_rom = build_context.metrics.os == TargetOs_n64 &&
+	               build_context.command_kind == Command_build &&
+	               build_context.build_mode == BuildMode_Executable;
+	if (n64_rom && build_context.n64.sdk_root.len == 0) {
 		char const *environment_sdk = gb_get_env("N64_INST", permanent_allocator());
 		if (environment_sdk != nullptr) {
 			String path = string_trim_whitespace(make_string_c(environment_sdk));
 			if (path.len > 0) {
 				build_context.n64.sdk_root = path_to_full_path(permanent_allocator(), path);
 			}
+		}
+	}
+	if (n64_rom && build_context.n64.sdk_root.len == 0) {
+		// Third fallback: an SDK installed beside the compiler, <odin root>/n64.
+		String bundled = n64_path_join(permanent_allocator(), odin_root_dir(), STR_LIT("n64"));
+		if (path_is_directory(bundled)) {
+			build_context.n64.sdk_root = path_to_full_path(permanent_allocator(), bundled);
+		}
+	}
+	if (n64_rom && build_context.n64.title.len == 0) {
+		// Default the ROM title to the main package's directory name, not the
+		// -out file name, so `-out:build/rom.z64` keeps the project's name.
+		String package_dir = path_to_full_path(temporary_allocator(), init_filename);
+		if (!path_is_directory(package_dir)) {
+			package_dir = directory_from_path(package_dir);
+		}
+		while (package_dir.len > 0 && (package_dir[package_dir.len-1] == '/' || package_dir[package_dir.len-1] == '\\')) {
+			package_dir.len -= 1;
+		}
+		String name = last_path_element(package_dir);
+		if (name.len > 0) {
+			build_context.n64.title = n64_sanitized_rom_title(name);
 		}
 	}
 
