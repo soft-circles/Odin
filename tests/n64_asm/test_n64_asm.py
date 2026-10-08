@@ -94,7 +94,7 @@ def object_functions(package, target):
 
 @functools.lru_cache(maxsize=None)
 def build_ir(package, target="n64", expect_success=True):
-    """(returncode, LLVM IR text, output) for a package; the backend writes `<dir>/.ll`.
+    """(returncode, LLVM IR text, output) for a package; the backend writes `<dir>/<package>.ll`.
 
     The runtime ROM keeps its entry point: without `main` everything in it is dead.
     """
@@ -1252,7 +1252,8 @@ t :: asm(a: f64) -> (r: f64) [a = %f12, r = %f0] { mov_d r, a }
         code, output = run_odin("build", directory, "-target:n64", "-build-mode:llvm-ir", *OBJ_FLAGS,
                                 f"-out:{directory}")
         self.assertEqual(code, 0, output)
-        self.assertIn("={$f0},{$f12},~{$1}", (directory / ".ll").read_text())
+        ir = "\n".join(p.read_text() for p in directory.glob("*.ll"))
+        self.assertIn("={$f0},{$f12},~{$1}", ir)
 
     def test_narrow_pinned_operand_does_not_abort_llvm(self):
         # A u8/u16 parameter pinned to a GPR used to become an i8 `{$4}` operand, and

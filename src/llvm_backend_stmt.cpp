@@ -109,7 +109,10 @@ gb_internal void lb_scan_for_sret_rvo(lbProcedure *p) {
 				Entity *e = entity_of_node(vd->names[0]);
 				if (e == ret_entity) {
 					Ast *rhs = unparen_expr(vd->values[0]);
-					if (rhs->kind == Ast_CallExpr && lb_call_sret_eligible(p, rhs, e->type)) {
+					// NOTE(bill): the caller's return slot only has the type's alignment and not @(align=N)'s
+					if (rhs->kind == Ast_CallExpr &&
+					    e->Variable.custom_align == 0 &&
+					    lb_call_sret_eligible(p, rhs, e->type)) {
 						decl_index = i;
 					}
 					goto done_scanning;
@@ -968,22 +971,19 @@ gb_internal void lb_build_range_interval(lbProcedure *p, AstBinaryExpr *node,
 	lbValue lower = lb_build_expr(p, node->left);
 	lbValue upper = {}; // initialized each time in the loop
 
-	lbAddr value;
+	// NOTE: the counters are unnamed, as `lb_store_range_stmt_val` declares the loop's variables each iteration
+	Type *value_type = lower.type;
 	if (val0_type != nullptr) {
-		Entity *e = entity_of_node(val0);
-		value = lb_add_local(p, val0_type, e, false);
-	} else {
-		value = lb_add_local_generated(p, lower.type, false);
+		value_type = val0_type;
 	}
+	lbAddr value = lb_add_local_generated(p, value_type, false);
 	lb_addr_store(p, value, lower);
 
-	lbAddr index;
+	Type *index_type = t_int;
 	if (val1_type != nullptr) {
-		Entity *e = entity_of_node(val1);
-		index = lb_add_local(p, val1_type, e, false);
-	} else {
-		index = lb_add_local_generated(p, t_int, false);
+		index_type = val1_type;
 	}
+	lbAddr index = lb_add_local_generated(p, index_type, false);
 	lb_addr_store(p, index, lb_const_int(m, t_int, 0));
 
 	lbBlock *loop = lb_create_block(p, "for.interval.loop");
@@ -1300,6 +1300,12 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 		if (e != nullptr) {
 			lbAddr soa_val = lb_addr_soa_variable(array.addr, lb_addr_load(p, index), nullptr);
 			map_set(&p->module->soa_values, e, soa_val);
+			if (p->debug_info != nullptr && rs->vals[0]->kind == Ast_Ident) {
+				// NOTE(bill): the element has no memory of its own meaning a debugger is given a copy made each iteration
+				lbAddr copy = lb_add_local_generated(p, val_types[0], false);
+				lb_addr_store(p, copy, lb_addr_load(p, soa_val));
+				lb_add_debug_local_variable(p, copy.addr.value, val_types[0], e->token);
+			}
 		}
 	}
 	if (val_types[1]) {
@@ -2445,7 +2451,6 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 	lb_close_scope(p, lbDeferExit_Default, done, ss->body);
 }
 
-
 gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 	for_array(i, vd->names) {
 		lbValue value = {};
@@ -2482,7 +2487,7 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 		char *c_name = alloc_cstring(permanent_allocator(), mangled_name);
 
 		LLVMValueRef global = LLVMAddGlobal(p->module->mod, lb_type(p->module, e->type), c_name);
-		LLVMSetAlignment(global, cast(u32)type_align_of(e->type));
+		LLVMSetAlignment(global, cast(u32)gb_max(type_align_of(e->type), e->Variable.custom_align));
 		LLVMSetInitializer(global, LLVMConstNull(lb_type(p->module, e->type)));
 
 		if (e->Variable.is_rodata) {
@@ -2490,7 +2495,7 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 		}
 
 		if (!lb_apply_thread_local_model(global, e->Variable.thread_local_model)) {
-			LLVMSetLinkage(global, LLVMInternalLinkage);
+			LLVM_SET_INTERNAL_WEAK_LINKAGE(global);
 		}
 
 		if (value.value != nullptr) {
@@ -2508,7 +2513,7 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 				}
 				
 				if (!lb_apply_thread_local_model(var_global_ref, e->Variable.thread_local_model)) {
-					LLVMSetLinkage(var_global_ref, LLVMInternalLinkage);
+					LLVM_SET_INTERNAL_WEAK_LINKAGE(var_global_ref);
 				}
 
 				auto vals = array_make<LLVMValueRef>(temporary_allocator(), 0, 3);
@@ -2529,23 +2534,25 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 				if (actual_type != expected_type) {
 					LLVMDeleteGlobal(global);
 					global = LLVMAddGlobal(p->module->mod, actual_type, c_name);
-					LLVMSetAlignment(global, cast(u32)type_align_of(e->type));
+					LLVMSetAlignment(global, cast(u32)gb_max(type_align_of(e->type), e->Variable.custom_align));
 					if (e->Variable.is_rodata) {
 						LLVMSetGlobalConstant(global, true);
 					}
 					if (!lb_apply_thread_local_model(global, e->Variable.thread_local_model)) {
-						LLVMSetLinkage(global, LLVMInternalLinkage);
+						LLVM_SET_INTERNAL_WEAK_LINKAGE(global);
 					}
 				}
 				LLVMSetInitializer(global, value.value);
 			}
 		}
 
+		lb_add_debug_info_static_variable(p, e, global);
 		lbValue global_val = {global, alloc_type_pointer(e->type)};
 		lb_add_entity(p->module, e, global_val);
 		lb_add_member(p->module, mangled_name, global_val);
 	}
 }
+
 gb_internal isize lb_append_tuple_values(lbProcedure *p, Array<lbValue> *dst_values, lbValue src_value) {
 	isize init_count = dst_values->count;
 	Type *t = src_value.type;
@@ -2903,7 +2910,12 @@ gb_internal void lb_build_if_stmt(lbProcedure *p, Ast *node) {
 		bool const_cond = LLVMConstIntGetZExtValue(cond.value) != 0;
 
 		LLVMValueRef if_instr = LLVMGetLastInstruction(p->curr_block->block);
+#if LLVM_VERSION_MAJOR >= 23
+		GB_ASSERT((LLVMGetInstructionOpcode(if_instr) == LLVMUncondBr) ||
+                  (LLVMGetInstructionOpcode(if_instr) == LLVMCondBr));
+#else
 		GB_ASSERT(LLVMGetInstructionOpcode(if_instr) == LLVMBr);
+#endif
 		GB_ASSERT(LLVMIsConditional(if_instr));
 		LLVMInstructionEraseFromParent(if_instr);
 
@@ -3458,7 +3470,9 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 					// the literal is one of its variants, so reusing that storage would bind the
 					// variable to a bare `[]int` and never build the union at all
 					if (comp_lit_addr && are_types_identical(lb_addr_type(*comp_lit_addr), type_of_expr(vd->names[lval_index]))) {
-						if (Entity *e = entity_of_node(vd->names[lval_index])) {
+						Entity *e = entity_of_node(vd->names[lval_index]);
+						// NOTE(bill): the literal's storage only has the type's alignment and not @(align=N)'s
+						if (e != nullptr && e->Variable.custom_align == 0) {
 							lbValue val = comp_lit_addr->addr;
 							lb_add_entity(p->module, e, val);
 							lb_add_debug_local_variable(p, val.value, e->type, e->token);
