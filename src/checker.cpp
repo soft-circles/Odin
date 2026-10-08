@@ -1294,14 +1294,17 @@ gb_internal void init_universal(void) {
 	add_global_string_constant("ODIN_MICROARCH_STRING", get_final_microarchitecture());
 	
 	{
-		GlobalEnumValue values[BuildMode_COUNT] = {
+		GlobalEnumValue values[] = {
 			{"Executable", BuildMode_Executable},
 			{"Dynamic",    BuildMode_DynamicLibrary},
 			{"Static",     BuildMode_StaticLibrary},
 			{"Object",     BuildMode_Object},
 			{"Assembly",   BuildMode_Assembly},
 			{"LLVM_IR",    BuildMode_LLVM_IR},
+			{"RSP_Assembly", BuildMode_RSP_Assembly},
 		};
+		// Unsized so a missing name fails here instead of zero-filling an unnamed enumerator.
+		GB_STATIC_ASSERT(gb_count_of(values) == BuildMode_COUNT);
 
 		auto fields = add_global_enum_type(str_lit("Odin_Build_Mode_Type"), values, gb_count_of(values));
 		add_global_enum_constant(fields, "ODIN_BUILD_MODE", bc->build_mode);
