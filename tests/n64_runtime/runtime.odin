@@ -17,7 +17,8 @@ main :: proc() {
 	// Through the runtime's stderr path: it must open the emulator log itself.
 	runtime.print_string("ODIN_N64_RUNTIME_CHECK:v2:MAIN_REACHED:PASS\n")
 	if !verify_runtime_ordering() || !verify_general_allocator() ||
-	   !verify_temp_allocator() || !verify_allocator_replaceability() {
+	   !verify_temp_allocator() || !verify_allocator_replaceability() ||
+	   !verify_maps() {
 		return
 	}
 	debugf(PASS_SENTINEL)
@@ -30,6 +31,7 @@ ORDERING_SENTINEL    :: "ODIN_N64_RUNTIME_CHECK:v2:ORDERING:PASS\n"
 GENERAL_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:GENERAL_ALLOCATOR:PASS\n"
 TEMP_SENTINEL        :: "ODIN_N64_RUNTIME_CHECK:v2:TEMP_ALLOCATOR:PASS\n"
 REPLACE_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS\n"
+MAP_SENTINEL         :: "ODIN_N64_RUNTIME_CHECK:v2:MAP:PASS\n"
 MAIN_RETURN_SENTINEL :: "ODIN_N64_RUNTIME_MAIN_RETURN:v2\n"
 CLEANUP_SENTINEL     :: "ODIN_N64_RUNTIME_CLEANUP:v2\n"
 PASS_SENTINEL        :: "ODIN_N64_RUNTIME_PASS:v2\n"
@@ -389,5 +391,53 @@ verify_allocator_replaceability :: proc() -> bool {
 	}
 
 	debugf(REPLACE_SENTINEL)
+	return true
+}
+
+// O64 passes the map-set helper's `#caller_location` struct by value; this
+// covers inserts that grow and rehash, overwrites, lookups, deletes and
+// iteration for integer and string keys.
+@(private="file")
+verify_maps :: proc() -> bool {
+	MAP_COUNT :: 64
+	numbers := make(map[int]int)
+	defer delete(numbers)
+	for i in 0..<MAP_COUNT {
+		numbers[i] = i*3 + 1
+	}
+	numbers[7] = -7
+	delete_key(&numbers, 8)
+	numbers_ok := len(numbers) == MAP_COUNT-1 && numbers[7] == -7 && numbers[MAP_COUNT-1] == (MAP_COUNT-1)*3 + 1
+	if _, found := numbers[8]; found {
+		numbers_ok = false
+	}
+	sum := 0
+	for _, value in numbers {
+		sum += value
+	}
+	expected_sum := 0
+	for i in 0..<MAP_COUNT {
+		if i != 7 && i != 8 {
+			expected_sum += i*3 + 1
+		}
+	}
+	if !numbers_ok || sum != expected_sum - 7 {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:MAP_INT\n")
+		return false
+	}
+
+	names := make(map[string]int)
+	defer delete(names)
+	names["alpha"] = 1
+	names["beta"] = 2
+	names["alpha"] = 3
+	beta, beta_found := names["beta"]
+	_, gamma_found := names["gamma"]
+	if len(names) != 2 || names["alpha"] != 3 || !beta_found || beta != 2 || gamma_found {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:MAP_STRING\n")
+		return false
+	}
+
+	debugf(MAP_SENTINEL)
 	return true
 }

@@ -869,7 +869,25 @@ gb_internal lbValue lb_map_set_proc_for_type(lbModule *m, Type *type) {
 	lbValue hash_param   = {LLVMGetParam(p->value, 1), t_uintptr};
 	lbValue key_ptr      = {LLVMGetParam(p->value, 2), t_rawptr};
 	lbValue value_ptr    = {LLVMGetParam(p->value, 3), t_rawptr};
-	lbValue location_ptr = {LLVMGetParam(p->value, 4), t_source_code_location_ptr};
+	LLVMValueRef location_param = LLVMGetParam(p->value, 4);
+	LLVM_SET_VALUE_NAME(location_param, "location");
+
+	// Most ABIs pass the `#caller_location` struct indirectly, but some (e.g. MIPS O64 on the N64)
+	// pass it by value, coerced to an integer aggregate. Spill it so the body can use a pointer.
+	lbArgType const *location_arg = &p->abi_function_type->args[4];
+	bool location_is_indirect = location_arg->kind == lbArg_Indirect;
+	lbValue location_ptr = {};
+	if (location_is_indirect) {
+		location_ptr = {location_param, t_source_code_location_ptr};
+	} else {
+		GB_ASSERT(location_arg->kind == lbArg_Direct);
+		lbValue location = {};
+		location.type  = t_source_code_location;
+		location.value = location_arg->coerce_offsets.count > 0
+			? lb_coerce_fields_store(p, location_param, t_source_code_location, location_arg)
+			: OdinLLVMBuildTransmute(p, location_param, lb_type(m, t_source_code_location));
+		location_ptr = lb_address_from_load_or_generate_local(p, location);
+	}
 
 	map_ptr = lb_emit_conv(p, map_ptr, alloc_type_pointer(type));
 	key_ptr = lb_emit_conv(p, key_ptr, alloc_type_pointer(type->Map.key));
@@ -878,7 +896,6 @@ gb_internal lbValue lb_map_set_proc_for_type(lbModule *m, Type *type) {
 	LLVM_SET_VALUE_NAME(hash_param.value,   "hash_param");
 	LLVM_SET_VALUE_NAME(key_ptr.value,      "key_ptr");
 	LLVM_SET_VALUE_NAME(value_ptr.value,    "value_ptr");
-	LLVM_SET_VALUE_NAME(location_ptr.value, "location");
 
 	lb_add_proc_attribute_at_index(p, 1+0, "nonnull");
 	lb_add_proc_attribute_at_index(p, 1+0, "noalias");
@@ -895,9 +912,11 @@ gb_internal lbValue lb_map_set_proc_for_type(lbModule *m, Type *type) {
 	}
 	lb_add_proc_attribute_at_index(p, 1+3, "readonly");
 
-	lb_add_proc_attribute_at_index(p, 1+4, "nonnull");
-	lb_add_proc_attribute_at_index(p, 1+4, "noalias");
-	lb_add_proc_attribute_at_index(p, 1+4, "readonly");
+	if (location_is_indirect) {
+		lb_add_proc_attribute_at_index(p, 1+4, "nonnull");
+		lb_add_proc_attribute_at_index(p, 1+4, "noalias");
+		lb_add_proc_attribute_at_index(p, 1+4, "readonly");
+	}
 
 	lbAddr hash_addr = lb_add_local_generated(p, t_uintptr, false);
 	lb_addr_store(p, hash_addr, hash_param);

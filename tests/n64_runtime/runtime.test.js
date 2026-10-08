@@ -19,6 +19,7 @@ const ordered = [
 	"ODIN_N64_RUNTIME_CHECK:v2:GENERAL_ALLOCATOR:PASS",
 	"ODIN_N64_RUNTIME_CHECK:v2:TEMP_ALLOCATOR:PASS",
 	"ODIN_N64_RUNTIME_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS",
+	"ODIN_N64_RUNTIME_CHECK:v2:MAP:PASS",
 	"ODIN_N64_RUNTIME_PASS:v2",
 	"ODIN_N64_RUNTIME_MAIN_RETURN:v2",
 	"ODIN_N64_RUNTIME_CLEANUP:v2",
@@ -31,4 +32,4 @@ for (const sentinel of ordered) {
 		throw new Error("missing or out-of-order sentinel " + sentinel + ":\n" + log);
 	previous = index;
 }
-console.log("runtime: ordered startup, allocators, main return, cleanup and panic log PASS");
+console.log("runtime: ordered startup, allocators, maps, main return, cleanup and panic log PASS");
