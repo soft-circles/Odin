@@ -31,6 +31,7 @@ def quick_stages(artifacts: Path = Path("/artifacts")) -> list[Stage]:
         Stage("N64 build-module boundary", (PYTHON, "tests/n64_build/test_n64_module.py")),
         Stage("N64 public options and failure paths", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
         Stage("SDK validator unit tests", (PYTHON, "tests/o64_abi/test_validate_sdk.py")),
+        Stage("pointer sign extension at -o:speed", (PYTHON, "tests/n64_pointer_sext/test_pointer_sext.py"), environment=environment),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
         Stage("asm template ROM probe", ("./odin", "check", "tests/n64_asm/rom", "-target:n64", "-vet", "-warnings-as-errors")),
