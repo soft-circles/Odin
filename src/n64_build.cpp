@@ -74,24 +74,38 @@ gb_internal bool n64_sdk_tool_is_executable(String const &path) {
 #endif
 }
 
+// Transitional A/B switch: ODIN_N64_USE_MAKE=1 selects the old
+// generated-Makefile path so both paths can be compared on one binary; the
+// default spawns the packaging tools directly. Removed with the make path.
+gb_internal bool n64_use_make(void) {
+	char const *value = gb_get_env("ODIN_N64_USE_MAKE", temporary_allocator());
+	return value != nullptr && value[0] == '1';
+}
+
 gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
-	String required_files[] = {
-		STR_LIT("include/n64.mk"),
-		STR_LIT("mips64-elf/lib/libdragon.a"),
-		STR_LIT("mips64-elf/lib/libdragonsys.a"),
-		STR_LIT("mips64-elf/lib/n64.ld"),
-	};
-	String required_tools[] = {
-		STR_LIT("bin/ed64romconfig"),
-		STR_LIT("bin/mips64-elf-g++"),
-		STR_LIT("bin/mips64-elf-gcc"),
-		STR_LIT("bin/mips64-elf-objdump"),
-		STR_LIT("bin/mips64-elf-size"),
-		STR_LIT("bin/mips64-elf-strip"),
-		STR_LIT("bin/n64elfcompress"),
-		STR_LIT("bin/n64sym"),
-		STR_LIT("bin/n64tool"),
-	};
+	bool use_make = n64_use_make();
+	Array<String> required_files = {};
+	array_init(&required_files, temporary_allocator());
+	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragon.a"));
+	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragonsys.a"));
+	array_add(&required_files, STR_LIT("mips64-elf/lib/n64.ld"));
+	// Tools spawned by the direct path, plus objdump, which n64sym runs through
+	// $N64_INST/bin. (n64sym also runs addr2line; it stays unchecked, as before,
+	// because the test SDK facades do not provide it.)
+	Array<String> required_tools = {};
+	array_init(&required_tools, temporary_allocator());
+	array_add(&required_tools, STR_LIT("bin/ed64romconfig"));
+	array_add(&required_tools, STR_LIT("bin/mips64-elf-g++"));
+	array_add(&required_tools, STR_LIT("bin/mips64-elf-objdump"));
+	array_add(&required_tools, STR_LIT("bin/mips64-elf-strip"));
+	array_add(&required_tools, STR_LIT("bin/n64elfcompress"));
+	array_add(&required_tools, STR_LIT("bin/n64sym"));
+	array_add(&required_tools, STR_LIT("bin/n64tool"));
+	if (use_make) {
+		array_add(&required_files, STR_LIT("include/n64.mk"));
+		array_add(&required_tools, STR_LIT("bin/mips64-elf-gcc"));
+		array_add(&required_tools, STR_LIT("bin/mips64-elf-size"));
+	}
 
 	bool valid = true;
 	for (String const &relative_path : required_files) {
@@ -173,7 +187,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		              LIT(request.settings.save_type));
 		return false;
 	}
-	if (!n64_sdk_tool_is_executable(STR_LIT("/usr/bin/make"))) {
+	if (n64_use_make() && !n64_sdk_tool_is_executable(STR_LIT("/usr/bin/make"))) {
 		gb_printf_err("GNU make is required at /usr/bin/make for the integrated N64 build\n");
 		return false;
 	}
@@ -451,15 +465,15 @@ gb_internal bool n64_foreign_input_is_sdk_library(String const &input) {
 
 // Pure validation, run before any staging directory exists so a rejected
 // request leaves nothing behind in the output directory.
-gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
+gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request, bool allow_extra_linker_flags) {
 	String extra_flags = string_trim_whitespace(request.extra_linker_flags);
-	if (extra_flags.len > 0) {
+	if (extra_flags.len > 0 && !allow_extra_linker_flags) {
 		gb_printf_err("-extra-linker-flags is not supported by the N64 packaging pipeline\n");
 		return false;
 	}
 	for (N64ForeignLibrary const &library : request.foreign_libraries) {
 		String library_flags = string_trim_whitespace(library.extra_linker_flags);
-		if (library_flags.len > 0) {
+		if (library_flags.len > 0 && !allow_extra_linker_flags) {
 			gb_printf_err("N64 foreign import '%.*s' uses unsupported extra linker flags: %.*s\n",
 			              LIT(library.name), LIT(library_flags));
 			return false;
@@ -631,12 +645,14 @@ gb_internal bool n64_environment_key_is_filtered(char const *entry) {
 	       (key_length >= 7 && memcmp(entry, "CCACHE_", 7) == 0);
 }
 
-gb_internal char **n64_sanitized_environment(void) {
+// extra_entry, when given, is appended after filtering (the direct path
+// passes N64_INST=<sdk> because n64sym finds objdump/addr2line through it).
+gb_internal char **n64_sanitized_environment(char const *extra_entry = nullptr) {
 	isize source_count = 0;
 	while (environ[source_count] != nullptr) {
 		source_count += 1;
 	}
-	char **environment = gb_alloc_array(temporary_allocator(), char *, source_count+3);
+	char **environment = gb_alloc_array(temporary_allocator(), char *, source_count+4);
 	isize destination_count = 0;
 	for (isize index = 0; index < source_count; index += 1) {
 		if (!n64_environment_key_is_filtered(environ[index])) {
@@ -645,8 +661,44 @@ gb_internal char **n64_sanitized_environment(void) {
 	}
 	environment[destination_count++] = cast(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin";
 	environment[destination_count++] = cast(char *)"SHELL=/bin/sh";
+	if (extra_entry != nullptr) {
+		environment[destination_count++] = cast(char *)extra_entry;
+	}
 	environment[destination_count] = nullptr;
 	return environment;
+}
+
+// Spawns argv[0] with the given environment and waits. discard_stdout mirrors
+// n64.mk's `>/dev/null` on mkdfs; working_dir (optional) is the child's cwd.
+gb_internal i32 n64_spawn_and_wait(char const *const *arguments, char **environment, bool discard_stdout, char const *working_dir = nullptr) {
+	posix_spawn_file_actions_t actions;
+	posix_spawn_file_actions_init(&actions);
+	if (discard_stdout) {
+		posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+	}
+	if (working_dir != nullptr) {
+		posix_spawn_file_actions_addchdir_np(&actions, working_dir);
+	}
+	pid_t pid = 0;
+	int status = posix_spawn(&pid, arguments[0], &actions, nullptr, cast(char *const *)arguments, environment);
+	posix_spawn_file_actions_destroy(&actions);
+	if (status != 0) {
+		gb_printf_err("Could not spawn N64 packaging subprocess %s: %s\n", arguments[0], strerror(status));
+		return -1;
+	}
+	for (;;) {
+		if (waitpid(pid, &status, 0) < 0) {
+			gb_printf_err("Could not wait on N64 packaging subprocess: %s\n", strerror(errno));
+			return -1;
+		}
+		if (WIFEXITED(status)) {
+			return WEXITSTATUS(status);
+		}
+		if (WIFSIGNALED(status)) {
+			gb_printf_err("N64 packaging subprocess terminated by signal %d\n", WTERMSIG(status));
+			return 128+WTERMSIG(status);
+		}
+	}
 }
 
 gb_internal i32 n64_run_make(N64BuildStage const &stage, bool show_system_calls) {
@@ -664,26 +716,7 @@ gb_internal i32 n64_run_make(N64BuildStage const &stage, bool show_system_calls)
 	if (show_system_calls) {
 		gb_printf_err("[SYSTEM CALL] n64-make\n%s -C \"%s\" -f Makefile odin-n64.z64\n\n", make_path, work_dir);
 	}
-
-	pid_t pid = 0;
-	int status = posix_spawn(&pid, make_path, nullptr, nullptr, cast(char *const *)arguments, n64_sanitized_environment());
-	if (status != 0) {
-		gb_printf_err("Could not spawn N64 packaging subprocess: %s\n", strerror(status));
-		return -1;
-	}
-	for (;;) {
-		if (waitpid(pid, &status, 0) < 0) {
-			gb_printf_err("Could not wait on N64 packaging subprocess: %s\n", strerror(errno));
-			return -1;
-		}
-		if (WIFEXITED(status)) {
-			return WEXITSTATUS(status);
-		}
-		if (WIFSIGNALED(status)) {
-			gb_printf_err("N64 packaging subprocess terminated by signal %d\n", WTERMSIG(status));
-			return 128+WTERMSIG(status);
-		}
-	}
+	return n64_spawn_and_wait(arguments, n64_sanitized_environment(), false);
 }
 
 gb_internal bool n64_remove_file_if_present(String const &path) {
@@ -724,8 +757,8 @@ gb_internal bool n64_cleanup_successful_stage(N64BuildStage const &stage, bool h
 	return clean;
 }
 
-gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
-	if (!n64_validate_link_inputs(request)) {
+gb_internal N64BuildResult n64_package_rom_with_make(N64BuildRequest request) {
+	if (!n64_validate_link_inputs(request, false)) {
 		return {1, {}};
 	}
 
@@ -758,6 +791,311 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 		gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(stage.work_dir));
 	}
 	return {0, request.keep_temp_files ? stage.work_dir : String{}};
+}
+
+// ---- Direct packaging -------------------------------------------------------
+// Runs the commands libdragon's n64.mk runs for an `odin-n64.z64` goal
+// (n64.mk:135-163, :221-240) without make. Intermediates keep n64.mk's
+// basenames because `n64tool --toc` records each input's basename in the ROM.
+
+struct N64Intermediates {
+	String dir;
+	String elf;
+	String map;
+	String sym;
+	String stripped;
+	String dfs;
+	String rom_tmp;
+	String sdk_link; // only created when the SDK path is not shell-safe
+};
+
+typedef Array<char const *> N64Argv;
+
+gb_internal bool n64_is_shell_safe(String const &path) {
+	for (isize index = 0; index < path.len; index += 1) {
+		char c = cast(char)path[index];
+		if (!gb_char_is_alphanumeric(c) && strchr("/._-+,:@%=", c) == nullptr) {
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal void n64_arg(N64Argv *argv, String const &value) {
+	array_add(argv, cast(char const *)alloc_cstring(permanent_allocator(), value));
+}
+
+gb_internal void n64_arg(N64Argv *argv, char const *value) {
+	array_add(argv, value);
+}
+
+gb_internal String n64_sdk_path(N64BuildSettings const &settings, char const *relative_path) {
+	return n64_path_join(permanent_allocator(), settings.sdk_root, make_string_c(relative_path));
+}
+
+// -extra-linker-flags reaches the link driver as whitespace-separated words;
+// unlike the shell-based linkers for other targets there is no quoting.
+gb_internal void n64_add_words(N64Argv *argv, String const &words) {
+	isize start = -1;
+	for (isize index = 0; index <= words.len; index += 1) {
+		bool space = index == words.len || gb_char_is_space(cast(char)words[index]);
+		if (!space && start < 0) {
+			start = index;
+		} else if (space && start >= 0) {
+			n64_arg(argv, substring(words, start, index));
+			start = -1;
+		}
+	}
+}
+
+gb_internal i32 n64_run_tool(char const *label, N64Argv argv, char **environment, bool show_system_calls,
+                             bool discard_stdout = false, char const *working_dir = nullptr) {
+	if (show_system_calls) {
+		gb_printf_err("[SYSTEM CALL] n64-%s\n", label);
+		if (working_dir != nullptr) {
+			gb_printf_err("(cd %s) ", working_dir);
+		}
+		for (char const *argument : argv) {
+			gb_printf_err("%s ", argument);
+		}
+		gb_printf_err("\n\n");
+	}
+	array_add(&argv, cast(char const *)nullptr);
+	i32 result = n64_spawn_and_wait(argv.data, environment, discard_stdout, working_dir);
+	if (result != 0) {
+		gb_printf_err("N64 packaging step '%s' failed with exit code %d\n", label, result);
+	}
+	return result;
+}
+
+// One fixed directory beside the output, named after it: rebuilding the same
+// output reuses it, so the ELF for a debugger is always at a known path.
+gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &output_filename, String const &output_name) {
+	gbAllocator a = permanent_allocator();
+	String directory = directory_from_path(output_filename);
+	out->dir      = n64_path_join(a, directory, concatenate_strings(a, output_name, STR_LIT(".n64-build")));
+	out->elf      = n64_path_join(a, out->dir, STR_LIT("odin-n64.elf"));
+	out->map      = n64_path_join(a, out->dir, STR_LIT("odin-n64.map"));
+	out->sym      = n64_path_join(a, out->dir, STR_LIT("odin-n64.elf.sym"));
+	out->stripped = n64_path_join(a, out->dir, STR_LIT("odin-n64.elf.stripped"));
+	out->dfs      = n64_path_join(a, out->dir, STR_LIT("odin-n64.dfs"));
+	out->rom_tmp  = n64_path_join(a, out->dir, STR_LIT("odin-n64.z64.tmp"));
+	out->sdk_link = n64_path_join(a, out->dir, STR_LIT("sdk"));
+	char const *dir_c = alloc_cstring(temporary_allocator(), out->dir);
+	if (mkdir(dir_c, 0755) != 0 && errno != EEXIST) {
+		gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(out->dir), strerror(errno));
+		return false;
+	}
+	return true;
+}
+
+gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &files, char **env) {
+	N64BuildSettings const &s = request->settings;
+	// See n64_stage_link_inputs: hash-map order is not stable between runs.
+	array_sort(request->object_paths, string_cmp);
+
+	N64Argv argv = {};
+	array_init(&argv, permanent_allocator());
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-g++"));
+	// N64_C_AND_CXX_FLAGS verbatim (n64.mk:69-75); n64.mk passes them to the link too.
+	n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-mabi=o64");
+	n64_arg(&argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include/newlib_overrides")));
+	n64_arg(&argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
+	char const *flags[] = {
+		"-include", "ktls.h", "-falign-functions=32", "-ffunction-sections", "-fdata-sections", "-g",
+		"-ffile-prefix-map=.=.", "-ffast-math", "-ftrapping-math", "-fno-associative-math", "-DN64", "-O2",
+		"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
+		"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
+		"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
+		"-Wno-error=unused-local-typedefs", "-Wno-error=unused-const-variable", "-ftrivial-auto-var-init=pattern",
+	};
+	for (char const *flag : flags) {
+		n64_arg(&argv, flag);
+	}
+	n64_arg(&argv, "-o"); n64_arg(&argv, files.elf);
+	for (String const &object : request->object_paths) {
+		n64_arg(&argv, object);
+	}
+	for (N64ForeignLibrary const &library : request->foreign_libraries) {
+		for (String const &path : library.paths) {
+			String input = string_trim_whitespace(path);
+			if (!n64_foreign_input_is_sdk_library(input)) {
+				n64_arg(&argv, input);
+			}
+		}
+	}
+	n64_arg(&argv, "-lc"); n64_arg(&argv, "-mabi=o64");
+	// N64_LDFLAGS (n64.mk:83), each word prefixed with -Wl, as the %.elf rule does.
+	n64_arg(&argv, "-Wl,-g");
+	n64_arg(&argv, concatenate_strings(permanent_allocator(), STR_LIT("-Wl,-L"), n64_sdk_path(s, "mips64-elf/lib")));
+	char const *ldflags[] = {"-Wl,-ldragon", "-Wl,-lm", "-Wl,-ldragonsys", "-Wl,-Tn64.ld", "-Wl,--gc-sections", "-Wl,--wrap", "-Wl,__do_global_ctors"};
+	for (char const *flag : ldflags) {
+		n64_arg(&argv, flag);
+	}
+	n64_arg(&argv, concatenate3_strings(permanent_allocator(), STR_LIT("-Wl,-Map="), files.map, STR_LIT(",--cref")));
+	n64_add_words(&argv, request->extra_linker_flags);
+	for (N64ForeignLibrary const &library : request->foreign_libraries) {
+		n64_add_words(&argv, library.extra_linker_flags);
+	}
+	return n64_run_tool("link", argv, env, request->show_system_calls);
+}
+
+gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Intermediates const &files, char **env) {
+	N64BuildSettings const &s = request.settings;
+	bool show = request.show_system_calls;
+	gbAllocator a = permanent_allocator();
+	i32 result = 0;
+	N64Argv argv = {};
+
+	// n64sym --all elf elf.sym
+	// n64sym popen()s "$N64_INST/bin/mips64-elf-objdump -t <elf>" unquoted
+	// (n64sym.cpp:330, :450), so it runs inside the intermediates directory on
+	// relative names, and N64_INST must be shell-safe: a relative `sdk` link
+	// stands in for an SDK path with spaces or shell metacharacters, as the
+	// make path's staging link always did.
+	char const *sym_env_entry = nullptr;
+	if (n64_is_shell_safe(s.sdk_root)) {
+		sym_env_entry = alloc_cstring(a, concatenate_strings(a, STR_LIT("N64_INST="), s.sdk_root));
+	} else {
+		n64_remove_file_if_present(files.sdk_link);
+		if (!n64_create_staging_link(s.sdk_root, files.sdk_link)) {
+			gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(files.sdk_link), LIT(s.sdk_root), strerror(errno));
+			return 1;
+		}
+		sym_env_entry = "N64_INST=sdk";
+	}
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/n64sym")); n64_arg(&argv, "--all");
+	n64_arg(&argv, "odin-n64.elf"); n64_arg(&argv, "odin-n64.elf.sym");
+	result = n64_run_tool("sym", argv, n64_sanitized_environment(sym_env_entry), show, false, alloc_cstring(a, files.dir));
+	if (result != 0) return result;
+
+	// cp elf elf.stripped; strip -s elf.stripped
+	if (!gb_file_copy(alloc_cstring(a, files.elf), alloc_cstring(a, files.stripped), false)) {
+		gb_printf_err("Failed to copy %.*s to %.*s\n", LIT(files.elf), LIT(files.stripped));
+		return 1;
+	}
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-strip")); n64_arg(&argv, "-s"); n64_arg(&argv, files.stripped);
+	if ((result = n64_run_tool("strip", argv, env, show)) != 0) return result;
+
+	// n64elfcompress -o <dir>/ -c 1 elf.stripped   (rewrites the file in place)
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/n64elfcompress"));
+	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, files.dir, STR_LIT("/")));
+	n64_arg(&argv, "-c"); n64_arg(&argv, "1"); n64_arg(&argv, files.stripped);
+	if ((result = n64_run_tool("elfcompress", argv, env, show)) != 0) return result;
+
+	// mkdfs dfs <assets> >/dev/null
+	if (s.assets.len > 0) {
+		array_init(&argv, a);
+		n64_arg(&argv, n64_sdk_path(s, "bin/mkdfs")); n64_arg(&argv, files.dfs); n64_arg(&argv, s.assets);
+		if ((result = n64_run_tool("mkdfs", argv, env, show, true)) != 0) return result;
+	}
+
+	// n64tool N64_TOOLFLAGS --output z64.tmp --align 256 stripped sym [dfs] N64_TOOLFILES
+	String title = s.title.len > 0 ? s.title : n64_sanitized_rom_title(request.output_name);
+	n64_remove_file_if_present(files.rom_tmp);
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/n64tool"));
+	n64_arg(&argv, "--toc"); n64_arg(&argv, "--title"); n64_arg(&argv, title);
+	n64_arg(&argv, "--category"); n64_arg(&argv, "N");
+	if (s.region.len > 0) { n64_arg(&argv, "--region"); n64_arg(&argv, s.region); }
+	if (s.metadata.len > 0) {
+		// n64.mk requests --padding 0 so n64metadata pads; n64tool needs a unit suffix.
+		n64_arg(&argv, "--padding"); n64_arg(&argv, "0B");
+	}
+	n64_arg(&argv, "--output"); n64_arg(&argv, files.rom_tmp);
+	n64_arg(&argv, "--align"); n64_arg(&argv, "256"); n64_arg(&argv, files.stripped);
+	n64_arg(&argv, files.sym);
+	if (s.assets.len > 0) {
+		n64_arg(&argv, files.dfs);
+	}
+	// N64_TOOLFILES = $(wildcard <sdk>/mips64-elf/include/*.version), sorted like make's glob.
+	Array<FileInfo> include_files = {};
+	Array<String> version_files = {};
+	array_init(&version_files, a);
+	if (read_directory(n64_sdk_path(s, "mips64-elf/include"), &include_files) == ReadDirectory_None) {
+		for (FileInfo const &file : include_files) {
+			if (!file.is_dir && string_ends_with(file.name, STR_LIT(".version"))) {
+				array_add(&version_files, file.fullpath);
+			}
+		}
+	}
+	array_sort(version_files, string_cmp);
+	for (String const &path : version_files) {
+		n64_arg(&argv, path);
+	}
+	if ((result = n64_run_tool("n64tool", argv, env, show)) != 0) return result;
+
+	// ed64romconfig N64_ED64ROMCONFIGFLAGS z64.tmp (always runs: --regionfree is a default)
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/ed64romconfig"));
+	if (s.save_type.len > 0) { n64_arg(&argv, "--savetype"); n64_arg(&argv, s.save_type); }
+	if (s.rtc) { n64_arg(&argv, "--rtc"); }
+	n64_arg(&argv, "--regionfree");
+	char const *controller_flags[4] = {"--controller1", "--controller2", "--controller3", "--controller4"};
+	for (isize index = 0; index < 4; index += 1) {
+		if (s.controllers[index].len > 0) {
+			n64_arg(&argv, controller_flags[index]); n64_arg(&argv, s.controllers[index]);
+		}
+	}
+	n64_arg(&argv, files.rom_tmp);
+	if ((result = n64_run_tool("ed64romconfig", argv, env, show)) != 0) return result;
+
+	// n64metadata [-v] z64.tmp ini   (companion files resolve against the INI's own directory)
+	if (s.metadata.len > 0) {
+		array_init(&argv, a);
+		n64_arg(&argv, n64_sdk_path(s, "bin/n64metadata"));
+		if (show) { n64_arg(&argv, "-v"); }
+		n64_arg(&argv, files.rom_tmp); n64_arg(&argv, s.metadata);
+		if ((result = n64_run_tool("n64metadata", argv, env, show)) != 0) return result;
+	}
+	return 0;
+}
+
+gb_internal N64BuildResult n64_package_rom_direct(N64BuildRequest request) {
+	if (!n64_validate_link_inputs(request, true)) {
+		return {1, {}};
+	}
+	N64Intermediates files = {};
+	if (!n64_init_intermediates(&files, request.output_filename, request.output_name)) {
+		return {1, {}};
+	}
+	// Inherited N64_* variables are dropped so they cannot redirect the tools;
+	// only n64sym gets N64_INST (see n64_build_rom_from_elf).
+	char **env = n64_sanitized_environment();
+
+	i32 result = n64_link_elf(&request, files, env);
+	if (result == 0) {
+		result = n64_build_rom_from_elf(request, files, env);
+	}
+	if (result == 0 && rename(alloc_cstring(temporary_allocator(), files.rom_tmp),
+	                          alloc_cstring(temporary_allocator(), request.output_filename)) != 0) {
+		gb_printf_err("Failed to place N64 ROM at %.*s: %s\n", LIT(request.output_filename), strerror(errno));
+		result = 1;
+	}
+	if (result != 0) {
+		gb_printf_err("N64 build failed; intermediates were retained at %.*s\n", LIT(files.dir));
+		return {result, files.dir};
+	}
+	if (request.keep_temp_files) {
+		gb_printf_err("Retained N64 build intermediates: %.*s\n", LIT(files.dir));
+		return {0, files.dir};
+	}
+	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs, files.sdk_link};
+	bool clean = true;
+	for (String const &path : generated) {
+		clean = n64_remove_file_if_present(path) && clean;
+	}
+	if (!clean || !n64_remove_directory(files.dir)) {
+		gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(files.dir));
+	}
+	return {0, {}};
+}
+
+gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
+	return n64_use_make() ? n64_package_rom_with_make(request) : n64_package_rom_direct(request);
 }
 #else
 gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
