@@ -3312,13 +3312,24 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 					p->flags &= ~FieldFlag_no_capture;
 				}
 
+				Type *param_type = type;
+				if (operands == nullptr && param_type == t_typeid) {
+					// NOTE(bill): In the generic signature, a `$T: typeid` without a specialization is its own
+					// polymorphic type, as one with a specialization already is, so that `^T` or `[]T` elsewhere
+					// in the signature remain polymorphic rather than becoming `^typeid` or `[]typeid`
+					param_type = alloc_type_generic(ctx->scope, 0, name->Ident.interned, nullptr);
+				}
+
 				param = &entities_to_use[entities_to_use_index++];
-				INTERNAL_ENTITY_INIT(param, Entity_TypeName, scope, name->Ident.token, type);
+				INTERNAL_ENTITY_INIT(param, Entity_TypeName, scope, name->Ident.token, param_type);
 				param->state = EntityState_Resolved;
 				param->interned_name.store(name->Ident.interned);
 				param->interned_name_hash.store(name->Ident.hash);
 
 				param->TypeName.is_type_alias = true;
+				if (param_type != type) {
+					param_type->Generic.entity = param;
+				}
 			} else {
 				ExactValue poly_const = {};
 
@@ -4189,6 +4200,10 @@ gb_internal void add_map_key_type_dependencies(CheckerContext *ctx, Type *key) {
 
 	if (is_type_cstring(key)) {
 		add_package_dependency(ctx, "runtime", "default_hasher_cstring");
+	} else if (is_type_cstring16(key)) {
+		add_package_dependency(ctx, "runtime", "default_hasher_cstring16");
+	} else if (is_type_string16(key)) {
+		add_package_dependency(ctx, "runtime", "default_hasher_string16");
 	} else if (is_type_string(key)) {
 		add_package_dependency(ctx, "runtime", "default_hasher_string");
 	} else if (!is_type_polymorphic(key)) {
@@ -4640,9 +4655,9 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 	if (is_complete) {
 		add_type_info_type(ctx, soa_struct);
 		wait_signal_set(&soa_struct->Struct.fields_wait_signal);
-	} else if (global_group_soa_types != nullptr) {
+	} else if (global_group_context.soa_types != nullptr) {
 		// NOTE: no task waits on the element type, which could hold every thread of the pool
-		array_add(global_group_soa_types, soa_struct);
+		array_add(global_group_context.soa_types, soa_struct);
 	} else {
 		SoaTypeWorkerData *wd = permanent_alloc_item<SoaTypeWorkerData>();
 		wd->ctx = *ctx;
