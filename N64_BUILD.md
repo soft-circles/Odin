@@ -20,8 +20,8 @@ For `asm` templates in CPU code, see [CPU asm templates](MIPS_ASM.md).
 
 ## Supported hosts
 
-The integrated executable-ROM pipeline requires a POSIX host and GNU make at
-`/usr/bin/make`.
+The integrated executable-ROM pipeline requires a POSIX host. It spawns the
+SDK's own tools directly and needs no host build tools such as make.
 
 | Host | ROM builds | Release-validation status |
 | --- | --- | --- |
@@ -77,10 +77,11 @@ binary is the compiler used by the commands below.
 
 The setup example uses libdragon revision
 `c79a52b42ac790e06e797aede43914dd8754cd5f` as a default. Odin checks that the
-selected SDK contains the required libraries, linker script, Makefile and
-executable tools. Other revisions and local changes are allowed; build errors
+selected SDK contains the required libraries, linker script and executable
+tools. Other revisions and local changes are allowed; build errors
 and the ABI/runtime tests expose compatibility problems. SDK version metadata
-and a particular `n64.mk` hash are not required.
+are not required. Odin does not read the SDK's `n64.mk`; it runs the same
+packaging steps itself.
 
 1. Install the libdragon GCC toolchain by following the official
    [installation guide](https://github.com/DragonMinded/libdragon/wiki/Installing-libdragon)
@@ -203,11 +204,15 @@ The integrated executable pipeline also rejects these combinations:
 - LTO;
 - relocation modes other than `-reloc-mode:static`;
 - `-no-crt` or `-no-entry-point`;
-- `-linker` and `-extra-linker-flags`;
+- `-linker`;
 - `-print-linker-flags` (use `-show-system-calls` instead);
 - foreign inputs other than static `.o` and `.a` files, except the built-in
-  `c`, `m`, `dragon`, and `dragonsys` libraries;
-- extra linker flags attached to a foreign import.
+  `c`, `m`, `dragon`, and `dragonsys` libraries.
+
+`-extra-linker-flags` and the extra linker flags attached to a foreign import
+are appended to the SDK's `mips64-elf-g++` link command. They are split on
+whitespace with no shell quoting, so pass linker options as `-Wl,` words such
+as `-extra-linker-flags:"-Wl,--wrap=malloc"`.
 
 Object, assembly, and LLVM IR build modes do not run libdragon packaging and
 therefore do not accept ROM configuration options.
@@ -368,11 +373,13 @@ odin build . -target:n64 \
   -show-system-calls
 ```
 
-Odin prints the isolated directory as
-`Retained N64 build intermediates: <path>`. It contains the generated Makefile,
-staged `.o`/`.a` inputs, ELF, map, symbol file, stripped ELF, and any DFS or
-metadata staging. Successful builds remove it unless `-keep-temp-files` is
-present. Failed packaging stages are retained automatically. The final ROM is
+Odin prints the intermediates directory as
+`Retained N64 build intermediates: <path>`. It sits beside the ROM and is named
+after it, for example `game.n64-build/` for `game.z64`. It contains the ELF,
+map, symbol file, compressed stripped ELF, and the DFS image when assets are
+present. With `-show-system-calls`, Odin prints each packaging tool's command
+line as it runs it. Successful builds remove the directory unless
+`-keep-temp-files` is present. Failed packaging stages are retained automatically. The final ROM is
 renamed into place only after packaging succeeds, so a failed build does not
 replace an existing output.
 
@@ -382,18 +389,16 @@ replace an existing output.
 | --- | --- |
 | `N64 SDK is not configured` | Set `N64_INST`, pass `-n64-inst:<directory>`, or install the SDK at `<odin root>/n64`. |
 | `missing required file` or `missing required executable tool` | Install the missing SDK component or select the complete SDK root. |
-| `GNU make is required at /usr/bin/make` | Install GNU make so that exact path exists, or use a supported host image. |
 | `-n64-assets requires ... mkdfs` | Install the libdragon host tools into the selected SDK. |
 | `-n64-metadata requires ... n64metadata` | Install the libdragon host tools into the selected SDK. |
 | RTC cannot be used with EEPROM | Remove `-n64-rtc` or choose a non-EEPROM save type. |
 | Invalid controller list | Use 1–4 semicolon-separated declarations; keep attachment commas inside one declaration. |
-| Metadata companion staging failure | Make every referenced path relative to the INI, remove `.`/`..`, and confirm the first referenced path component exists. |
-| Packaging subprocess failed | Read the first make/tool error, then inspect the automatically retained staging directory. |
+| `N64 packaging step '<step>' failed` | Read the tool's own error above it, then inspect the automatically retained intermediates directory. Metadata companion paths resolve against the INI's own directory. |
 | ROM builds but shows no useful output | Start from the Pong or DFS sample, enable EMUX logging, and verify display initialization/get/show ordering. |
 
 Quote whole path-valued arguments and controller lists when the shell requires
-it. Source, SDK, asset, metadata, output, and staging paths containing spaces
-are supported.
+it. Source, SDK, asset, metadata, output, and intermediates paths containing
+spaces are supported.
 
 ## Current limitations
 
