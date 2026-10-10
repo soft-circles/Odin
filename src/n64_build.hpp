@@ -9,5 +9,6 @@ struct N64BuildSettings {
 	String controllers[4];
 	String assets;
 	String metadata;
+	String cflags; // appended to the SDK flags for foreign .c and .S sources
 	bool   rtc;
 };

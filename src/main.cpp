@@ -428,6 +428,7 @@ enum BuildFlagKind {
 	BuildFlag_N64Controllers,
 	BuildFlag_N64Assets,
 	BuildFlag_N64Metadata,
+	BuildFlag_N64CFlags,
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
@@ -791,6 +792,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_N64Controllers,          str_lit("n64-controllers"),           BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Assets,               str_lit("n64-assets"),                BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Metadata,             str_lit("n64-metadata"),              BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64CFlags,               str_lit("n64-cflags"),                BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
@@ -1490,6 +1492,11 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							} else {
 								bad_flags = true;
 							}
+							break;
+						case BuildFlag_N64CFlags:
+							GB_ASSERT(value.kind == ExactValue_String);
+							build_context.n64.cflags = value.value_string;
+							build_context.n64_rom_options_given = true;
 							break;
 
 						case BuildFlag_Subtarget:
@@ -3554,6 +3561,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 		if (print_flag("-n64-metadata:<file>")) {
 			print_usage_line(2, "Passes a libdragon-compatible metadata INI file to n64metadata.");
+		}
+		if (print_flag("-n64-cflags:<string>")) {
+			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c and .S sources.");
+			print_usage_line(2, "Split on whitespace with no shell quoting.");
+			print_usage_line(2, "Example: -n64-cflags:\"-Wall -Wextra -Werror\"");
 		}
 	}
 
