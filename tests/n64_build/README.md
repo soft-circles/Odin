@@ -39,6 +39,13 @@ runs the generated runtime probe ROM through the pinned headless script and chec
 ordered startup/allocator/cleanup sentinels.
 An additional link test supplies both a prebuilt foreign object and archive and
 checks that the integrated path carries them into libdragon's static link.
+Foreign-source tests build a package that imports a `.c` file, a VR4300 `.S`
+file, an RSP `.S` file and two `probe.c` files from different directories. They
+check that `-n64-cflags` reaches the compile, that the RSP section symbols link,
+that a failing compile fails the build and keeps the intermediates, that a
+successful build without `-keep-temp-files` removes them, and that an SDK
+without `mips64-elf-gcc` is rejected. A check-only test confirms the checker
+accepts `.c` imports on `-target:n64` and still rejects them on the host.
 Further end-to-end tests check that `-extra-linker-flags` reaches the link, that
 an SDK directory whose own name contains spaces packages the same ROM, and that
 the ROM title defaults to the package directory name.

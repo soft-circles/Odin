@@ -178,6 +178,7 @@ they apply only to executable ROM output.
 | `-n64-controllers:<list>` | 1–4 semicolon-separated declarations | No controller hints in the advanced homebrew header |
 | `-n64-assets:<directory>` | Existing directory | No DragonFS image is added |
 | `-n64-metadata:<file>` | Existing INI file | No extended metadata is added |
+| `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c` and `.S` sources get only the SDK's flags |
 | `-out:<path>` | Output file path, with optional `.z64` suffix | Package-directory name plus `.z64` |
 
 Valid save types are `none`, `eeprom4k`, `eeprom16k`, `sram256k`,
@@ -206,8 +207,8 @@ The integrated executable pipeline also rejects these combinations:
 - `-no-crt` or `-no-entry-point`;
 - `-linker`;
 - `-print-linker-flags` (use `-show-system-calls` instead);
-- foreign inputs other than static `.o` and `.a` files, except the built-in
-  `c`, `m`, `dragon`, and `dragonsys` libraries.
+- foreign inputs other than static `.o` and `.a` files and `.c` and `.S`
+  sources, except the built-in `c`, `m`, `dragon`, and `dragonsys` libraries.
 
 `-extra-linker-flags` and the extra linker flags attached to a foreign import
 are appended to the SDK's `mips64-elf-g++` link command. They are split on
@@ -216,6 +217,35 @@ as `-extra-linker-flags:"-Wl,--wrap=malloc"`.
 
 Object, assembly, and LLVM IR build modes do not run libdragon packaging and
 therefore do not accept ROM configuration options.
+
+## Foreign C and assembly sources
+
+A foreign import on `-target:n64` may name `.c` and `.S` sources as well as
+objects. Paths resolve against the importing file, as object paths do:
+
+```odin
+foreign import probe {"probe.c", "rsp_probe.S"}
+```
+
+The build compiles each source with the SDK's `mips64-elf-gcc` and the flags of
+libdragon's `n64.mk` rules, then links the object in the source's place. A `.c`
+file gets `N64_CFLAGS`. A `.S` file whose name starts with `rsp` is RSP
+microcode: it is linked with `rsp.ld`, and its `.text`, `.data` and `.meta`
+sections become `<name>_text_start` and the other symbols that
+`DEFINE_RSP_UCODE(<name>)` expects. Any other `.S` file is VR4300 assembly
+and gets `N64_ASFLAGS`. Each compile runs in the source's directory, so
+`#include "..."` and `__FILE__` see the paths `n64.mk` would give them.
+
+`-n64-cflags` appends flags to every source of the build, for example
+warnings, include directories or defines:
+
+```sh
+odin build . -target:n64 -n64-cflags:"-Wall -Wextra -Werror -DPROBE_FAULT=1"
+```
+
+Like `-extra-linker-flags`, the value is split on whitespace with no shell
+quoting. Sources are compiled on every build; there is no dependency tracking.
+`odin check -target:n64` accepts `.c` imports without compiling them.
 
 ## Full configured build
 

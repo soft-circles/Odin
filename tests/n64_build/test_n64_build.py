@@ -85,6 +85,64 @@ def run_host_build(app: Path, *arguments: str) -> subprocess.CompletedProcess[st
 	)
 
 
+def run_check(app: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+	return subprocess.run(
+		[str(ODIN), "check", ".", *arguments],
+		cwd=app,
+		text=True,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.STDOUT,
+		check=False,
+	)
+
+
+def create_foreign_source_app(parent: Path, name: str) -> Path:
+	"""A package that foreign-imports a C source, a VR4300 .S source and an RSP .S source."""
+	app = parent / name
+	(app / "other").mkdir(parents=True)
+	(app / "helper.c").write_text(
+		"#include <rsp.h>\n"
+		"#ifndef FROM_CFLAGS\n"
+		"#error FROM_CFLAGS must come from -n64-cflags\n"
+		"#endif\n"
+		"DEFINE_RSP_UCODE(rsp_vector);\n"
+		"int helper_value(void) { return FROM_CFLAGS; }\n"
+		"void *helper_ucode(void) { return &rsp_vector; }\n",
+		encoding="utf-8",
+	)
+	# A second probe.c in another directory must not collide with the first in the intermediates.
+	(app / "probe.c").write_text("int first_probe(void) { return 1; }\n", encoding="utf-8")
+	(app / "other/probe.c").write_text("int second_probe(void) { return 2; }\n", encoding="utf-8")
+	(app / "vr4300.S").write_text(
+		"\t.set noreorder\n\t.text\n\t.globl asm_value\nasm_value:\n\tjr $ra\n\tli $v0, 7\n",
+		encoding="utf-8",
+	)
+	shutil.copy2(ODIN_ROOT / "tests/rsp_asm/vector-reference.S", app / "rsp_vector.S")
+	(app / "main.odin").write_text(
+		"package foreign_sources\n\n"
+		"foreign import lib {\"helper.c\", \"vr4300.S\", \"rsp_vector.S\"}\n"
+		"foreign import probes {\"probe.c\", \"other/probe.c\"}\n\n"
+		"@(default_calling_convention=\"c\")\n"
+		"foreign lib {\n"
+		"\thelper_value :: proc() -> i32 ---\n"
+		"\thelper_ucode :: proc() -> rawptr ---\n"
+		"\tasm_value :: proc() -> i32 ---\n"
+		"}\n"
+		"@(default_calling_convention=\"c\")\n"
+		"foreign probes {\n"
+		"\tfirst_probe :: proc() -> i32 ---\n"
+		"\tsecond_probe :: proc() -> i32 ---\n"
+		"}\n\n"
+		"main :: proc() {\n"
+		"\tif helper_value() + asm_value() + first_probe() + second_probe() == 0 || helper_ucode() == nil {\n"
+		"\t\tunreachable()\n"
+		"\t}\n"
+		"}\n",
+		encoding="utf-8",
+	)
+	return app
+
+
 def make_sdk_facade(parent: Path, source: Path) -> Path:
 	"""Link the required SDK inputs without requiring version metadata."""
 	root = parent / "sdk facade"
@@ -161,9 +219,21 @@ class N64OptionValidationTests(unittest.TestCase):
 				self.assert_invalid_option(option, diagnostic)
 
 	def test_n64_options_are_rejected_for_host_builds(self):
-		result = run_host_build(self.app, "-n64-title:Host")
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("may only be used with -target:n64", result.stdout)
+		for option in ("-n64-title:Host", "-n64-cflags:-DHOST"):
+			with self.subTest(option=option):
+				result = run_host_build(self.app, option)
+				self.assertNotEqual(result.returncode, 0, result.stdout)
+				self.assertIn("may only be used with -target:n64", result.stdout)
+
+	def test_foreign_c_sources_are_checked_only_for_n64(self):
+		app = create_foreign_source_app(self.root, "foreign sources")
+
+		n64 = run_check(app, "-target:n64")
+		host = run_check(app)
+
+		self.assertEqual(n64.returncode, 0, n64.stdout)
+		self.assertNotEqual(host.returncode, 0, host.stdout)
+		self.assertIn("you cannot import a .c file", host.stdout)
 
 
 class N64SdkDiscoveryTests(unittest.TestCase):
@@ -370,6 +440,89 @@ class N64EndToEndBuildTests(unittest.TestCase):
 
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
+
+	def test_foreign_c_and_assembly_sources_are_compiled_with_n64_cflags(self):
+		app = create_foreign_source_app(self.root, "foreign sources")
+		output = app / "sources.z64"
+
+		result = run_build(
+			app,
+			f"-n64-inst:{self.sdk}",
+			f"-out:{output}",
+			"-n64-cflags:-DFROM_CFLAGS=3  -Wextra",
+			"-keep-temp-files",
+			"-show-system-calls",
+		)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
+		self.assertIn("[SYSTEM CALL] n64-cc", result.stdout)
+		self.assertIn("[SYSTEM CALL] n64-rsp-as", result.stdout)
+		self.assertIn("-std=gnu17 -DFROM_CFLAGS=3 -Wextra -o", result.stdout)
+		foreign = app / "sources.n64-build" / "foreign"
+		self.assertEqual(
+			{path.name for path in foreign.glob("*.o") if "." not in path.stem},
+			{"0-helper.o", "1-vr4300.o", "2-rsp_vector.o", "3-probe.o", "4-probe.o"},
+		)
+		symbols = subprocess.run(
+			[str(self.sdk / "bin/mips64-elf-nm"), str(app / "sources.n64-build" / "odin-n64.elf")],
+			text=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			check=True,
+		).stdout
+		for symbol in ("helper_value", "asm_value", "first_probe", "second_probe", "rsp_vector_text_start", "rsp_vector_meta_end"):
+			self.assertRegex(symbols, rf" {symbol}\n")
+
+	def test_inherited_gcc_environment_does_not_reach_foreign_source_compiles(self):
+		app = create_foreign_source_app(self.root, "gcc environment")
+		output = app / "environment.z64"
+		dependencies = self.root / "inherited dependencies.d"
+
+		result = run_build(
+			app,
+			f"-n64-inst:{self.sdk}",
+			f"-out:{output}",
+			"-n64-cflags:-DFROM_CFLAGS=1",
+			extra_env={"DEPENDENCIES_OUTPUT": str(dependencies), "GCC_EXEC_PREFIX": str(self.root / "missing gcc") + "/"},
+		)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertTrue(output.is_file(), result.stdout)
+		self.assertFalse(dependencies.exists(), result.stdout)
+
+	def test_foreign_source_compile_failure_fails_the_build_and_keeps_intermediates(self):
+		app = create_foreign_source_app(self.root, "failing foreign sources")
+		output = app / "must-not-exist.z64"
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertFalse(output.exists(), result.stdout)
+		self.assertIn("FROM_CFLAGS must come from -n64-cflags", result.stdout)
+		self.assertIn("N64 packaging step 'cc' failed", result.stdout)
+		self.assertIn("intermediates were retained", result.stdout)
+
+	def test_foreign_sources_leave_no_intermediates_without_keep_temp_files(self):
+		app = create_foreign_source_app(self.root, "clean foreign sources")
+		output = app / "clean.z64"
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}", "-n64-cflags:-DFROM_CFLAGS=1")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertTrue(output.is_file(), result.stdout)
+		self.assertFalse((app / "clean.n64-build").exists(), result.stdout)
+
+	def test_foreign_source_requires_the_sdk_compiler(self):
+		sdk = make_sdk_facade(self.root, self.sdk)
+		app = create_foreign_source_app(self.root, "facade foreign sources")
+		output = app / "must-not-exist.z64"
+
+		result = run_build(app, f"-n64-inst:{sdk}", f"-out:{output}", "-n64-cflags:-DFROM_CFLAGS=1")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("requires the executable N64 SDK tool bin/mips64-elf-gcc", result.stdout)
+		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
 
 	def test_inherited_n64_toolchain_override_does_not_escape_validated_sdk(self):
 		app = create_app(self.root, "sanitized environment app")

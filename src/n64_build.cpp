@@ -223,6 +223,16 @@ gb_internal bool n64_foreign_input_is_sdk_library(String const &input) {
 	return input == "c" || input == "m" || input == "dragon" || input == "dragonsys";
 }
 
+gb_internal bool n64_foreign_input_is_source(String const &input) {
+	String extension = path_extension(input, false);
+	return extension == "c" || extension == "S";
+}
+
+// n64.mk assembles a .S source whose file name starts with "rsp" as RSP microcode, and any other .S for the VR4300.
+gb_internal bool n64_foreign_input_is_rsp_source(String const &input) {
+	return path_extension(input, false) == "S" && string_starts_with(remove_directory_from_path(input), STR_LIT("rsp"));
+}
+
 // Pure validation, run before the intermediates directory exists so a
 // rejected request leaves nothing behind in the output directory.
 gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
@@ -233,14 +243,30 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 				continue;
 			}
 			String extension = path_extension(input, false);
-			if (!str_eq_ignore_case(extension, STR_LIT("o")) &&
+			bool source = n64_foreign_input_is_source(input);
+			if (!source &&
+			    !str_eq_ignore_case(extension, STR_LIT("o")) &&
 			    !str_eq_ignore_case(extension, STR_LIT("a"))) {
-				gb_printf_err("N64 foreign import input must be a static .o or .a file, got: %.*s\n", LIT(input));
+				gb_printf_err("N64 foreign import input must be a static .o or .a file, or a .c or .S source, got: %.*s\n", LIT(input));
 				return false;
 			}
 			if (!gb_file_exists(alloc_cstring(temporary_allocator(), input))) {
 				gb_printf_err("N64 foreign import input does not exist: %.*s\n", LIT(input));
 				return false;
+			}
+			if (!source) {
+				continue;
+			}
+			// Sources need the SDK compiler; RSP microcode also needs objcopy and ld to wrap its sections.
+			char const *tools[] = {"bin/mips64-elf-gcc", "bin/mips64-elf-objcopy", "bin/mips64-elf-ld"};
+			isize tool_count = n64_foreign_input_is_rsp_source(input) ? gb_count_of(tools) : 1;
+			for (isize index = 0; index < tool_count; index += 1) {
+				String tool = n64_path_join(temporary_allocator(), request.settings.sdk_root, make_string_c(tools[index]));
+				if (!n64_sdk_tool_is_executable(tool)) {
+					gb_printf_err("N64 foreign import source %.*s requires the executable N64 SDK tool %s in %.*s\n",
+					              LIT(input), tools[index], LIT(request.settings.sdk_root));
+					return false;
+				}
 			}
 		}
 	}
@@ -253,8 +279,11 @@ gb_internal bool n64_environment_key_is_filtered(char const *entry) {
 		return true;
 	}
 	isize key_length = equals-entry;
+	// GCC reads the others to add include and library paths, find its own programs or write dependency files.
 	char const *exact_keys[] = {
 		"PATH", "SHELL",
+		"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH",
+		"GCC_EXEC_PREFIX", "COMPILER_PATH", "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES",
 	};
 	for (char const *key : exact_keys) {
 		isize length = cast(isize)strlen(key);
@@ -346,6 +375,7 @@ struct N64Intermediates {
 	String dfs;
 	String rom_tmp;
 	String sdk_link; // only created when the SDK path is not shell-safe
+	String foreign;  // objects built from foreign .c and .S sources; created on demand
 };
 
 typedef Array<char const *> N64Argv;
@@ -420,12 +450,204 @@ gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &out
 	out->dfs      = n64_path_join(a, out->dir, STR_LIT("odin-n64.dfs"));
 	out->rom_tmp  = n64_path_join(a, out->dir, STR_LIT("odin-n64.z64.tmp"));
 	out->sdk_link = n64_path_join(a, out->dir, STR_LIT("sdk"));
+	out->foreign  = n64_path_join(a, out->dir, STR_LIT("foreign"));
 	char const *dir_c = alloc_cstring(temporary_allocator(), out->dir);
 	if (mkdir(dir_c, 0755) != 0 && errno != EEXIST) {
 		gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(out->dir), strerror(errno));
 		return false;
 	}
 	return true;
+}
+
+// N64_C_AND_CXX_FLAGS (n64.mk:69-75) without -DLIBDRAGON_PREVIEW, with prefix_map in place of its -ffile-prefix-map.
+gb_internal void n64_add_c_and_cxx_flags(N64Argv *argv, N64BuildSettings const &s, String const &prefix_map) {
+	n64_arg(argv, "-march=vr4300"); n64_arg(argv, "-mtune=vr4300"); n64_arg(argv, "-mabi=o64");
+	n64_arg(argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include/newlib_overrides")));
+	n64_arg(argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
+	n64_arg(argv, "-include"); n64_arg(argv, "ktls.h");
+	n64_arg(argv, "-falign-functions=32"); n64_arg(argv, "-ffunction-sections"); n64_arg(argv, "-fdata-sections");
+	n64_arg(argv, "-g"); n64_arg(argv, prefix_map);
+	char const *flags[] = {
+		"-ffast-math", "-ftrapping-math", "-fno-associative-math", "-DN64", "-O2",
+		"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
+		"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
+		"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
+		"-Wno-error=unused-local-typedefs", "-Wno-error=unused-const-variable", "-ftrivial-auto-var-init=pattern",
+	};
+	for (char const *flag : flags) {
+		n64_arg(argv, flag);
+	}
+}
+
+// ---- Foreign sources --------------------------------------------------------
+// A foreign import may name .c and .S sources. Each one compiles into
+// <intermediates>/foreign by n64.mk's $(BUILD_DIR)/%.o rule for its type, with
+// N64_CFLAGS, N64_ASFLAGS or N64_RSPASFLAGS followed by -n64-cflags, and its
+// object is linked in the source's place. LIBDRAGON_PREVIEW is n64.mk's 2.
+
+// objcopy -I binary names its symbols _binary_<input name, non-alphanumerics as '_'><suffix>.
+gb_internal String n64_binary_symbol(String const &file_name, char const *suffix) {
+	gbAllocator a = permanent_allocator();
+	String mangled = copy_string(a, file_name);
+	for (isize index = 0; index < mangled.len; index += 1) {
+		if (!gb_char_is_alphanumeric(cast(char)mangled[index])) {
+			mangled.text[index] = '_';
+		}
+	}
+	return concatenate3_strings(a, STR_LIT("_binary_"), mangled, make_string_c(suffix));
+}
+
+// Runs n64.mk's rsp*.S rule: link the microcode with rsp.ld, then wrap its .text, .data and .meta as data objects.
+gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &source, String const &name,
+                                 String const &object, String const &foreign_dir, char **env) {
+	N64BuildSettings const &s = request.settings;
+	bool show = request.show_system_calls;
+	gbAllocator a = permanent_allocator();
+	String stem = remove_extension_from_path(remove_directory_from_path(source));
+	String base = n64_path_join(a, foreign_dir, name);
+	char const *foreign_dir_c = alloc_cstring(a, foreign_dir);
+	i32 result = 0;
+	N64Argv argv = {};
+
+	// N64_RSPASFLAGS, run from the source's directory like the C rule.
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-gcc"));
+	n64_arg(&argv, "-march=mips1"); n64_arg(&argv, "-mabi=32"); n64_arg(&argv, "-Wa,--fatal-warnings");
+	n64_arg(&argv, concatenate_strings(a, STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
+	n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2");
+	n64_add_words(&argv, s.cflags);
+	n64_arg(&argv, concatenate_strings(a, STR_LIT("-L"), n64_sdk_path(s, "mips64-elf/lib")));
+	n64_arg(&argv, "-nostartfiles"); n64_arg(&argv, "-Wl,-Trsp.ld"); n64_arg(&argv, "-Wl,--gc-sections");
+	// -Xlinker keeps a map path containing commas in one linker argument.
+	n64_arg(&argv, "-Xlinker"); n64_arg(&argv, concatenate3_strings(a, STR_LIT("-Map="), base, STR_LIT(".map")));
+	n64_arg(&argv, "-Xlinker"); n64_arg(&argv, "--cref");
+	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, base, STR_LIT(".elf")));
+	n64_arg(&argv, remove_directory_from_path(source));
+	result = n64_run_tool("rsp-as", argv, env, show, false, alloc_cstring(a, directory_from_path(source)));
+	if (result != 0) return result;
+
+	// The rest runs inside the foreign directory so objcopy derives its symbol names from bare file names.
+	char const *sections[] = {"text", "data", "meta"};
+	char const *suffixes[] = {"_start", "_end", "_size"};
+	String section_objects[3] = {};
+	for (isize index = 0; index < 3; index += 1) {
+		String section = make_string_c(sections[index]);
+		String binary = concatenate_strings(a, concatenate3_strings(a, name, STR_LIT("."), section), STR_LIT(".bin"));
+		array_init(&argv, a);
+		n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-objcopy"));
+		n64_arg(&argv, "-O"); n64_arg(&argv, "binary");
+		n64_arg(&argv, "-j"); n64_arg(&argv, concatenate_strings(a, STR_LIT("."), section));
+		n64_arg(&argv, concatenate_strings(a, name, STR_LIT(".elf"))); n64_arg(&argv, binary);
+		if (index == 2) {
+			n64_arg(&argv, "--set-section-flags"); n64_arg(&argv, ".meta=alloc,load");
+		}
+		if ((result = n64_run_tool("rsp-objcopy", argv, env, show, false, foreign_dir_c)) != 0) return result;
+
+		if (index == 2) {
+			// Like n64.mk, give an overlay without metadata a one-byte .meta section.
+			String binary_path = n64_path_join(a, foreign_dir, binary);
+			char const *binary_c = alloc_cstring(a, binary_path);
+			struct stat binary_stat = {};
+			if (stat(binary_c, &binary_stat) == 0 && binary_stat.st_size == 0) {
+				FILE *meta = fopen(binary_c, "wb");
+				bool written = meta != nullptr && fputc(0, meta) != EOF;
+				if (meta != nullptr && fclose(meta) != 0) {
+					written = false;
+				}
+				if (!written) {
+					gb_printf_err("Failed to write %.*s\n", LIT(binary_path));
+					return 1;
+				}
+			}
+		}
+
+		section_objects[index] = concatenate_strings(a, concatenate3_strings(a, name, STR_LIT("."), section), STR_LIT(".o"));
+		String target = concatenate3_strings(a, stem, STR_LIT("_"), section);
+		array_init(&argv, a);
+		n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-objcopy"));
+		n64_arg(&argv, "-I"); n64_arg(&argv, "binary"); n64_arg(&argv, "-O"); n64_arg(&argv, "elf32-bigmips");
+		n64_arg(&argv, "-B"); n64_arg(&argv, "mips4300");
+		for (char const *suffix : suffixes) {
+			n64_arg(&argv, "--redefine-sym");
+			n64_arg(&argv, concatenate3_strings(a, n64_binary_symbol(binary, suffix), STR_LIT("="),
+			                                    concatenate_strings(a, target, make_string_c(suffix))));
+		}
+		n64_arg(&argv, "--set-section-alignment"); n64_arg(&argv, ".data=16");
+		n64_arg(&argv, "--rename-section"); n64_arg(&argv, ".text=.data");
+		n64_arg(&argv, binary); n64_arg(&argv, section_objects[index]);
+		if ((result = n64_run_tool("rsp-objcopy", argv, env, show, false, foreign_dir_c)) != 0) return result;
+	}
+
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-ld"));
+	n64_arg(&argv, "-relocatable");
+	for (String const &section_object : section_objects) {
+		n64_arg(&argv, section_object);
+	}
+	n64_arg(&argv, "-o"); n64_arg(&argv, object);
+	return n64_run_tool("rsp-ld", argv, env, show, false, foreign_dir_c);
+}
+
+// Compiles a C or VR4300 assembly source from its own directory, as n64.mk does, so debug paths stay relative.
+gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const &source, String const &object, char **env) {
+	N64BuildSettings const &s = request.settings;
+	gbAllocator a = permanent_allocator();
+	String directory = directory_from_path(source);
+	N64Argv argv = {};
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-gcc"));
+	n64_arg(&argv, "-c");
+	if (path_extension(source, false) == "c") {
+		// N64_CFLAGS. n64.mk maps "$(CURDIR)" to N64_BACKTRACE_FILE_PREFIX, which is empty by default.
+		n64_add_c_and_cxx_flags(&argv, s, concatenate3_strings(a, STR_LIT("-ffile-prefix-map="), directory, STR_LIT("=")));
+		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2"); n64_arg(&argv, "-std=gnu17");
+	} else {
+		// N64_ASFLAGS
+		n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mabi=o64");
+		n64_arg(&argv, "-Wa,--fatal-warnings");
+		n64_arg(&argv, concatenate_strings(a, STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
+		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2");
+	}
+	n64_add_words(&argv, s.cflags);
+	n64_arg(&argv, "-o"); n64_arg(&argv, object);
+	n64_arg(&argv, remove_directory_from_path(source));
+	return n64_run_tool("cc", argv, env, request.show_system_calls, false, alloc_cstring(a, directory));
+}
+
+// Builds each foreign .c and .S source and puts its object in the source's place in the request.
+gb_internal i32 n64_compile_foreign_sources(N64BuildRequest *request, N64Intermediates const &files, char **env) {
+	gbAllocator a = permanent_allocator();
+	isize count = 0;
+	for (N64ForeignLibrary &library : request->foreign_libraries) {
+		Slice<String> paths = slice_make<String>(a, library.paths.count);
+		for_array(path_index, library.paths) {
+			String input = string_trim_whitespace(library.paths[path_index]);
+			paths[path_index] = library.paths[path_index];
+			if (n64_foreign_input_is_sdk_library(input) || !n64_foreign_input_is_source(input)) {
+				continue;
+			}
+			if (count == 0 && mkdir(alloc_cstring(a, files.foreign), 0755) != 0 && errno != EEXIST) {
+				gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(files.foreign), strerror(errno));
+				return 1;
+			}
+			// Numbered names keep two sources with the same file name apart.
+			String stem = remove_extension_from_path(remove_directory_from_path(input));
+			gbString numbered = gb_string_make(a, "");
+			numbered = gb_string_append_fmt(numbered, "%td-%.*s", count, LIT(stem));
+			String name = make_string_c(numbered);
+			String object = concatenate_strings(a, n64_path_join(a, files.foreign, name), STR_LIT(".o"));
+			count += 1;
+			i32 result = n64_foreign_input_is_rsp_source(input)
+				? n64_assemble_rsp(*request, input, name, object, files.foreign, env)
+				: n64_compile_source(*request, input, object, env);
+			if (result != 0) {
+				return result;
+			}
+			paths[path_index] = object;
+		}
+		library.paths = paths;
+	}
+	return 0;
 }
 
 gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &files, char **env) {
@@ -437,21 +659,8 @@ gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &f
 	N64Argv argv = {};
 	array_init(&argv, permanent_allocator());
 	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-g++"));
-	// N64_C_AND_CXX_FLAGS verbatim (n64.mk:69-75); n64.mk passes them to the link too.
-	n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-mabi=o64");
-	n64_arg(&argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include/newlib_overrides")));
-	n64_arg(&argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
-	char const *flags[] = {
-		"-include", "ktls.h", "-falign-functions=32", "-ffunction-sections", "-fdata-sections", "-g",
-		"-ffile-prefix-map=.=.", "-ffast-math", "-ftrapping-math", "-fno-associative-math", "-DN64", "-O2",
-		"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
-		"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
-		"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
-		"-Wno-error=unused-local-typedefs", "-Wno-error=unused-const-variable", "-ftrivial-auto-var-init=pattern",
-	};
-	for (char const *flag : flags) {
-		n64_arg(&argv, flag);
-	}
+	// n64.mk passes N64_C_AND_CXX_FLAGS to the link too.
+	n64_add_c_and_cxx_flags(&argv, s, STR_LIT("-ffile-prefix-map=.=."));
 	n64_arg(&argv, "-o"); n64_arg(&argv, files.elf);
 	for (String const &object : request->object_paths) {
 		n64_arg(&argv, object);
@@ -606,7 +815,10 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 	// only n64sym gets N64_INST (see n64_build_rom_from_elf).
 	char **env = n64_sanitized_environment();
 
-	i32 result = n64_link_elf(&request, files, env);
+	i32 result = n64_compile_foreign_sources(&request, files, env);
+	if (result == 0) {
+		result = n64_link_elf(&request, files, env);
+	}
 	if (result == 0) {
 		result = n64_build_rom_from_elf(request, files, env);
 	}
@@ -627,6 +839,13 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 	bool clean = true;
 	for (String const &path : generated) {
 		clean = n64_remove_file_if_present(path) && clean;
+	}
+	Array<FileInfo> foreign_files = {};
+	if (read_directory(files.foreign, &foreign_files) == ReadDirectory_None) {
+		for (FileInfo const &file : foreign_files) {
+			clean = n64_remove_file_if_present(file.fullpath) && clean;
+		}
+		clean = n64_remove_directory(files.foreign) && clean;
 	}
 	if (!clean || !n64_remove_directory(files.dir)) {
 		gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(files.dir));

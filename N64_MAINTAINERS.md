@@ -101,8 +101,11 @@ and the ABI/runtime tests.
 
 Each packaging tool is started with `posix_spawn`, an absolute path inside the
 validated SDK, and a fixed argument vector rather than a shell command. Its
-environment drops inherited `PATH`, `SHELL`, and every `N64_*` variable, and
-supplies a fixed system `PATH` and shell. Only `n64sym` receives `N64_INST`,
+environment drops inherited `PATH`, `SHELL`, every `N64_*` variable and the
+variables GCC reads for search paths, its own programs and dependency output
+(`CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
+`LIBRARY_PATH`, `GCC_EXEC_PREFIX`, `COMPILER_PATH`, `DEPENDENCIES_OUTPUT` and
+`SUNPRO_DEPENDENCIES`), and supplies a fixed system `PATH` and shell. Only `n64sym` receives `N64_INST`,
 set to the validated SDK, because it finds `objdump` and `addr2line` through
 it. These controls prevent an inherited toolchain prefix or SDK root from
 escaping the SDK that was validated.
@@ -124,10 +127,16 @@ it, and reuses it on the next build of the same output:
 ├── odin-n64.elf.stripped      # stripped, then compressed in place
 ├── odin-n64.dfs               # only with -n64-assets
 ├── odin-n64.z64.tmp           # before final placement
-└── sdk -> <validated SDK>     # only when the SDK path is not shell-safe
+├── sdk -> <validated SDK>     # only when the SDK path is not shell-safe
+└── foreign/                   # only when a foreign import names .c or .S sources
+    ├── <n>-<name>.o           # the object linked in place of source n
+    └── <n>-<name>.{elf,map,text.bin,...}  # RSP microcode steps
 ```
 
-`n64_package_rom` runs the steps of libdragon's `n64.mk` recipe for the
+`n64_package_rom` first compiles foreign `.c` and `.S` sources with the
+`$(BUILD_DIR)/%.o` rules of `n64.mk` (see `n64_compile_foreign_sources`), each
+from its own directory and numbered so two sources with one file name stay
+apart. It then runs the steps of libdragon's `n64.mk` recipe for the
 `odin-n64.z64` goal in order: `mips64-elf-g++` link, `n64sym`, a copy and
 `mips64-elf-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
 `n64tool --toc`, `ed64romconfig` and `n64metadata` when metadata is present.
