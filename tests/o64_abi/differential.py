@@ -58,6 +58,9 @@ def main():
 		"o_sf_b": ("f32", False),
 		"o_big_f": ("gpr", False),
 		"o_big_after": ("gpr32", False),
+		"o_wide_c": ("gpr", False),
+		"o_wide_j": ("gpr", False),
+		"o_wide_after": ("gpr32", False),
 		"o_ret_s3": ("sret", False),
 		"o_ret_s12": ("sret", False),
 		"o_ret_big": ("sret", False),
@@ -112,6 +115,7 @@ def main():
 		"o_call_var": 8,
 		"o_call_var_s3": 0,
 		"o_call_var_big": 8,
+		"o_call_wide": 24,
 		"o_call_var_u8": 0,
 		"o_call_i32_cast": 0,
 		"o_call_u32_cast": 0,
@@ -126,6 +130,10 @@ def main():
 		if name == "o_call_var_big":
 			# The trailing i32 occupies the low four bytes of its stack slot.
 			return gprs, fprs, stack[4:]
+		if name == "o_call_wide":
+			# Two struct slots spill past a1-a3, then the i32 in the low four
+			# bytes of its slot.
+			return gprs, fprs, stack[:16] + stack[20:]
 		return state
 
 	for name, stack_bytes in call_stack_bytes.items():

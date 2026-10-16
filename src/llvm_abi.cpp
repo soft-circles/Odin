@@ -2338,7 +2338,11 @@ namespace lbAbiMipsO64 {
 		return LLVMStructTypeInContext(c, fields, count, false);
 	}
 
-	gb_internal lbArgType compute_arg_type(LLVMContextRef c, LLVMTypeRef type, Type *source_type) {
+	// O64 has four 8-byte argument registers, $4-$7.
+	gb_internal i64 const REGISTER_ARGUMENT_BYTES = 4*8;
+
+	gb_internal lbArgType compute_arg_type(LLVMContextRef c, LLVMTypeRef type, Type *source_type,
+	                                       ProcCallingConvention calling_convention) {
 		if (!is_aggregate(type, source_type)) {
 			LLVMAttributeRef attr = integer_extension_attribute(c, type, source_type);
 			return lb_arg_type_direct(type, nullptr, nullptr, attr);
@@ -2349,6 +2353,19 @@ namespace lbAbiMipsO64 {
 			return lb_arg_type_ignore(type);
 		}
 
+		// An aggregate wider than the argument registers spills to the stack. Passing it as a
+		// first-class aggregate of `size/8` integers costs LLVM's MIPS instruction selection
+		// super-linear time and memory: a 70 KB struct hung it.
+		if (size > REGISTER_ARGUMENT_BYTES) {
+			// Odin parameters are immutable, so an Odin procedure takes a pointer to the caller's value.
+			if (is_calling_convention_odin(calling_convention)) {
+				return lb_arg_type_indirect(type, nullptr);
+			}
+			// `byval` gives the same register and stack layout as the direct slots below, as GCC
+			// lays them out, but LLVM copies the stack part with one memcpy.
+			return lb_arg_type_indirect_byval(c, type, source_type);
+		}
+
 		// O64 passes structures and unions by value in consecutive 8-byte slots.
 		// `inreg` tells LLVM that a big-endian partial slot is left-justified.
 		LLVMAttributeRef attr = lb_create_enum_attribute(c, "inreg");
@@ -2356,11 +2373,12 @@ namespace lbAbiMipsO64 {
 	}
 
 	gb_internal Array<lbArgType> compute_arg_types(LLVMContextRef c, LLVMTypeRef *arg_types,
-	                                               unsigned arg_count, Type *original_type) {
+	                                               unsigned arg_count, Type *original_type,
+	                                               ProcCallingConvention calling_convention) {
 		auto args = array_make<lbArgType>(lb_function_type_args_allocator(), arg_count);
 		auto srcs = lb_abi_param_source_types(original_type, arg_count);
 		for (unsigned i = 0; i < arg_count; i++) {
-			args[i] = compute_arg_type(c, arg_types[i], srcs[i]);
+			args[i] = compute_arg_type(c, arg_types[i], srcs[i], calling_convention);
 		}
 		return args;
 	}
@@ -2402,7 +2420,7 @@ namespace lbAbiMipsO64 {
 		lbFunctionType *ft = permanent_alloc_item<lbFunctionType>();
 		ft->ctx = c;
 		ft->calling_convention = calling_convention;
-		ft->args = compute_arg_types(c, arg_types, arg_count, original_type);
+		ft->args = compute_arg_types(c, arg_types, arg_count, original_type, calling_convention);
 		ft->ret = compute_return_type(ft, c, return_type, return_is_defined,
 		                              return_is_tuple, original_type);
 		return ft;

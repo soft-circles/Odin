@@ -4,6 +4,8 @@ struct S3 { uint8_t a, b, c; };
 struct S5 { uint8_t a, b, c, d, e; };
 struct S12 { uint32_t a, b, c; };
 struct Big { uint32_t a, b, c, d, e, f; };
+struct Wide { uint32_t a, b, c, d, e, f, g, h, i, j; };
+struct Wide64 { uint64_t a, b, c, d, e; };
 struct SF { float a, b; };
 union U8 { uint64_t q; uint32_t w[2]; uint8_t b[8]; };
 
@@ -37,6 +39,9 @@ uint32_t o_u8_w0(union U8 u) { return u.w[0]; }
 float o_sf_b(struct SF s) { return s.b; }
 uint32_t o_big_f(struct Big s) { return s.f; }
 int32_t o_big_after(struct Big s, int32_t next) { return next; }
+uint32_t o_wide_c(struct Wide s) { return s.c; }
+uint32_t o_wide_j(struct Wide s) { return s.j; }
+int32_t o_wide_after(struct Wide s, int32_t next) { return next; }
 
 struct S3 o_ret_s3(uint32_t x) {
 	struct S3 r = {(uint8_t)x, (uint8_t)x, (uint8_t)x};
@@ -69,6 +74,7 @@ extern int64_t sink_named(int32_t, double, ...);
 extern int64_t sink_agg(int32_t, ...);
 extern int64_t sink_i32(int32_t);
 extern int64_t sink_u32(uint32_t);
+extern int64_t sink_wide(int32_t, struct Wide64, int32_t);
 
 int64_t o_call_var(int32_t n, double a, int32_t b, double c, int64_t d) {
 	return sink(n, a, b, c, d);
@@ -84,6 +90,10 @@ int64_t o_call_var_s3(int32_t n, struct S3 s, int32_t next) {
 
 int64_t o_call_var_big(int32_t n, struct Big s, int32_t next) {
 	return sink_agg(n, s, next);
+}
+
+int64_t o_call_wide(int32_t n, struct Wide64 s, int32_t next) {
+	return sink_wide(n, s, next);
 }
 
 int64_t o_call_var_u8(int32_t n, union U8 u, int32_t next) {
