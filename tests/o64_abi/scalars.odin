@@ -4,6 +4,9 @@ S3 :: struct {a, b, c: u8}
 S5 :: struct {a, b, c, d, e: u8}
 S12 :: struct {a, b, c: u32}
 Big :: struct {a, b, c, d, e, f: u32}
+// Wider than the four argument registers: passed byval.
+Wide :: struct {a, b, c, d, e, f, g, h, i, j: u32}
+Wide64 :: struct {a, b, c, d, e: u64}
 SF :: struct {a, b: f32}
 U8 :: struct #raw_union {
 	q: u64,
@@ -17,6 +20,7 @@ foreign {
 	sink_agg :: proc "c" (n: i32, #c_vararg args: ..any) -> i64 ---
 	sink_i32 :: proc "c" (x: i32) -> i64 ---
 	sink_u32 :: proc "c" (x: u32) -> i64 ---
+	sink_wide :: proc "c" (n: i32, s: Wide64, next: i32) -> i64 ---
 }
 
 @(export)
@@ -90,6 +94,21 @@ o_big_after :: proc "c" (s: Big, next: i32) -> i32 {
 }
 
 @(export)
+o_wide_c :: proc "c" (s: Wide) -> u32 {
+	return s.c
+}
+
+@(export)
+o_wide_j :: proc "c" (s: Wide) -> u32 {
+	return s.j
+}
+
+@(export)
+o_wide_after :: proc "c" (s: Wide, next: i32) -> i32 {
+	return next
+}
+
+@(export)
 o_ret_s3 :: proc "c" (x: u32) -> S3 {
 	return {u8(x), u8(x), u8(x)}
 }
@@ -132,6 +151,11 @@ o_call_var_s3 :: proc "c" (n: i32, s: S3, next: i32) -> i64 {
 @(export)
 o_call_var_big :: proc "c" (n: i32, s: Big, next: i32) -> i64 {
 	return sink_agg(n, s, next)
+}
+
+@(export)
+o_call_wide :: proc "c" (n: i32, s: Wide64, next: i32) -> i64 {
+	return sink_wide(n, s, next)
 }
 
 @(export)

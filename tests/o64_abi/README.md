@@ -16,7 +16,8 @@ N64_INST=/path/to/n64_toolchain make -C tests/o64_abi/interop clean all check
 ```
 
 The historical expected summaries are 49/49 argument locations, 43/43 LLVM/GCC execution
-differentials, 19/19 focused Odin/GCC leaf probes plus 7/7 call-state probes,
+differentials, 22/22 focused Odin/GCC leaf probes plus 8/8 call-state probes
+(19/19 and 7/7 before the probes for structs wider than the argument registers),
 and 23/23 linked Odin/GCC/libdragon probes. The Milestone 0 accepted ROM
 SHA-256 was:
 
