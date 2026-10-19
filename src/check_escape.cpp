@@ -2047,6 +2047,16 @@ gb_internal Array<EscapeValue> escape_call(EscapeAnalysis *ea, Ast *call) {
 				if (flow.target == EscapeFlowTarget_Deep) {
 					ptr = escape_reachable(ea, ptr);
 				}
+				// the paths of what is stored are of its own type, so only its origins are kept where the type of the
+				// memory it is stored into is not known, e.g. a pointer loaded through a field of a union, which could
+				// otherwise nest without end
+				Type *stored_into = pointee;
+				if (flow.target != EscapeFlowTarget_Pointee) {
+					stored_into = flow.target == EscapeFlowTarget_Loaded ? escape_pointee_type(pointee) : nullptr;
+				}
+				if (stored_into == nullptr) {
+					v = escape_as_pointer(v);
+				}
 				escape_store_through(ea, call, ptr, v, EscapeUpdate_Add);
 			}
 			break;
