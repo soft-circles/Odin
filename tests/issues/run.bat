@@ -105,6 +105,7 @@ clang -c ..\test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o || exit /b
 ..\..\..\odin run ..\test_issue_7798.odin %COMMON% || exit /b
 ..\..\..\odin test ..\test_issue_7763.odin %COMMON% || exit /b
 ..\..\..\odin test ..\test_issue_disabled_proc_value.odin %COMMON% -disable-assert || exit /b
+..\..\..\odin check ..\test_issue_escape_store_through_union.odin %COMMON% || exit /b
 
 @echo off
 
