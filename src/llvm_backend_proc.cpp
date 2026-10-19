@@ -5298,6 +5298,10 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 
 	auto args = array_make<lbValue>(permanent_allocator(), 0, pt->param_count);
 
+	auto pending_var_args = array_make<lbValue>(heap_allocator());
+	defer (array_free(&pending_var_args));
+	Type *pending_var_slice_type = nullptr;
+
 	bool vari_expand = (ce->ellipsis.pos.line != 0);
 	bool is_c_vararg = pt->c_vararg;
 	bool has_tuple_positional_arg = false;
@@ -5336,8 +5340,11 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 		array_resize(&args, fixed_count);
 
 		Type *slice_type = pt->params->Tuple.variables[pt->variadic_index]->type;
-		auto var_args = slice(slice_from_array(flat_args), supplied_fixed_count, flat_args.count);
-		array_add(&args, lb_build_variadic_slice(p, slice_type, var_args));
+		for (isize i = supplied_fixed_count; i < flat_args.count; i++) {
+			array_add(&pending_var_args, flat_args[i]);
+		}
+		pending_var_slice_type = slice_type;
+		array_add(&args, lb_const_nil(p->module, slice_type));
 	} else for_array(i, ce->split_args->positional) {
 		Entity *e = pt->params->Tuple.variables[i];
 		if (e->kind == Entity_TypeName) {
@@ -5380,13 +5387,11 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 					variadic_args = lb_build_expr(p, variadic[0]);
 					variadic_args = lb_emit_conv(p, variadic_args, slice_type);
 				} else {
-					auto var_args = array_make<lbValue>(heap_allocator(), 0, variadic.count);
-					defer (array_free(&var_args));
 					for (Ast *var_arg : variadic) {
 						lbValue v = lb_build_expr(p, var_arg);
-						lb_add_values_to_array(p, &var_args, v);
+						lb_add_values_to_array(p, &pending_var_args, v);
 					}
-					variadic_args = lb_build_variadic_slice(p, slice_type, slice_from_array(var_args));
+					pending_var_slice_type = slice_type;
 				}
 			}
 			array_add(&args, variadic_args);
@@ -5481,6 +5486,10 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 				args[arg_index] = lb_emit_conv(p, arg, e->type);
 			}
 		}
+	}
+
+	if (pending_var_slice_type != nullptr) {
+		args[pt->variadic_index] = lb_build_variadic_slice(p, pending_var_slice_type, slice_from_array(pending_var_args));
 	}
 
 	isize final_count = is_c_vararg ? args.count : pt->param_count;
