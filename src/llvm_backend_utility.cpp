@@ -2109,6 +2109,10 @@ gb_internal lbValue lb_emit_mul_add(lbProcedure *p, lbValue a, lbValue b, lbValu
 		case TargetArch_wasm64p32:
 			is_possible = false;
 			break;
+		case TargetArch_mips32be:
+			// NOTE: the VR4300 has no fused multiply-add, so llvm.fma lowers to a slow software fmaf call.
+			is_possible = false;
+			break;
 		}
 	}
 
