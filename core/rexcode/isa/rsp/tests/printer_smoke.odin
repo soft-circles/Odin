@@ -108,11 +108,10 @@ run_rsp_printer_tests :: proc() {
 		ops = {rsp.op_reg(rsp.AT), rsp.op_vr(rsp.VR31), {}, {}}},
 		"mfc2 at, $v31", 0x4801F800)
 	// mtc2/mfc2's element is the byte offset (bits 10-7); rsp.inc looks the
-	// GPR up as `hex.<name>`, so $1 has to be spelled `at` there. as gives
-	// 0x48880A00 for this line; encode drops the element until #8038.
-	check_text(rsp.Instruction{mnemonic = .MTC2, operand_count = 2, length = 4,
+	// GPR up as `hex.<name>`, so $1 has to be spelled `at` there.
+	check_print(rsp.Instruction{mnemonic = .MTC2, operand_count = 2, length = 4,
 		ops = {rsp.op_reg(rsp.T0), rsp.op_vr(rsp.VR1, 4), {}, {}}},
-		"mtc2 t0, $v01, 4")
+		"mtc2 t0, $v01, 4", 0x48880A00)
 
 	// Vector ALU: the element is spelled with rsp.inc's accessor names;
 	// field 1 has none, so it uses the 4-operand form.
@@ -121,10 +120,11 @@ run_rsp_printer_tests :: proc() {
 	check_print(rsp.inst_v_v_v(.VMUDH, rsp.VR4, rsp.VR5, rsp.VR6, 4),  "vmudh $v04, $v05, $v06.h0", 0x4A862907)
 	check_print(rsp.inst_v_v_v(.VMACF, rsp.VR7, rsp.VR8, rsp.VR9, 15), "vmacf $v07, $v08, $v09.e7", 0x4BE941C8)
 	check_print(rsp.inst_v_v_v(.VADD,  rsp.VR1, rsp.VR2, rsp.VR3, 1),  "vadd $v01, $v02, $v03, 1",  0x4A231050)
-	// Only vt has an element field, so one on vd is not printed.
-	check_print(rsp.Instruction{mnemonic = .VADD, operand_count = 3, length = 4,
+	// Only vt has an element field, so one on vd is not printed; encode
+	// rejects it.
+	check_text(rsp.Instruction{mnemonic = .VADD, operand_count = 3, length = 4,
 		ops = {rsp.op_vr(rsp.VR1, 3), rsp.op_vr(rsp.VR2), rsp.op_vr(rsp.VR3), {}}},
-		"vadd $v01, $v02, $v03", 0x4A031050)
+		"vadd $v01, $v02, $v03")
 
 	// Single-lane ops: `op vd, de, vt, element` (vs holds the destination lane).
 	check_print(rsp.inst_v_v_v(.VRCP, rsp.VR1, rsp.VR3, rsp.VR2, 13), "vrcp $v01, 3, $v02, 13", 0x4BA21870)
