@@ -1576,14 +1576,21 @@ gb_internal void lb_copy_bits(lbProcedure *p,
 	u64 buf_bytes,
 	u64 dst_bit,
 	u64 src_bit,
-	u64 size_bits
+	u64 size_bits,
+	u64 dst_unit,
+	u64 src_unit
 ) {
 	if (size_bits == 0) {
 		return;
 	}
 	GB_ASSERT(size_bits <= 64); // this routine assembles the field in a single u64
 
-	auto ptr_offset = [](lbProcedure *p, LLVMValueRef ptr, u64 offset) -> LLVMValueRef {
+	// Byte i of the frame is the i-th least significant byte of its `unit`-sized integer, so a
+	// big-endian unit stores it at the mirrored address. A unit of 1 is plain memory order.
+	auto ptr_offset = [](lbProcedure *p, LLVMValueRef ptr, u64 offset, u64 unit) -> LLVMValueRef {
+		if (unit > 1) {
+			offset = (offset/unit)*unit + (unit-1 - offset%unit);
+		}
 		LLVMValueRef indices[1] = {LLVMConstInt(lb_type(p->module, t_u64), offset, false)};
 		ptr = LLVMBuildPointerCast(p->builder, ptr, lb_type(p->module, t_u8_ptr), "");
 		return LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), ptr, indices, 1, "");
@@ -1616,7 +1623,7 @@ gb_internal void lb_copy_bits(lbProcedure *p,
 	// Gather: read exactly src_need_bytes bytes, pack the field into the low size_bits of `bits` ---
 	LLVMValueRef bits = LLVMConstInt(llvm_u64, 0, false);
 	for (u64 i = 0; i < src_need_bytes; i++) {
-		LLVMValueRef byte = OdinLLVMBuildUnalignedLoad(p, ptr_offset(p, src, src_byte + i), t_u8_ptr);
+		LLVMValueRef byte = OdinLLVMBuildUnalignedLoad(p, ptr_offset(p, src, src_byte + i, src_unit), t_u8_ptr);
 		byte = LLVMBuildZExt(p->builder, byte, llvm_u64, "");
 
 		// byte i sits at frame bit i*8; the field starts at frame bit src_shift
@@ -1648,13 +1655,27 @@ gb_internal void lb_copy_bits(lbProcedure *p,
 		contrib = LLVMBuildTrunc(p->builder, contrib, llvm_u8, "");
 		contrib = LLVMBuildAnd(p->builder, contrib, LLVMConstInt(llvm_u8, byte_mask, false), "");
 
-		LLVMValueRef old = OdinLLVMBuildUnalignedLoad(p, ptr_offset(p, dst, dst_byte + i), t_u8_ptr);
+		LLVMValueRef old = OdinLLVMBuildUnalignedLoad(p, ptr_offset(p, dst, dst_byte + i, dst_unit), t_u8_ptr);
 		old = LLVMBuildAnd(p->builder, old, LLVMConstInt(llvm_u8, (~byte_mask) & 0xff, false), "");
 
 		LLVMValueRef merged = LLVMBuildOr(p->builder, old, contrib, "");
-		LLVMValueRef store = LLVMBuildStore(p->builder, merged, ptr_offset(p, dst, dst_byte + i));
+		LLVMValueRef store = LLVMBuildStore(p->builder, merged, ptr_offset(p, dst, dst_byte + i, dst_unit));
 		LLVMSetAlignment(store, 1);
 	}
+}
+
+gb_internal u64 lb_bit_field_byte_unit(Type *t) {
+	if (build_context.endian_kind != TargetEndian_Big) {
+		return 1;
+	}
+	Type *ct = core_type(t);
+	if (is_type_array(ct)) {
+		ct = core_type(ct->Array.elem);
+	}
+	if (!is_type_endian_big(ct)) {
+		return 1;
+	}
+	return cast(u64)type_size_of(ct);
 }
 
 gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
@@ -1675,7 +1696,7 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 	if (addr.kind == lbAddr_BitField) {
 		lbValue dst = addr.addr;
 		lbValue src = {};
-		if (is_type_endian_big(addr.bitfield.type)) {
+		if (is_type_endian_big(addr.bitfield.type) && is_type_different_to_arch_endianness(addr.bitfield.type)) {
 			i64 shift_amount = 8*type_size_of(value.type) - addr.bitfield.bit_size;
 			lbValue shifted_value = value;
 			shifted_value.value = LLVMBuildLShr(p->builder,
@@ -1691,8 +1712,10 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 		u64 dst_bit   = cast(u64)addr.bitfield.bit_offset;
 		u64 src_bit   = cast(u64)0;
 		u64 size_bits = cast(u64)addr.bitfield.bit_size;
+		u64 dst_unit  = lb_bit_field_byte_unit(type_deref(dst.type));
+		u64 src_unit  = lb_bit_field_byte_unit(value.type);
 
-		lb_copy_bits(p, dst.value, src.value, buf_bytes, dst_bit, src_bit, size_bits);
+		lb_copy_bits(p, dst.value, src.value, buf_bytes, dst_bit, src_bit, size_bits, dst_unit, src_unit);
 		return;
 	} else if (addr.kind == lbAddr_Map) {
 		lb_internal_dynamic_map_set(p, addr.addr, addr.map.type, addr.map.key, value, p->curr_stmt);
@@ -2163,10 +2186,12 @@ gb_internal lbValue lb_addr_load(lbProcedure *p, lbAddr const &addr) {
 		u64 dst_bit   = cast(u64)0;
 		u64 src_bit   = cast(u64)addr.bitfield.bit_offset;
 		u64 size_bits = cast(u64)addr.bitfield.bit_size;
+		u64 dst_unit  = lb_bit_field_byte_unit(addr.bitfield.type);
+		u64 src_unit  = lb_bit_field_byte_unit(type_deref(src.type));
 
-		lb_copy_bits(p, dst.addr.value, src.value, buf_bytes, dst_bit, src_bit, size_bits);
+		lb_copy_bits(p, dst.addr.value, src.value, buf_bytes, dst_bit, src_bit, size_bits, dst_unit, src_unit);
 		r = lb_addr_load(p, dst);
-		if (is_type_endian_big(addr.bitfield.type)) {
+		if (is_type_endian_big(addr.bitfield.type) && is_type_different_to_arch_endianness(addr.bitfield.type)) {
 			LLVMValueRef shift_amount = LLVMConstInt(
 				lb_type(p->module, lb_addr_type(dst)),
 				8*dst_byte_size - addr.bitfield.bit_size,
