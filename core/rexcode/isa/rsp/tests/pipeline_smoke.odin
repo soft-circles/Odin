@@ -101,7 +101,7 @@ run_rsp_pipeline_tests :: proc() {
 						   nil, nil, nil, context.temp_allocator)
 		eq_str("scalar: print",
 			   text,
-			   "    add $t0, $t1, $t2\n    addiu $t0, $t1, 100\n    lw $t0, 16($sp)\n    nop\n")
+			   "    add t0, t1, t2\n    addiu t0, t1, 100\n    lw t0, 16(sp)\n    nop\n")
 	}
 
 	// ---- 2. Vector ALU: VMULF $v0, $v1, $v2[3] --------------------------
@@ -139,13 +139,13 @@ run_rsp_pipeline_tests :: proc() {
 						   nil, nil, nil, context.temp_allocator)
 		eq_str("vu: print",
 			   text,
-			   "    vmulf $v0, $v1, $v2[3]\n")
+			   "    vmulf $v00, $v01, $v02.q1\n")
 	}
 
-	// ---- 3. Vector load: LQV $v4, e[0], 16($t0) -------------------------
+	// ---- 3. Vector load: LQV $v04, 0, 256, t0 ----------------------------
 	//   bits: 0xC8002000 (LQV)
 	//   base=$t0=8 (bits 25-21 = 8 << 21 = 0x01000000), vt=4 (bits 20-16 = 4 << 16 = 0x40000),
-	//   element=0 (bits 10-7 = 0), offset=16 (bits 6-0 = 16 = 0x10)
+	//   element=0 (bits 10-7 = 0), offset=16 (bits 6-0 = 16 = 0x10; 16 quads = 256 bytes)
 	//   word = 0xC8002000 | 0x01000000 | 0x40000 | 0 | 0x10 = 0xC9042010
 	{
 		clear(&relocs); clear(&errors)
@@ -177,7 +177,7 @@ run_rsp_pipeline_tests :: proc() {
 						   nil, nil, nil, context.temp_allocator)
 		eq_str("vls: print",
 			   text,
-			   "    lqv $v4, 16($t0)\n")
+			   "    lqv $v04, 0, 256, t0\n")
 	}
 
 	// ---- 4. Branch + label inference -------------------------------------
@@ -215,7 +215,7 @@ run_rsp_pipeline_tests :: proc() {
 						   nil, nil, nil, context.temp_allocator)
 		eq_str("br: print",
 			   text,
-			   ".L0:\n    nop\n    addiu $t0, $t0, 1\n    bne $t0, $zero, .L0\n    nop\n")
+			   ".L0:\n    nop\n    addiu t0, t0, 1\n    bne t0, zero, .L0\n    nop\n")
 	}
 
 	// ---- 5. COP2 control move + CP0 named register ----------------------
@@ -250,7 +250,7 @@ run_rsp_pipeline_tests :: proc() {
 
 		text := rsp.aprint(d_insts[:], d_info[:], d_labels[:],
 						   nil, nil, nil, context.temp_allocator)
-		eq_str("cop2c: print", text, "    cfc2 $t0, vco\n")
+		eq_str("cop2c: print", text, "    cfc2 t0, COP2_CTRL_VCO\n")
 	}
 
 	// ---- 6. CP0 DMA register print --------------------------------------
@@ -283,7 +283,7 @@ run_rsp_pipeline_tests :: proc() {
 
 		text := rsp.aprint(d_insts[:], d_info[:], d_labels[:],
 						   nil, nil, nil, context.temp_allocator)
-		eq_str("cp0: print",  text, "    mtc0 $t0, $sp_status\n")
+		eq_str("cp0: print",  text, "    mtc0 t0, COP0_SP_STATUS\n")
 	}
 
 	fmt.println()

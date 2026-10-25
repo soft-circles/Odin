@@ -77,5 +77,6 @@ main :: proc() {
 	if failures > 0 { os.exit(1) }
 
 	run_rsp_pipeline_tests()
+	run_rsp_printer_tests()
 	run_rsp_range_tests()
 }
