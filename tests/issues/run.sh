@@ -275,6 +275,8 @@ $ODIN run ../test_issue_7798.odin $COMMON
 $ODIN test ../test_issue_7763.odin $COMMON
 $ODIN test ../test_issue_disabled_proc_value.odin $COMMON -disable-assert
 $ODIN check ../test_issue_escape_store_through_union.odin $COMMON_CHECK
+$ODIN check ../test_issue_poly_struct_field_count_race.odin -no-entry-point $COMMON_CHECK
+$ODIN test ../test_issue_poly_struct_field_count_generic.odin $COMMON
 
 set +x
 

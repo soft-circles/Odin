@@ -4162,6 +4162,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		Type *tuple = alloc_type_tuple();
 
 		if (is_type_struct(type)) {
+			wait_for_struct_fields(type);
 			isize variable_count = type->Struct.fields.count;
 			tuple->Tuple.variables = permanent_slice_make<Entity *>(variable_count);
 			// NOTE(bill): don't copy the entities, this should be good enough
@@ -4218,6 +4219,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (type_hint != nullptr) {
 			Type *th = base_type(type_hint);
 			if (th->kind == Type_Struct) {
+				wait_for_struct_fields(th);
 				if (value_count == th->Struct.fields.count) {
 					isize index = 0;
 					for_array(i, ce->args) {
@@ -4996,6 +4998,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				goto soa_zip_end;
 			}
 
+			wait_for_struct_fields(et);
 			if (et->Struct.fields.count != fields.count) {
 				goto soa_zip_end;
 			}
@@ -5474,6 +5477,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			GB_ASSERT(is_type_struct(elem));
 
 			Type *old_struct = base_type(elem);
+			wait_for_struct_fields(old_struct);
 			soa_struct = alloc_type_struct();
 			soa_struct->Struct.fields = permanent_slice_make<Entity *>(old_struct->Struct.fields.count);
 			soa_struct->Struct.tags = permanent_alloc_array<String>(old_struct->Struct.fields.count);
@@ -7596,6 +7600,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return false;
 			}
 
+			wait_for_struct_fields(ut);
+			wait_for_struct_fields(vt);
+
 			bool is_shared = true;
 
 			for (Entity *v_field : vt->Struct.fields) {
@@ -8064,6 +8071,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			error(operand->expr, "Expected a struct type for '%.*s'", LIT(builtin_name));
 		} else {
 			Type *bt = base_type(operand->type);
+			wait_for_struct_fields(bt);
 			operand->value = exact_value_i64(bt->Struct.fields.count);
 		}
 		operand->mode = Addressing_Constant;
@@ -8077,6 +8085,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			error(operand->expr, "Expected a struct type for '%.*s'", LIT(builtin_name));
 		} else {
 			Type *bt = base_type(operand->type);
+			wait_for_struct_fields(bt);
 			if (bt->Struct.is_packed) {
 				operand->value = exact_value_bool(false);
 			} else if (bt->Struct.fields.count != 0) {
