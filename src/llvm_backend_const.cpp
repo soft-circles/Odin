@@ -55,7 +55,7 @@ gb_internal bool lb_is_const_nil(lbValue value) {
 
 gb_internal bool lb_is_expr_constant_zero(Ast *expr) {
 	GB_ASSERT(expr != nullptr);
-	auto v = exact_value_to_integer(expr->tav.value);
+	auto v = exact_value_to_integer(expr->tav.value());
 	if (v.kind == ExactValue_Integer) {
 		return big_int_cmp_zero(&v.value_integer) == 0;
 	}
@@ -76,8 +76,15 @@ gb_internal String lb_get_const_string(lbModule *m, lbValue value) {
 	LLVMValueRef underlying_ptr = llvm_const_extract_value(m, value.value, ptr_indices, gb_count_of(ptr_indices));
 	LLVMValueRef underlying_len = llvm_const_extract_value(m, value.value, len_indices, gb_count_of(len_indices));
 
-	GB_ASSERT(LLVMGetConstOpcode(underlying_ptr) == LLVMGetElementPtr);
-	underlying_ptr = LLVMGetOperand(underlying_ptr, 0);
+	if (LLVMIsNull(underlying_ptr)) {
+		// NOTE: an empty string has no data
+		return {};
+	}
+	// NOTE: LLVM folds the zero index GEP into the string's data to the global itself
+	if (LLVMIsAConstantExpr(underlying_ptr)) {
+		GB_ASSERT(LLVMGetConstOpcode(underlying_ptr) == LLVMGetElementPtr);
+		underlying_ptr = LLVMGetOperand(underlying_ptr, 0);
+	}
 	GB_ASSERT(LLVMIsAGlobalVariable(underlying_ptr));
 	underlying_ptr = LLVMGetInitializer(underlying_ptr);
 
@@ -355,10 +362,10 @@ gb_internal lbValue lb_const_bool(lbModule *m, Type *type, bool value) {
 	return res;
 }
 
-gb_internal LLVMValueRef lb_const_f16(lbModule *m, f32 f, Type *type=t_f16) {
+gb_internal LLVMValueRef lb_const_f16(lbModule *m, f64 f, Type *type=t_f16) {
 	GB_ASSERT(type_size_of(type) == 2);
 
-	u16 u = f32_to_f16(f);
+	u16 u = f32_to_f16(f64_to_f32(f));
 	if (is_type_different_to_arch_endianness(type)) {
 		u = gb_endian_swap16(u);
 	}
@@ -366,9 +373,10 @@ gb_internal LLVMValueRef lb_const_f16(lbModule *m, f32 f, Type *type=t_f16) {
 	return LLVMConstBitCast(i, lb_type(m, type));
 }
 
-gb_internal LLVMValueRef lb_const_f32(lbModule *m, f32 f, Type *type=t_f32) {
+gb_internal LLVMValueRef lb_const_f32(lbModule *m, f64 f, Type *type=t_f32) {
 	GB_ASSERT(type_size_of(type) == 4);
-	u32 u = bit_cast<u32>(f);
+	f32 f_32 = f64_to_f32(f);
+	u32 u = bit_cast<u32>(f_32);
 	if (is_type_different_to_arch_endianness(type)) {
 		u = gb_endian_swap32(u);
 	}
@@ -788,7 +796,7 @@ gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value
 		if (fv->value->tav.mode != Addressing_Constant) {
 			continue;
 		}
-		lbValue field_expr = lb_const_value(m, field_type, fv->value->tav.value);
+		lbValue field_expr = lb_const_value(m, field_type, fv->value->tav.value());
 		array_add(&values, field_expr);
 		array_add(&fields, FieldData{field_type, cast(u64)bit_offset, cast(u64)bit_size});
 	}
@@ -947,7 +955,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 	while (value.kind == ExactValue_Variant &&
 	       (value.variant_type == nullptr ||
 	        are_types_identical(value.variant_type, original_type))) {
-		value = value.value_variant->tav.value;
+		value = value.value_variant->tav.value();
 	}
 	if (!is_type_bit_field(original_type)) {
 		type = core_type(type);
@@ -986,7 +994,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 			break;
 		}
 		case ExactValue_Variant:
-			value = value.value_variant->tav.value;
+			value = value.value_variant->tav.value();
 			break;
 		}
 		GB_ASSERT_MSG(value_type != nullptr, "%s :: %s", type_to_string(original_type), exact_value_to_string(value));
@@ -1239,18 +1247,25 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 		isize width = 1;
 		String s = value.value_string;
 
-		LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
+		Rune *runes = gb_alloc_array(temporary_allocator(), Rune, cast(isize)count);
 
 		for (i64 i = 0; i < count && offset < s.len; i++) {
 			width = utf8_decode(s.text+offset, s.len-offset, &rune);
 			offset += width;
 
-			elems[i] = LLVMConstInt(et, rune, true);
-
+			runes[i] = rune;
 		}
 		GB_ASSERT(offset == s.len);
 
+	#if LLVM_VERSION_MAJOR >= 21
+		res.value = LLVMConstDataArray(et, cast(char const *)runes, cast(size_t)count*gb_size_of(Rune));
+	#else
+		LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
+		for (i64 i = 0; i < count; i++) {
+			elems[i] = LLVMConstInt(et, runes[i], true);
+		}
 		res.value = llvm_const_array(m, et, elems, cast(unsigned)count);
+	#endif
 		return res;
 	} else if (is_type_u16_array(type) && (value.kind == ExactValue_String || value.kind == ExactValue_String16) && !is_type_u8(core_array_type(type))) {
 		i64 count  = type->Array.count;
@@ -1264,6 +1279,9 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 			s = string_to_string16(temporary_allocator(), value.value_string);
 		}
 
+	#if LLVM_VERSION_MAJOR >= 21
+		res.value = LLVMConstDataArray(et, cast(char const *)s.text, cast(size_t)count*gb_size_of(u16));
+	#else
 		LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
 
 		for (isize i = 0; i < s.len; i++) {
@@ -1272,6 +1290,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 		}
 
 		res.value = llvm_const_array(m, et, elems, cast(unsigned)count);
+	#endif
 		return res;
 	} else if (is_type_u8_array(type) && value.kind == ExactValue_String) {
 		GB_ASSERT(type->Array.count == value.value_string.len);
@@ -1426,21 +1445,26 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 		value = exact_value_to_float(value);
 		/*fallthrough*/
 	case ExactValue_Float:
-		if (is_type_different_to_arch_endianness(type)) {
-			if (type->Basic.kind == Basic_f32le || type->Basic.kind == Basic_f32be) {
-				f32 f = static_cast<float>(value.value_float);
-				u32 u = bit_cast<u32>(f);
-				u = gb_endian_swap32(u);
-				res.value = LLVMConstReal(lb_type(m, original_type), bit_cast<f32>(u));
-			} else if (type->Basic.kind == Basic_f16le || type->Basic.kind == Basic_f16be) {
-				f32 f = static_cast<float>(value.value_float);
-				u16 u = f32_to_f16(f);
-				u = gb_endian_swap16(u);
-				res.value = LLVMConstReal(lb_type(m, original_type), f16_to_f32(u));
-			} else {
+		if (is_type_different_to_arch_endianness(type) || isnan(value.value_float)) {
+			// a float conversion would quieten a signalling NaN, and swapped bits can be one
+			switch (type->Basic.kind) {
+			case Basic_f16:
+			case Basic_f16le:
+			case Basic_f16be:
+				res.value = lb_const_f16(m, value.value_float, original_type);
+				break;
+			case Basic_f32:
+			case Basic_f32le:
+			case Basic_f32be:
+				res.value = lb_const_f32(m, value.value_float, original_type);
+				break;
+			default: {
 				u64 u = bit_cast<u64>(value.value_float);
-				u = gb_endian_swap64(u);
-				res.value = LLVMConstReal(lb_type(m, original_type), bit_cast<f64>(u));
+				if (is_type_different_to_arch_endianness(type)) {
+					u = gb_endian_swap64(u);
+				}
+				res.value = LLVMConstBitCast(LLVMConstInt(LLVMInt64TypeInContext(ctx), u, false), lb_type(m, original_type));
+			} break;
 			}
 		} else {
 			res.value = LLVMConstReal(lb_type(m, original_type), value.value_float);
@@ -1451,12 +1475,12 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 			LLVMValueRef values[2] = {};
 			switch (8*type_size_of(type)) {
 			case 32:
-				values[0] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_complex->real));
-				values[1] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_complex->imag));
+				values[0] = lb_const_f16(m, exact_value_to_f64(value.value_complex->real));
+				values[1] = lb_const_f16(m, exact_value_to_f64(value.value_complex->imag));
 				break;
 			case 64:
-				values[0] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_complex->real));
-				values[1] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_complex->imag));
+				values[0] = lb_const_f32(m, exact_value_to_f64(value.value_complex->real));
+				values[1] = lb_const_f32(m, exact_value_to_f64(value.value_complex->imag));
 				break;
 			case 128:
 				values[0] = LLVMConstReal(lb_type(m, t_f64), exact_value_to_f64(value.value_complex->real));
@@ -1474,17 +1498,17 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 			switch (8*type_size_of(type)) {
 			case 64:
 				// @QuaternionLayout
-				values[3] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_quaternion->real));
-				values[0] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_quaternion->imag));
-				values[1] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_quaternion->jmag));
-				values[2] = lb_const_f16(m, cast(f32)exact_value_to_f64(value.value_quaternion->kmag));
+				values[3] = lb_const_f16(m, exact_value_to_f64(value.value_quaternion->real));
+				values[0] = lb_const_f16(m, exact_value_to_f64(value.value_quaternion->imag));
+				values[1] = lb_const_f16(m, exact_value_to_f64(value.value_quaternion->jmag));
+				values[2] = lb_const_f16(m, exact_value_to_f64(value.value_quaternion->kmag));
 				break;
 			case 128:
 				// @QuaternionLayout
-				values[3] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_quaternion->real));
-				values[0] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_quaternion->imag));
-				values[1] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_quaternion->jmag));
-				values[2] = lb_const_f32(m, cast(f32)exact_value_to_f64(value.value_quaternion->kmag));
+				values[3] = lb_const_f32(m, exact_value_to_f64(value.value_quaternion->real));
+				values[0] = lb_const_f32(m, exact_value_to_f64(value.value_quaternion->imag));
+				values[1] = lb_const_f32(m, exact_value_to_f64(value.value_quaternion->jmag));
+				values[2] = lb_const_f32(m, exact_value_to_f64(value.value_quaternion->kmag));
 				break;
 			case 256:
 				// @QuaternionLayout
@@ -1536,8 +1560,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						ast_node(fv, FieldValue, elem);
 						if (is_ast_range(fv->field)) {
 							ast_node(ie, BinaryExpr, fv->field);
-							TypeAndValue lo_tav = ie->left->tav;
-							TypeAndValue hi_tav = ie->right->tav;
+							TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+							TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 							GB_ASSERT(lo_tav.mode == Addressing_Constant);
 							GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -1548,7 +1572,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								hi += 1;
 							}
 							if (lo == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								for (i64 k = lo; k < hi; k++) {
 									aos_values[value_index++] = val;
@@ -1559,11 +1583,11 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								break;
 							}
 						} else {
-							TypeAndValue index_tav = fv->field->tav;
+							TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 							GB_ASSERT(index_tav.mode == Addressing_Constant);
 							i64 index = exact_value_to_i64(index_tav.value);
 							if (index == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								aos_values[value_index++] = val;
 								found = true;
@@ -1617,7 +1641,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 				LLVMValueRef *aos_values = gb_alloc_array(temporary_allocator(), LLVMValueRef, elem_count);
 
 				for (isize i = 0; i < elem_count; i++) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					aos_values[i] = lb_const_value(m, elem_type, tav.value, cc).value;
 				}
@@ -1685,8 +1709,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						ast_node(fv, FieldValue, elem);
 						if (is_ast_range(fv->field)) {
 							ast_node(ie, BinaryExpr, fv->field);
-							TypeAndValue lo_tav = ie->left->tav;
-							TypeAndValue hi_tav = ie->right->tav;
+							TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+							TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 							GB_ASSERT(lo_tav.mode == Addressing_Constant);
 							GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -1697,7 +1721,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								hi += 1;
 							}
 							if (lo == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								for (i64 k = lo; k < hi; k++) {
 									values[value_index++] = val;
@@ -1708,11 +1732,11 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								break;
 							}
 						} else {
-							TypeAndValue index_tav = fv->field->tav;
+							TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 							GB_ASSERT(index_tav.mode == Addressing_Constant);
 							i64 index = exact_value_to_i64(index_tav.value);
 							if (index == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								values[value_index++] = val;
 								found = true;
@@ -1736,7 +1760,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 				isize elem_index = 0;
 				for (isize i = 0; i < elem_count; i++) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					if (is_type_tuple(tav.type)) {
 						elem_index += tav.type->Tuple.variables.count;
@@ -1777,8 +1801,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						ast_node(fv, FieldValue, elem);
 						if (is_ast_range(fv->field)) {
 							ast_node(ie, BinaryExpr, fv->field);
-							TypeAndValue lo_tav = ie->left->tav;
-							TypeAndValue hi_tav = ie->right->tav;
+							TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+							TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 							GB_ASSERT(lo_tav.mode == Addressing_Constant);
 							GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -1789,7 +1813,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								hi += 1;
 							}
 							if (lo == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								for (i64 k = lo; k < hi; k++) {
 									values[value_index++] = val;
@@ -1800,11 +1824,11 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								break;
 							}
 						} else {
-							TypeAndValue index_tav = fv->field->tav;
+							TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 							GB_ASSERT(index_tav.mode == Addressing_Constant);
 							i64 index = exact_value_to_i64(index_tav.value);
 							if (index == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								values[value_index++] = val;
 								found = true;
@@ -1828,7 +1852,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 				isize elem_index = 0;
 				for (isize i = 0; i < elem_count; i++) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					if (is_type_tuple(tav.type)) {
 						elem_index += tav.type->Tuple.variables.count;
@@ -1867,8 +1891,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						ast_node(fv, FieldValue, elem);
 						if (is_ast_range(fv->field)) {
 							ast_node(ie, BinaryExpr, fv->field);
-							TypeAndValue lo_tav = ie->left->tav;
-							TypeAndValue hi_tav = ie->right->tav;
+							TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+							TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 							GB_ASSERT(lo_tav.mode == Addressing_Constant);
 							GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -1881,7 +1905,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 							max_index = gb_max(max_index, hi-1);
 
 							if (lo == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								for (i64 k = lo; k < hi; k++) {
 									values[value_index++] = val;
@@ -1892,14 +1916,14 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								break;
 							}
 						} else {
-							TypeAndValue index_tav = fv->field->tav;
+							TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 							GB_ASSERT(index_tav.mode == Addressing_Constant);
 							i64 index = exact_value_to_i64(index_tav.value);
 
 							max_index = gb_max(max_index, index);
 
 							if (index == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								values[value_index++] = val;
 								found = true;
@@ -1937,7 +1961,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 				isize elem_index = 0;
 				for (isize i = 0; i < elem_count; i++) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					if (is_type_tuple(tav.type)) {
 						elem_index += tav.type->Tuple.variables.count;
@@ -1977,8 +2001,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						ast_node(fv, FieldValue, elem);
 						if (is_ast_range(fv->field)) {
 							ast_node(ie, BinaryExpr, fv->field);
-							TypeAndValue lo_tav = ie->left->tav;
-							TypeAndValue hi_tav = ie->right->tav;
+							TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+							TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 							GB_ASSERT(lo_tav.mode == Addressing_Constant);
 							GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -1989,7 +2013,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								hi += 1;
 							}
 							if (lo == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								for (i64 k = lo; k < hi; k++) {
 									values[value_index++] = val;
@@ -2000,11 +2024,11 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 								break;
 							}
 						} else {
-							TypeAndValue index_tav = fv->field->tav;
+							TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 							GB_ASSERT(index_tav.mode == Addressing_Constant);
 							i64 index = exact_value_to_i64(index_tav.value);
 							if (index == i) {
-								TypeAndValue tav = fv->value->tav;
+								TypeAndValue tav = type_and_value_of_expr(fv->value);
 								LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 								values[value_index++] = val;
 								found = true;
@@ -2023,7 +2047,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 			} else {
 				isize elem_index = 0;
 				for (isize i = 0; i < elem_count; i++) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					if (is_type_tuple(tav.type)) {
 						elem_index += tav.type->Tuple.variables.count;
@@ -2059,7 +2083,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 					ast_node(fv, FieldValue, cl->elems[0]);
 					Entity *f = entity_of_node(fv->field);
 
-					TypeAndValue tav = fv->value->tav;
+					TypeAndValue tav = type_and_value_of_expr(fv->value);
 					if (tav.value.kind != ExactValue_Invalid) {
 						lbValue value = lb_const_value(m, f->type, tav.value, cc);
 
@@ -2108,7 +2132,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 					String name = fv->field->Ident.token.string;
 					InternedString interned = fv->field->Ident.interned;
 
-					TypeAndValue tav = fv->value->tav;
+					TypeAndValue tav = type_and_value_of_expr(fv->value);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 
 					Selection sel = lookup_field(type, interned, false);
@@ -2225,7 +2249,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 				isize multiple_return_offset = 0;
 				for_array(i, cl->elems) {
 					Entity *f = type->Struct.fields[i+multiple_return_offset];
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 
 					if (is_type_tuple(tav.type)){
 						multiple_return_offset += tav.type->Tuple.variables.count-1;
@@ -2318,7 +2342,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 				Ast *e = cl->elems[i];
 				GB_ASSERT(e->kind != Ast_FieldValue);
 
-				TypeAndValue tav = e->tav;
+				TypeAndValue tav = type_and_value_of_expr(e);
 				if (tav.mode != Addressing_Constant) {
 					continue;
 				}
@@ -2351,8 +2375,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 					ast_node(fv, FieldValue, elem);
 					if (is_ast_range(fv->field)) {
 						ast_node(ie, BinaryExpr, fv->field);
-						TypeAndValue lo_tav = ie->left->tav;
-						TypeAndValue hi_tav = ie->right->tav;
+						TypeAndValue lo_tav = type_and_value_of_expr(ie->left);
+						TypeAndValue hi_tav = type_and_value_of_expr(ie->right);
 						GB_ASSERT(lo_tav.mode == Addressing_Constant);
 						GB_ASSERT(hi_tav.mode == Addressing_Constant);
 
@@ -2367,7 +2391,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 						GB_ASSERT(lo <= hi);
 						
 						
-						TypeAndValue tav = fv->value->tav;
+						TypeAndValue tav = type_and_value_of_expr(fv->value);
 						LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 						for (i64 k = lo; k < hi; k++) {
 							i64 offset = matrix_row_major_index_to_offset(type, k);
@@ -2375,11 +2399,11 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 							values[offset] = val;
 						}
 					} else {
-						TypeAndValue index_tav = fv->field->tav;
+						TypeAndValue index_tav = type_and_value_of_expr(fv->field);
 						GB_ASSERT(index_tav.mode == Addressing_Constant);
 						i64 index = exact_value_to_i64(index_tav.value);
 						GB_ASSERT(index < max_count);
-						TypeAndValue tav = fv->value->tav;
+						TypeAndValue tav = type_and_value_of_expr(fv->value);
 						LLVMValueRef val = lb_const_value(m, elem_type, tav.value, cc).value;
 						i64 offset = matrix_row_major_index_to_offset(type, index);
 						GB_ASSERT(values[offset] == nullptr);
@@ -2401,7 +2425,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 				LLVMValueRef *values = gb_alloc_array(temporary_allocator(), LLVMValueRef, cast(isize)total_count);
 				i64 elem_index = 0;
 				for_array(i, cl->elems) {
-					TypeAndValue tav = cl->elems[i]->tav;
+					TypeAndValue tav = type_and_value_of_expr(cl->elems[i]);
 					GB_ASSERT(tav.mode != Addressing_Invalid);
 					if (is_type_tuple(tav.type)) {
 						elem_index += tav.type->Tuple.variables.count;

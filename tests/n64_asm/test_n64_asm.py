@@ -1185,8 +1185,8 @@ ext4 :: asm(a: u32) -> (r: u32) { ext r, a, 0, 4 }
             require_o64_objects(self)
         encoded = code == 0 and EXT_WORD in elf32be_functions(out)["use"]
         self.assertTrue(checker_rejected or encoded, output)
-        self.assertIn("'asm' template 'ext4' enables target feature 'mips32r2', but the calling procedure "
-                      "does not", output)
+        self.assertIn("enables target feature 'mips32r2', this requires the calling procedure to at least "
+                      "enable the same feature", output)
 
     def test_template_and_caller_feature_reach_llvm(self):
         directory = snippet('''

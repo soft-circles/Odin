@@ -220,7 +220,7 @@ gb_internal isize ast_node_size(AstKind kind) {
 gb_internal Ast *alloc_ast_node(AstFile *f, AstKind kind) {
 	isize size = ast_node_size(kind);
 
-	Ast *node = cast(Ast *)arena_alloc(get_arena(ThreadArena_Permanent), size, 16);
+	Ast *node = cast(Ast *)arena_alloc(get_arena(ThreadArena_Permanent), size, 8);
 	node->kind = kind;
 	node->file_id = f ? f->id : 0;
 
@@ -913,25 +913,6 @@ gb_internal Ast *ast_uninit(AstFile *f, Token token) {
 }
 
 gb_internal ExactValue exact_value_from_token(AstFile *f, Token const &token) {
-	auto token_pos_at_offset = [](Token const &token, isize offset) -> TokenPos {
-		TokenPos pos = token.pos;
-		if (offset <= 0) {
-			return pos;
-		}
-		String s = token.string;
-		isize n = gb_min(offset, s.len);
-		for (isize i = 0; i < n; i++) {
-			if (s.text[i] == '\n') {
-				pos.line += 1;
-				pos.column = 1;
-			} else {
-				pos.column += 1;
-			}
-			pos.offset += 1;
-		}
-		return pos;
-	};
-
 	String s = token.string;
 	string_interner_insert(s);
 	switch (token.kind) {
@@ -947,7 +928,9 @@ gb_internal ExactValue exact_value_from_token(AstFile *f, Token const &token) {
 			TripleStringErrorKind terr = TripleStringError_None;
 			isize terr_off = -1;
 			if (!unquote_string_triple(ast_allocator(f), &s, string_contains_char(s, '\r'), &terr, &terr_off)) {
-				TokenPos pos = token_pos_at_offset(token, terr_off);
+				Token prefix = token;
+				prefix.string = substring(token.string, 0, gb_clamp(terr_off, 0, token.string.len));
+				TokenPos pos = token_pos_end(prefix);
 				switch (terr) {
 				case TripleStringError_ContentOnOpeningLine:
 					syntax_error(pos, "A multi-line string literal must begin on the line after the opening delimiter");
@@ -1010,7 +993,7 @@ gb_internal Ast *ast_basic_lit(AstFile *f, Token basic_lit) {
 	Ast *result = alloc_ast_node(f, Ast_BasicLit);
 	result->BasicLit.token = basic_lit;
 	result->tav.mode = Addressing_Constant;
-	result->tav.value = exact_value_from_token(f, basic_lit);
+	result->tav.set_value(exact_value_from_token(f, basic_lit));
 	return result;
 }
 
@@ -1815,16 +1798,11 @@ gb_internal Token expect_token(AstFile *f, TokenKind kind) {
 		}
 
 		end_error_block();
-
-		if (prev.kind == Token_EOF) {
-			if (f->invalid_token_pos.line != 0) {
-				end_error_mute();
-			}
-			exit_with_errors();
-		}
 	}
 
-	advance_token(f);
+	if (prev.kind != Token_EOF) {
+		advance_token(f);
+	}
 	return prev;
 }
 
@@ -2006,9 +1984,7 @@ gb_internal Token expect_closing(AstFile *f, TokenKind kind, String const &conte
 	    f->curr_token.kind == Token_Semicolon &&
 	    (f->curr_token.string == "\n" || f->curr_token.kind == Token_EOF)) {
 	    	if (f->allow_newline) {
-			Token tok = f->prev_token;
-			tok.pos.column += cast(i32)tok.string.len;
-			syntax_error(tok, "Missing ',' before newline in %.*s", LIT(context));
+			syntax_error(token_pos_end(f->prev_token), "Missing ',' before newline in %.*s", LIT(context));
 		}
 		advance_token(f);
 	}
@@ -2077,8 +2053,7 @@ gb_internal void expect_semicolon(AstFile *f) {
 
 	if (f->curr_token.pos.line == f->prev_token.pos.line) {
 		String p = token_to_string(f->curr_token);
-		prev_token.pos = token_pos_end(prev_token);
-		syntax_error(prev_token, "Expected ';', got %.*s", LIT(p));
+		syntax_error(token_pos_end(prev_token), "Expected ';', got %.*s", LIT(p));
 		fix_advance_to_next_stmt(f);
 	}
 }
@@ -5860,6 +5835,7 @@ gb_internal Ast *parse_import_decl(AstFile *f, ImportDeclKind kind) {
 		break;
 	default:
 		import_name.pos = f->curr_token.pos;
+		import_name.flags |= TokenFlag_Synthesized;
 		break;
 	}
 
@@ -5908,6 +5884,7 @@ gb_internal Ast *parse_foreign_decl(AstFile *f) {
 			break;
 		default:
 			lib_name.pos = token.pos;
+			lib_name.flags |= TokenFlag_Synthesized;
 			break;
 		}
 		if (is_blank_ident(lib_name)) {
@@ -6272,7 +6249,8 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 				Token ident = f->curr_token;
 				if (allow_token(f, Token_Ident) &&
 				    name.pos.line == f->curr_token.pos.line) {
-					if (f->curr_token.kind == Token_OpenParen && f->curr_token.pos.column == ident.pos.column+ident.string.len) {
+					if (f->curr_token.kind == Token_OpenParen &&
+					    f->curr_token.pos.offset == ident.pos.offset+ident.string.len) {
 						call_like = true;
 						(void)parse_call_expr(f, nullptr);
 					}
@@ -6604,6 +6582,10 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 		fi.fullpath = path;
 		fi.size = get_file_size(path);
 		fi.is_dir = false;
+		OverlayEntry *overlay = overlay_find(path);
+		if (overlay != nullptr && overlay->replacement.len != 0) {
+			fi.size = get_file_size(overlay->replacement);
+		}
 
 		array_reserve(&pkg->files, 1);
 		pkg->is_single_file = true;
@@ -6617,6 +6599,13 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 	Array<FileInfo> list = {};
 	ReadDirectoryError rd_err = read_directory(path, &list);
 	defer (array_free(&list));
+	if (rd_err == ReadDirectory_None || rd_err == ReadDirectory_Empty) {
+		overlay_directory(path, &list);
+		rd_err = ReadDirectory_None;
+		if (list.count == 0) {
+			rd_err = ReadDirectory_Empty;
+		}
+	}
 
 	if (list.count == 1) {
 		GB_ASSERT(path != list[0].fullpath);
@@ -7836,6 +7825,10 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 
 	p->init_fullpath = init_fullpath;
 
+	StringSet extra_fullpaths = {};
+	string_set_init(&extra_fullpaths);
+	defer (string_set_destroy(&extra_fullpaths));
+
 	{ // Add these packages serially and then process them parallel
 		TokenPos init_pos = {};
 		if (build_context.build_mode != BuildMode_RSP_Assembly) {
@@ -7868,10 +7861,8 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 					return ParseFile_WrongExtension;
 				}
 			}
-			AstPackage *pkg = try_add_import_path(p, fullpath, fullpath, init_pos, Package_Normal);
-			if (pkg) {
-				pkg->is_extra = true;
-			}
+			string_set_add(&extra_fullpaths, fullpath);
+			try_add_import_path(p, fullpath, fullpath, init_pos, Package_Normal);
 		}
 	}
 	
@@ -7883,6 +7874,7 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 	}
 
 	for (AstPackage *pkg : p->packages) {
+		pkg->is_extra = string_set_exists(&extra_fullpaths, pkg->fullpath);
 		for (AstFile *file : pkg->files) {
 			p->total_seen_load_directive_count += file->seen_load_directive_count;
 		}

@@ -175,7 +175,7 @@ gb_internal void lb_build_constant_value_decl(lbProcedure *p, AstValueDecl *vd) 
 			continue;
 		}
 
-		if (e->TypeName.ir_mangled_name.len != 0) {
+		if (e->ir_mangled_name.load() != nullptr) {
 			// NOTE(bill): Already set
 			continue;
 		}
@@ -1631,8 +1631,8 @@ gb_internal void lb_build_unroll_range_stmt(lbProcedure *p, AstUnrollRangeStmt *
 		GB_ASSERT(start_expr->tav.mode == Addressing_Constant);
 		GB_ASSERT(end_expr->tav.mode == Addressing_Constant);
 
-		ExactValue start = start_expr->tav.value;
-		ExactValue end   = end_expr->tav.value;
+		ExactValue start = start_expr->tav.value();
+		ExactValue end   = end_expr->tav.value();
 		if (op != Token_RangeHalf) { // .. [start, end] (or ..=)
 			ExactValue index = exact_value_i64(0);
 			for (ExactValue val = start;
@@ -1683,7 +1683,7 @@ gb_internal void lb_build_unroll_range_stmt(lbProcedure *p, AstUnrollRangeStmt *
 
 		ExactValue unroll_count_ev = {};
 		if (rs->args.count != 0) {
-			unroll_count_ev = rs->args[0]->tav.value;
+			unroll_count_ev = rs->args[0]->tav.value();
 		}
 
 
@@ -1697,7 +1697,7 @@ gb_internal void lb_build_unroll_range_stmt(lbProcedure *p, AstUnrollRangeStmt *
 
 				GB_ASSERT(is_type_string(t));
 				{
-					ExactValue value = expr->tav.value;
+					ExactValue value = expr->tav.value();
 					GB_ASSERT(value.kind == ExactValue_String);
 					String str = value.value_string;
 					Rune codepoint = 0;
@@ -2017,7 +2017,7 @@ gb_internal void lb_build_switch_stmt(lbProcedure *p, AstSwitchStmt *ss, Scope *
 				if (expr->tav.mode == Addressing_Type) {
 					bn = write_type_to_string(bn, expr->tav.type, false);
 				} else {
-					ExactValue value = expr->tav.value;
+					ExactValue value = expr->tav.value();
 					if (is_type_rune(expr->tav.type) && value.kind == ExactValue_Integer) {
 						Rune r = cast(Rune)exact_value_to_i64(value);
 						u8 rune_temp[6] = {};
@@ -2451,6 +2451,19 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 	lb_close_scope(p, lbDeferExit_Default, done, ss->body);
 }
 
+gb_internal void lb_set_static_variable_linkage(lbModule *m, LLVMValueRef global, char const *name) {
+	LLVM_SET_INTERNAL_WEAK_LINKAGE(global);
+	if (!USE_SEPARATE_MODULES) {
+		return;
+	}
+	// A procedure literal can be emitted in several modules, and each copy defines its statics
+	LLVMSetVisibility(global, LLVMHiddenVisibility);
+	if (build_context.metrics.os != TargetOs_darwin) {
+		// Mach-O has no COMDATs, but merges weak definitions itself
+		LLVMSetComdat(global, LLVMGetOrInsertComdat(m->mod, name));
+	}
+}
+
 gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 	for_array(i, vd->names) {
 		lbValue value = {};
@@ -2472,7 +2485,7 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 			if (e->Variable.is_rodata) {
 				cc.is_rodata = true;
 			}
-			value = lb_const_value(p->module, is_type_any(e->type) ? ast_value->tav.type : e->type, ast_value->tav.value, cc);
+			value = lb_const_value(p->module, is_type_any(e->type) ? ast_value->tav.type : e->type, ast_value->tav.value(), cc);
 		}
 
 		String mangled_name = {};
@@ -2494,9 +2507,8 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 			LLVMSetGlobalConstant(global, true);
 		}
 
-		if (!lb_apply_thread_local_model(global, e->Variable.thread_local_model)) {
-			LLVM_SET_INTERNAL_WEAK_LINKAGE(global);
-		}
+		lb_apply_thread_local_model(global, e->Variable.thread_local_model);
+		lb_set_static_variable_linkage(p->module, global, c_name);
 
 		if (value.value != nullptr) {
 			if (is_type_any(e->type)) {
@@ -2511,10 +2523,9 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 				if (e->Variable.is_rodata) {
 					LLVMSetGlobalConstant(var_global_ref, true);
 				}
-				
-				if (!lb_apply_thread_local_model(var_global_ref, e->Variable.thread_local_model)) {
-					LLVM_SET_INTERNAL_WEAK_LINKAGE(var_global_ref);
-				}
+
+				lb_apply_thread_local_model(var_global_ref, e->Variable.thread_local_model);
+				lb_set_static_variable_linkage(p->module, var_global_ref, var_name);
 
 				auto vals = array_make<LLVMValueRef>(temporary_allocator(), 0, 3);
 				array_add(&vals, lb_emit_conv(p, var_global.addr, t_rawptr).value);
@@ -2538,9 +2549,8 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 					if (e->Variable.is_rodata) {
 						LLVMSetGlobalConstant(global, true);
 					}
-					if (!lb_apply_thread_local_model(global, e->Variable.thread_local_model)) {
-						LLVM_SET_INTERNAL_WEAK_LINKAGE(global);
-					}
+					lb_apply_thread_local_model(global, e->Variable.thread_local_model);
+					lb_set_static_variable_linkage(p->module, global, c_name);
 				}
 				LLVMSetInitializer(global, value.value);
 			}
@@ -3295,7 +3305,11 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, AstAssignStmt *as) {
 			lbValue old_value = lb_addr_load(p, lhs);
 			Type *type = old_value.type;
 
-			lbValue change = lb_emit_conv(p, value, type);
+			// NOTE: A typed shift amount is converted by `lb_emit_arith`, as it may be wider than `type`
+			lbValue change = value;
+			if (!(op == Token_Shl || op == Token_Shr) || lb_is_expr_untyped_const(as->rhs[0])) {
+				change = lb_emit_conv(p, value, type);
+			}
 			lbValue new_value = lb_emit_arith(p, op, old_value, change, type);
 			lb_addr_store(p, lhs, new_value);
 		}
