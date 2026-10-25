@@ -940,13 +940,6 @@ struct Asm_mips {
 
 	// Optional checker hooks (see the asm_hook_* overloads in check_asm.cpp).
 
-	// LLVM's MIPS assembler rejects an instruction the enclosing function's
-	// "target-features" lack (`ext` without +mips32r2), and a template is expanded
-	// into its caller, so the caller must enable what the template enables.
-	bool template_features_bind_to_caller() const {
-		return true;
-	}
-
 	// Every MIPS load/store, CACHE and PREF has the one offset(base) form with a
 	// signed 16-bit offset. A larger constant offset would be expanded by the
 	// assembler through $at instead of being encoded.
