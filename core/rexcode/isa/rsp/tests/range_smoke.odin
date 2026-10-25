@@ -173,6 +173,15 @@ run_rsp_range_tests :: proc() {
 	rejects_form("lqv vt element 4",    rsp.Instruction{mnemonic = .LQV, operand_count = 2, length = 4,
 		ops = {rsp.op_vr(rsp.VR1, 4), rsp.op_vmem(rsp.vmem(rsp.T0, 0, 0), 16), {}, {}}})
 
+	// Vector L/S vt may carry the element when it agrees with the VMEM
+	// operand: inst_v_vmem copies it there for the printer.
+	accepts("inst_v_vmem lsv element 4", rsp.inst_v_vmem(.LSV, rsp.VR1, rsp.vmem(rsp.T0, 4, 1)), 0xC9010A01)
+	accepts("lsv vt[4] with vmem element 4", rsp.Instruction{mnemonic = .LSV, operand_count = 2, length = 4,
+		ops = {rsp.op_vr(rsp.VR1, 4), rsp.op_vmem(rsp.vmem(rsp.T0, 4, 1), 16), {}, {}}}, 0xC9010A01)
+	rejects_form("lsv vt[3] with vmem element 4", rsp.Instruction{mnemonic = .LSV, operand_count = 2, length = 4,
+		ops = {rsp.op_vr(rsp.VR1, 3), rsp.op_vmem(rsp.vmem(rsp.T0, 4, 1), 16), {}, {}}})
+	rejects("inst_v_vmem lsv element 16", rsp.inst_v_vmem(.LSV, rsp.VR1, rsp.vmem(rsp.T0, 16, 1)))
+
 	// MTC2/MFC2 element (bits 10-7): 0..15.
 	accepts("mtc2 $t0, $v1 (no element)", rsp.inst_mtc2(rsp.T0, rsp.VR1),     0x48880800)
 	accepts("mtc2 $t0, $v1[4]",         rsp.inst_mtc2(rsp.T0, rsp.VR1, 4),  0x48880A00)
