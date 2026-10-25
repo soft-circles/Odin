@@ -9141,15 +9141,17 @@ gb_internal CallArgumentError check_polymorphic_record_type(CheckerContext *c, O
 
 	{
 		GenTypesData *found_gen_types = ensure_polymorphic_record_entity_has_gen_types(c, original_type);
-		mutex_lock(&found_gen_types->mutex);
+		gen_types_lock(found_gen_types);
 		// check_struct_type/check_union_type release this mutex early (after publishing, before
-		// checking members) to avoid a cross-record ABBA, clearing gen_types_locked. The cache-hit
-		// path keeps it until scope end.
+		// checking members) to avoid a cross-record ABBA, clearing gen_types_locked.
 		bool gen_types_locked = true;
-		defer (if (gen_types_locked) mutex_unlock(&found_gen_types->mutex));
+		defer (if (gen_types_locked) gen_types_unlock(found_gen_types));
 
 		Entity *found_entity = find_polymorphic_record_entity(found_gen_types, param_count, ordered_operands);
 		if (found_entity) {
+			gen_types_unlock(found_gen_types);
+			gen_types_locked = false;
+			wait_for_record_members(found_entity->type);
 			add_declaration_dependency(c, found_entity);
 			operand->mode = Addressing_Type;
 			operand->type = found_entity->type;

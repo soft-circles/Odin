@@ -4548,6 +4548,47 @@ gb_internal void wait_for_union_variants(Type *t) {
 	}
 }
 
+// NOTE: the number of gen_types mutexes this thread holds. A record's polymorphic parameters are
+// checked under its mutex, and the thread building another instantiation may need that mutex, so a
+// thread holding one must not wait for an instantiation's members.
+gb_global gb_thread_local i32 gen_types_locks_held;
+
+gb_internal void gen_types_lock(GenTypesData *gt) {
+	mutex_lock(&gt->mutex);
+	gen_types_locks_held += 1;
+}
+
+gb_internal void gen_types_unlock(GenTypesData *gt) {
+	gen_types_locks_held -= 1;
+	mutex_unlock(&gt->mutex);
+}
+
+gb_internal void wait_for_record_members(Type *t) {
+	if (gen_types_locks_held != 0) {
+		return;
+	}
+	Type *bt = base_type(t);
+	if (bt->kind == Type_Struct) {
+		wait_for_struct_fields(bt);
+	} else if (bt->kind == Type_Union) {
+		wait_for_union_variants(bt);
+	}
+}
+
+gb_internal Slice<Entity *> type_struct_fields(Type *t) {
+	Type *bt = base_type(t);
+	GB_ASSERT(bt->kind == Type_Struct);
+	wait_for_record_members(bt);
+	return bt->Struct.fields;
+}
+
+gb_internal Slice<Type *> type_union_variants(Type *t) {
+	Type *bt = base_type(t);
+	GB_ASSERT(bt->kind == Type_Union);
+	wait_for_record_members(bt);
+	return bt->Union.variants;
+}
+
 gb_internal i64 type_align_of_internal(Type *t, TypePath *path) {
 	GB_ASSERT(path != nullptr);
 	if (t->failure) {

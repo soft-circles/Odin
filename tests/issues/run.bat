@@ -108,6 +108,9 @@ clang -c ..\test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o || exit /b
 ..\..\..\odin check ..\test_issue_escape_store_through_union.odin %COMMON% || exit /b
 ..\..\..\odin check ..\test_issue_poly_struct_field_count_race.odin -no-entry-point %COMMON% || exit /b
 ..\..\..\odin test ..\test_issue_poly_struct_field_count_generic.odin %COMMON% || exit /b
+..\..\..\odin check ..\test_issue_poly_union_variant_count_race.odin -no-entry-point %COMMON% || exit /b
+..\..\..\odin check ..\test_issue_poly_union_variants_through_field.odin -no-entry-point %COMMON% || exit /b
+..\..\..\odin check ..\test_issue_poly_record_param_default_deadlock.odin -no-entry-point %COMMON% || exit /b
 
 @echo off
 
