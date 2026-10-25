@@ -246,3 +246,76 @@ test_packed_field_union_type_switch_ref :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect(t, simd.to_array(v) == [4]f32{5, 6, 7, 8})
 }
+
+
+// element type conversion of an array field of a #packed,
+// and matrix * array mul do a vector load of the array;
+// the load must not assume the element type alignment
+
+Packed_Conv :: struct #packed {
+	_:  u8,
+	a4: [4]f32, // offs 1
+}
+
+@(export)
+p5: Packed_Conv
+
+@(private="file")
+conv_float :: proc(p: ^Packed_Conv) -> [4]f64 {
+	return cast([4]f64)p.a4
+}
+
+@(private="file")
+conv_complex :: proc(p: ^Packed_Conv) -> [4]complex64 {
+	return cast([4]complex64)p.a4
+}
+
+@(private="file")
+mul_matrix :: proc(m: ^matrix[4, 4]f32, p: ^Packed_Conv) -> [4]f32 {
+	return m^ * p.a4
+}
+
+@(test)
+test_packed_field_array_conv :: proc(t: ^testing.T) {
+	p5.a4 = {1.5, 2.5, 3.5, 4.5} // exactly represenatble
+
+	y := #force_no_inline conv_float(&p5)
+	testing.expect(t, y == [4]f64{1.5, 2.5, 3.5, 4.5})
+
+	z := #force_no_inline conv_complex(&p5)
+	testing.expect(t, z == [4]complex64{1.5, 2.5, 3.5, 4.5})
+
+	m := matrix[4, 4]f32{
+		2, 0, 0, 0,
+		0, 2, 0, 0,
+		0, 0, 2, 0,
+		0, 0, 0, 2,
+	}
+	w := #force_no_inline mul_matrix(&m, &p5)
+	testing.expect(t, w == [4]f32{3, 5, 7, 9}) // exact float
+}
+
+
+// zero stores to a #packed field
+
+@(export)
+p6: Packed_Small
+
+@(private="file")
+zero_v :: proc(p: ^Packed_Small) {
+	p.v = {}
+}
+
+@(test)
+test_packed_field_zero_store :: proc(t: ^testing.T) {
+	p6.v = {1, 2, 3, 4}
+	p6.n = -1
+	p6.v = {} // folded const GEP
+	p6.n = 0
+	testing.expect(t, simd.to_array(p6.v) == [4]f32{})
+	testing.expect(t, p6.n == 0)
+
+	p6.v = {5, 6, 7, 8}
+	#force_no_inline zero_v(&p6) // GEP with packed metadata
+	testing.expect(t, simd.to_array(p6.v) == [4]f32{})
+}

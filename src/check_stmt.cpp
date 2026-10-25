@@ -8,7 +8,7 @@ gb_internal bool is_diverging_expr(Ast *expr) {
 		return name == "panic";
 	}
 	Ast *proc = unparen_expr(expr->CallExpr.proc);
-	TypeAndValue tv = proc->tav;
+	TypeAndValue tv = type_and_value_of_expr(proc);
 	if (tv.mode == Addressing_Builtin) {
 		Entity *e = entity_of_node(proc);
 		BuiltinProcId id = BuiltinProc_Invalid;
@@ -339,7 +339,7 @@ gb_internal bool check_is_terminating(Ast *node, String const &label) {
 
 	case_ast_node(ws, WhenStmt, node);
 		// TODO(bill): Is this logic correct for when statements?
-		auto const &tv = ws->cond->tav;
+		AstTypeAndValue const &tv = ws->cond->tav;
 		if (tv.mode != Addressing_Constant) {
 			// NOTE(bill): Check the things regardless as a bug occurred earlier
 			if (ws->else_stmt != nullptr) {
@@ -351,8 +351,8 @@ gb_internal bool check_is_terminating(Ast *node, String const &label) {
 			return false;
 		}
 
-		if (tv.value.kind == ExactValue_Bool) {
-			if (tv.value.value_bool) {
+		if (tv.value().kind == ExactValue_Bool) {
+			if (tv.value().value_bool) {
 				return check_is_terminating(ws->body, label);
 			} else {
 				if (ws->else_stmt == nullptr) {
@@ -544,7 +544,7 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 		Ast *ln = unparen_expr(lhs->expr);
 		if (ln->kind == Ast_IndexExpr) {
 			Ast *x = ln->IndexExpr.expr;
-			TypeAndValue tav = x->tav;
+			TypeAndValue tav = type_and_value_of_expr(x);
 			GB_ASSERT(tav.mode != Addressing_Invalid);
 			if (tav.mode != Addressing_Variable) {
 				if (!is_type_pointer(tav.type)) {
@@ -710,8 +710,13 @@ gb_internal void check_when_stmt(CheckerContext *ctx, AstWhenStmt *ws, u32 flags
 		error(ws->cond, "Invalid body for 'when' statement");
 		return;
 	}
-	if (operand.value.kind == ExactValue_Bool &&
-	    operand.value.value_bool) {
+
+	bool taken = operand.value.kind == ExactValue_Bool && operand.value.value_bool;
+	if (build_context.export_semantics_format != SemanticsFormat_Invalid) {
+		per_thread_array_add(&ctx->info->semantic_when_queue, SemanticWhen{ws, taken});
+	}
+
+	if (taken) {
 		check_stmt_list(ctx, ws->body->BlockStmt.stmts, flags);
 	} else if (ws->else_stmt) {
 		switch (ws->else_stmt->kind) {
@@ -751,8 +756,8 @@ gb_internal void check_label(CheckerContext *ctx, Ast *label, Ast *parent) {
 	GB_ASSERT(ctx->decl != nullptr);
 
 	bool ok = true;
-	for_array(i, ctx->decl->labels) {
-		BlockLabel bl = ctx->decl->labels[i];
+	for_array(i, ctx->decl->proc->labels) {
+		BlockLabel bl = ctx->decl->proc->labels[i];
 		if (bl.name == name) {
 			error(label, "Duplicate label with the name '%.*s'", LIT(name));
 			ok = false;
@@ -766,7 +771,7 @@ gb_internal void check_label(CheckerContext *ctx, Ast *label, Ast *parent) {
 
 	if (ok) {
 		BlockLabel bl = {name, label};
-		array_add(&ctx->decl->labels, bl);
+		array_add(&ctx->decl->proc->labels, bl);
 	}
 }
 
@@ -1193,6 +1198,7 @@ gb_internal void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags
 		Token token  = {};
 		token.pos    = ast_token(ss->body).pos;
 		token.string = str_lit("true");
+		token.flags  = TokenFlag_Synthesized;
 
 		x.expr = alloc_ast_node(nullptr, Ast_Ident);
 		x.expr->Ident.token = token;
@@ -1269,6 +1275,17 @@ gb_internal void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags
 					continue;
 				}
 
+				// NOTE: like a single case value, the bounds take the type of the switch tag, otherwise
+				// untyped bounds would default to their own type (e.g. 'string' for a 'cstring' tag) (#7853)
+				convert_to_typed(ctx, &lhs, x.type);
+				if (lhs.mode == Addressing_Invalid) {
+					continue;
+				}
+				convert_to_typed(ctx, &rhs, x.type);
+				if (rhs.mode == Addressing_Invalid) {
+					continue;
+				}
+
 				TokenKind upper_op = Token_Invalid;
 				switch (be->op.kind) {
 				case Token_Ellipsis:  upper_op = Token_LtEq; break;
@@ -1298,7 +1315,13 @@ gb_internal void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags
 					add_to_seen_map(ctx, &seen, upper_op, x, lhs, rhs);
 				}
 
-				if (is_type_string16(x.type)) {
+				if (is_type_cstring16(x.type)) {
+					add_package_dependency(ctx, "runtime", "cstring16_le");
+					add_package_dependency(ctx, "runtime", "cstring16_lt");
+				} else if (is_type_cstring(x.type)) {
+					add_package_dependency(ctx, "runtime", "cstring_le");
+					add_package_dependency(ctx, "runtime", "cstring_lt");
+				} else if (is_type_string16(x.type)) {
 					// NOTE(bill): Force dependency for strings here
 					add_package_dependency(ctx, "runtime", "string16_le");
 					add_package_dependency(ctx, "runtime", "string16_lt");
@@ -2200,6 +2223,7 @@ gb_internal void check_value_decl_stmt(CheckerContext *ctx, Ast *node, u32 mod_f
 			if (found == nullptr) {
 				entity = alloc_entity_variable(ctx->scope, token, nullptr);
 				entity->identifier = name;
+				add_semantic_ident(ctx->info, name, entity, true);
 
 				Ast *fl = ctx->foreign_context.curr_library;
 				if (fl != nullptr) {
@@ -2456,7 +2480,8 @@ gb_internal void check_expr_stmt(CheckerContext *ctx, Ast *node) {
 			do_require = t->Proc.require_results;
 		} else if (check_stmt_internal_builtin_proc_id(ce->proc, &builtin_id)) {
 			auto const &bp = builtin_procs[builtin_id];
-			do_require = bp.kind == Expr_Expr && !bp.ignore_results;
+			// NOTE(Jeroen): diverging builtins like `unreachable` have no results to be handled
+			do_require = bp.kind == Expr_Expr && !bp.ignore_results && !bp.diverging;
 		}
 		if (do_require) {
 			gbString expr_str = expr_to_string(ce->proc);
@@ -2818,16 +2843,16 @@ gb_internal void check_for_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 			    cond->BinaryExpr.op.kind == Token_GtEq &&
 			    type_of_expr(cond->BinaryExpr.left) != nullptr &&
 			    is_type_unsigned(type_of_expr(cond->BinaryExpr.left)) &&
-			    cond->BinaryExpr.right->tav.value.kind == ExactValue_Integer &&
-			    is_exact_value_zero(cond->BinaryExpr.right->tav.value)) {
+			    cond->BinaryExpr.right->tav.value().kind == ExactValue_Integer &&
+			    is_exact_value_zero(cond->BinaryExpr.right->tav.value())) {
 				warning(cond, "Expression is always true since unsigned numbers are always >= 0");
 			} else if (cond && cond->kind == Ast_BinaryExpr &&
 			    cond->BinaryExpr.left && cond->BinaryExpr.right &&
 			    cond->BinaryExpr.op.kind == Token_LtEq &&
 			    type_of_expr(cond->BinaryExpr.right) != nullptr &&
 			    is_type_unsigned(type_of_expr(cond->BinaryExpr.right)) &&
-			    cond->BinaryExpr.left->tav.value.kind == ExactValue_Integer &&
-			    is_exact_value_zero(cond->BinaryExpr.left->tav.value)) {
+			    cond->BinaryExpr.left->tav.value().kind == ExactValue_Integer &&
+			    is_exact_value_zero(cond->BinaryExpr.left->tav.value())) {
 				warning(cond, "Expression is always true since unsigned numbers are always >= 0");
 			}
 		}
@@ -2910,8 +2935,8 @@ gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) 
 			ctx->in_defer = true;
 			check_stmt(ctx, ds->stmt, 0);
 			ctx->in_defer = out_in_defer;
-			if (ctx->decl) {
-				ctx->decl->defer_used += 1;
+			if (ctx->decl && ctx->decl->proc) {
+				ctx->decl->proc->defer_used += 1;
 			}
 
 			// NOTE(bill): Handling errors/warnings

@@ -167,8 +167,8 @@ gb_internal i32 syntactic_visibility(Array<Ast *> const &attributes) {
 			    elem->FieldValue.field->kind == Ast_Ident &&
 			    elem->FieldValue.field->Ident.token.string == "private") {
 				Ast *value = elem->FieldValue.value;
-				if (value != nullptr && value->tav.value.kind == ExactValue_String) {
-					return value->tav.value.value_string == "file" ? EntityVisiblity_PrivateToFile : EntityVisiblity_PrivateToPackage;
+				if (value != nullptr && value->tav.value().kind == ExactValue_String) {
+					return value->tav.value().value_string == "file" ? EntityVisiblity_PrivateToFile : EntityVisiblity_PrivateToPackage;
 				}
 				return -1;
 			}
@@ -485,6 +485,11 @@ gb_internal void resolve_global_decl_source_internal(GlobalDeclSource *src, Inte
 			ws->is_cond_determined = true;
 			ws->determined_cond = operand.value.kind == ExactValue_Bool && operand.value.value_bool;
 		}
+
+		if (build_context.export_semantics_format != SemanticsFormat_Invalid) {
+			per_thread_array_add(&ctx.info->semantic_when_queue, SemanticWhen{ws, ws->determined_cond});
+		}
+
 		if (ws->body == nullptr || ws->body->kind != Ast_BlockStmt) {
 			error(ws->cond, "Invalid body for 'when' statement");
 		} else if (ws->else_stmt != nullptr && ws->else_stmt->kind != Ast_BlockStmt && ws->else_stmt->kind != Ast_WhenStmt) {
@@ -857,7 +862,7 @@ gb_internal void global_graph_add_ref(GlobalGraphWalk *w, Entity *e) {
 }
 
 // NOTE: names bound within the expression (parameters, fields, '$T') are also looked up globally, which at
-// worst adds an edge; only procedure bodies are skipped, as they are checked after this stage
+// worst adds an edge; only the bodies of procedures and asm templates are skipped, as they are checked after this stage
 gb_internal void global_graph_walk(GlobalGraphWalk *w, Ast *node) {
 	if (node == nullptr) {
 		return;
@@ -1071,41 +1076,8 @@ gb_internal void global_graph_walk(GlobalGraphWalk *w, Ast *node) {
 		break;
 
 	case Ast_AsmTemplate:
+		// NOTE: like a procedure literal, the rest of it is checked after this stage, see `check_asm_template_body_later`
 		global_graph_walk(w, node->AsmTemplate.signature);
-		global_graph_walk_slice(w, node->AsmTemplate.specs);
-		global_graph_walk_slice(w, node->AsmTemplate.clobbers);
-		global_graph_walk_slice(w, node->AsmTemplate.instructions);
-		break;
-	case Ast_AsmSpec:
-		global_graph_walk(w, node->AsmSpec.type);
-		global_graph_walk(w, node->AsmSpec.value);
-		for (Ast *d : node->AsmSpec.directives) {
-			global_graph_walk(w, d);
-		}
-		break;
-	case Ast_AsmClobber:
-		global_graph_walk(w, node->AsmClobber.value);
-		break;
-	case Ast_AsmInstruction:
-		global_graph_walk_slice(w, node->AsmInstruction.operands);
-		break;
-	case Ast_AsmMemoryTerm:
-		global_graph_walk(w, node->AsmMemoryTerm.operand);
-		global_graph_walk(w, node->AsmMemoryTerm.scale);
-		break;
-	case Ast_AsmMemoryOperand:
-		global_graph_walk(w, node->AsmMemoryOperand.segment_override);
-		global_graph_walk_slice(w, node->AsmMemoryOperand.terms);
-		global_graph_walk(w, node->AsmMemoryOperand.type);
-		break;
-	case Ast_AsmRegisterGroup:
-		for (Ast *r : node->AsmRegisterGroup.registers) {
-			global_graph_walk(w, r);
-		}
-		global_graph_walk(w, node->AsmRegisterGroup.type);
-		break;
-	case Ast_AsmDirective:
-		global_graph_walk_slice(w, node->AsmDirective.operands);
 		break;
 	}
 }
