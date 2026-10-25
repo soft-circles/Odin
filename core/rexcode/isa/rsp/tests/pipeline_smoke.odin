@@ -250,7 +250,7 @@ run_rsp_pipeline_tests :: proc() {
 
 		text := rsp.aprint(d_insts[:], d_info[:], d_labels[:],
 						   nil, nil, nil, context.temp_allocator)
-		eq_str("cop2c: print", text, "    cfc2 t0, $0\n")
+		eq_str("cop2c: print", text, "    cfc2 t0, COP2_CTRL_VCO\n")
 	}
 
 	// ---- 6. CP0 DMA register print --------------------------------------
