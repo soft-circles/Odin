@@ -258,19 +258,18 @@ Preserve these guarantees:
 - Two-operand `div`/`divu`/`ddiv`/`ddivu` are emitted as `div $zero, rs, rt`.
 - Feature gating stays: `feature_name_from_form` names no feature for VR4300
   forms and the LLVM feature for later-ISA forms, which the checker rejects
-  unless the build or the template enables that feature. Because
-  `template_features_bind_to_caller` is true, a call to a feature-enabling
-  template is rejected unless the calling procedure or the build enables it.
+  unless the build or the template enables that feature. A call to a
+  feature-enabling template is rejected unless the calling procedure or the
+  build enables it too. Upstream's check in `check_call_expr`
+  (`src/check_expr.cpp`) enforces that on every arch, so MIPS needs no hook.
 
 Table hooks the generic checker asks for (all optional, SFINAE-detected in
 `check_asm.cpp`; a table without one keeps the old behaviour): `register_is_float`
 types a literal FPR as `f32`/`f64`; `literal_register_reject_reason` and
 `pin_reject_reason` reject wrong-class literals and impossible pins at check
-time; `register_unavailable_reason` explains `%at`; `template_features_bind_to_caller`
-makes a call to a feature-enabling template require the feature on the caller
-or the build; `pinned_integer_operand_min_bits` on the generator widens narrow
-pinned operands to 32 bits, since LLVM's MIPS backend asserts on an i8/i16
-explicit-register constraint.
+time; `register_unavailable_reason` explains `%at`; `pinned_integer_operand_min_bits`
+on the generator widens narrow pinned operands to 32 bits, since LLVM's MIPS
+backend asserts on an i8/i16 explicit-register constraint.
 
 ## Setup defaults
 
