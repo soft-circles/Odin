@@ -4537,7 +4537,7 @@ gb_internal void wait_for_record_signal(Wait_Signal *signal, Futex *checking_thr
 }
 
 gb_internal void wait_for_struct_fields(Type *t) {
-	if (t->Struct.polymorphic_parent != nullptr) {
+	if (t->Struct.polymorphic_parent != nullptr && !t->Struct.is_polymorphic) {
 		wait_for_record_signal(&t->Struct.fields_wait_signal, &t->Struct.checking_thread);
 	}
 }
