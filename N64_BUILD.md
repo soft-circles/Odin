@@ -454,8 +454,8 @@ python3 tests/n64_validate.py quick
 ```
 
 The compiler-only full suite additionally exercises public ROM builds,
-O64 interop, the [standalone runtime probe](tests/n64_runtime) and the
-[CPU asm template ROM](tests/n64_asm/rom):
+O64 interop, the [standalone runtime probe](tests/n64_runtime), the
+[CPU asm template ROM](tests/n64_asm/rom) and the [bit_field ROM](tests/n64_bit_field):
 
 ```sh
 N64_INST=/absolute/sdk ARES_TEST=/absolute/ares-test python3 tests/n64_validate.py full

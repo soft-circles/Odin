@@ -38,6 +38,7 @@ def quick_stages(artifacts: Path = Path("/artifacts")) -> list[Stage]:
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
         Stage("asm template ROM probe", ("./odin", "check", "tests/n64_asm/rom", "-target:n64", "-vet", "-warnings-as-errors")),
+        Stage("bit_field ROM probe", ("./odin", "check", "tests/n64_bit_field/rom", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("runtime probe code generation", ("./odin", "build", "tests/n64_runtime", "-target:n64", "-build-mode:obj", f"-out:{runtime_objects}")),
         Stage("core:mem target check", ("./odin", "check", "tests/n64_core_mem", "-target:n64", "-no-entry-point", "-vet", "-warnings-as-errors")),
@@ -52,6 +53,7 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
     }
     rom = str(artifacts / "runtime.z64")
     asm_rom = str(artifacts / "asm.z64")
+    bit_field_rom = str(artifacts / "bit_field.z64")
     return [
         Stage("check SDK files and tools", (PYTHON, "tests/o64_abi/validate_sdk.py", str(sdk)), environment=environment),
         Stage("N64 public build suite", (PYTHON, "tests/n64_build/test_n64_build.py"), environment=environment),
@@ -61,6 +63,8 @@ def full_stages(sdk: Path, runner: str, artifacts: Path) -> list[Stage]:
         Stage("standalone runtime lifecycle", (runner, "tests/n64_runtime/runtime.test.js", rom, "--timeout", "30"), environment=environment),
         Stage("build asm template ROM", ("./odin", "build", "tests/n64_asm/rom", "-target:n64", f"-out:{asm_rom}"), environment=environment),
         Stage("asm template ROM run", (runner, "tests/n64_asm/rom.test.js", asm_rom, "--timeout", "30"), environment=environment),
+        Stage("build bit_field ROM", ("./odin", "build", "tests/n64_bit_field/rom", "-target:n64", f"-out:{bit_field_rom}"), environment=environment),
+        Stage("bit_field ROM run", (runner, "tests/n64_bit_field/rom.test.js", bit_field_rom, "--timeout", "30"), environment=environment),
     ]
 
 def run_stages(stages: list[Stage], artifacts: Path) -> int:
