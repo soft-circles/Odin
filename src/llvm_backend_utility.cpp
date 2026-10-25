@@ -186,9 +186,20 @@ gb_internal lbValue lb_emit_select(lbProcedure *p, lbValue cond, lbValue x, lbVa
 	return res;
 }
 
+// NOTE: the VR4300 has no float min/max instruction, so llvm.minnum/llvm.maxnum lower to calls to newlib's
+// software fminf/fmaxf. Pick inline with a compare instead; equal operands yield y, as in newlib. Unlike
+// newlib, a NaN operand reaches the FPU compare, which traps while libdragon enables invalid-operation exceptions.
+gb_internal lbValue lb_emit_float_min_max_mips32be(lbProcedure *p, TokenKind op, lbValue x, lbValue y) {
+	lbValue picked = lb_emit_select(p, lb_emit_comp(p, op, x, y), x, y);
+	return lb_emit_select(p, lb_emit_comp(p, Token_NotEq, y, y), x, picked);
+}
+
 gb_internal lbValue lb_emit_min(lbProcedure *p, Type *t, lbValue x, lbValue y) {
 	x = lb_emit_conv(p, x, t);
 	y = lb_emit_conv(p, y, t);
+	if (build_context.metrics.arch == TargetArch_mips32be && is_type_float(t)) {
+		return lb_emit_float_min_max_mips32be(p, Token_Lt, x, y);
+	}
 	bool use_llvm_intrinsic = !is_arch_wasm() && is_type_float(t);
 	if (use_llvm_intrinsic) {
 		LLVMValueRef args[2] = {x.value, y.value};
@@ -205,6 +216,9 @@ gb_internal lbValue lb_emit_min(lbProcedure *p, Type *t, lbValue x, lbValue y) {
 gb_internal lbValue lb_emit_max(lbProcedure *p, Type *t, lbValue x, lbValue y) {
 	x = lb_emit_conv(p, x, t);
 	y = lb_emit_conv(p, y, t);
+	if (build_context.metrics.arch == TargetArch_mips32be && is_type_float(t)) {
+		return lb_emit_float_min_max_mips32be(p, Token_Gt, x, y);
+	}
 	bool use_llvm_intrinsic = !is_arch_wasm() && is_type_float(t);
 	if (use_llvm_intrinsic) {
 		LLVMValueRef args[2] = {x.value, y.value};
