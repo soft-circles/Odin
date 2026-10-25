@@ -164,6 +164,21 @@ encode_one_inline :: #force_inline proc(
 encoding_matches_inline :: #force_inline proc "contextless" (
 	inst: ^Instruction, form: ^Encoding,
 ) -> bool {
+	if form.feature == .RSP_VLS {
+		// Vector L/S: the element is encoded from the VMEM operand, but
+		// inst_v_vmem also copies it onto vt (the printer shows it there).
+		// Accept a vt element only when it agrees with the VMEM one.
+		vt := &inst.ops[0]
+		if vt.kind == .VECTOR_REG && vt.element != 0 {
+			if inst.ops[1].kind != .VECTOR_MEM || vt.element != inst.ops[1].vmem.element {
+				return false
+			}
+			return  reg_class(vt.reg) == REG_VR &&
+					operand_matches_inline(&inst.ops[1], form.ops[1]) &&
+					operand_matches_inline(&inst.ops[2], form.ops[2]) &&
+					operand_matches_inline(&inst.ops[3], form.ops[3])
+		}
+	}
 	return  operand_matches_inline(&inst.ops[0], form.ops[0]) &&
 			operand_matches_inline(&inst.ops[1], form.ops[1]) &&
 			operand_matches_inline(&inst.ops[2], form.ops[2]) &&
@@ -182,7 +197,8 @@ operand_matches_inline :: #force_inline proc "contextless" (
 	case .VR:
 		// Plain vector register (no element).  Accept VECTOR_REG OR
 		// REGISTER if the user did not need an element; a non-zero element
-		// has no field to go in, so it must not be silently dropped.
+		// has no field to go in, so it must not be silently dropped (vector
+		// L/S vt is handled in encoding_matches_inline).
 		if op.kind == .VECTOR_REG  { return reg_class(op.reg) == REG_VR && op.element == 0 }
 		if op.kind == .REGISTER    { return reg_class(op.reg) == REG_VR }
 		return false
