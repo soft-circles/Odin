@@ -12,13 +12,19 @@ import "core:rexcode/isa"
 // N64 RSP PRINTER
 // =============================================================================
 //
-// Classical MIPS-ish syntax adapted for the RSP:
-//   - Scalar GPRs use the same ABI names as MIPS (`$zero`, `$t0`, `$sp`).
-//   - Vector regs are `$v0..$v31` with an optional element suffix `[N]`
-//     for VR_ELEM operands (`vmulf $v0, $v1, $v2[3]`).
-//   - Vector flag regs print as `vco`, `vcc`, `vce`.
-//   - Vector memory is `e[N], offset(base)` matching N64 toolchain output.
-//   - CP0 DMA registers print by enum name when known.
+// libdragon syntax: GNU as with `#include <rsp.inc>`, the usual way RSP
+// ucode is built today. Every line assembles to the word `encode` produces.
+//   - Scalar GPRs use the bare ABI names that `regdef.h` `#define`s
+//     (`t0`, `sp`, `ra`). `$1` stays `$at`: there is no `at` define.
+//   - Vector regs are two-digit `$v00..$v31`. A VR_ELEM element uses
+//     rsp.inc's accessor names (`vmulf $v01, $v02, $v03.q1`); field 1 has no
+//     name and falls back to the 4-operand form (`..., $v03, 1`).
+//   - Single-lane ops (vrcp, vmov, ...) print `op vd, de, vt, element`.
+//   - Vector loads/stores print `op vt, element, byte_offset, base`: the
+//     element is always present and the offset is in bytes, not units.
+//   - mtc2/mfc2 print the byte element as a third operand when non-zero.
+//   - CP0 registers print as rsp.inc's `COP0_*` names; the COP2 control
+//     registers (vco/vcc/vce) print as `$0..$2`.
 //
 // All seven sink families (sbprint / print / aprint / tprint / bprint /
 // fprint / wprint) wrap the same core `sbprint`.
@@ -31,7 +37,7 @@ DEFAULT_PRINT_OPTIONS :: isa.DEFAULT_PRINT_OPTIONS
 
 @(rodata, private="file")
 GPR_NAMES_ABI := [32]string{
-	"zero", "at",
+	"zero", "$at",
 	"v0", "v1",
 	"a0", "a1", "a2", "a3",
 	"t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
@@ -43,10 +49,20 @@ GPR_NAMES_ABI := [32]string{
 
 @(rodata, private="file")
 CP0_NAMES := [16]string{
-	"sp_mem_addr",  "sp_dram_addr", "sp_rd_len",   "sp_wr_len",
-	"sp_status",    "sp_dma_full",  "sp_dma_busy", "sp_semaphore",
-	"dp_start",     "dp_end",       "dp_current",  "dp_status",
-	"dp_clock",     "dp_bufbusy",   "dp_pipebusy", "dp_tmem",
+	"COP0_DMA_SPADDR", "COP0_DMA_RAMADDR", "COP0_DMA_READ",   "COP0_DMA_WRITE",
+	"COP0_SP_STATUS",  "COP0_DMA_FULL",    "COP0_DMA_BUSY",   "COP0_SEMAPHORE",
+	"COP0_DP_START",   "COP0_DP_END",      "COP0_DP_CURRENT", "COP0_DP_STATUS",
+	"COP0_DP_CLOCK",   "COP0_DP_BUSY",     "COP0_DP_PIPE_BUSY", "COP0_DP_TMEM_BUSY",
+}
+
+// rsp.inc accessor names for a vector ALU element field (index = field).
+// Field 0 is the whole vector (no suffix); field 1 has no name.
+@(rodata, private="file")
+VU_ELEMENT_NAMES := [16]string{
+	"", "",
+	"q0", "q1",
+	"h0", "h1", "h2", "h3",
+	"e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7",
 }
 
 mnemonic_to_string :: proc(m: Mnemonic, lowercase: bool = true, allocator := context.temp_allocator) -> string {
@@ -57,7 +73,7 @@ mnemonic_to_string :: proc(m: Mnemonic, lowercase: bool = true, allocator := con
 
 register_name :: proc(r: Register, lowercase: bool = true, allocator := context.temp_allocator) -> string {
 	sb := strings.builder_make(allocator)
-	write_register(&sb, r, !lowercase, 0xFF)   // no element suffix
+	write_register(&sb, r, !lowercase)
 	return strings.to_string(sb)
 }
 
@@ -106,20 +122,7 @@ sbprint :: proc(
 			strings.write_string(sb, ": ")
 		}
 
-		write_mnemonic(sb, inst.mnemonic, opts.uppercase)
-
-		if inst.operand_count > 0 {
-			strings.write_byte(sb, ' ')
-			for slot in 0..<int(inst.operand_count) {
-				if slot > 0 {
-					strings.write_byte(sb, ',')
-					if opts.space_after_comma {
-						strings.write_byte(sb, ' ')
-					}
-				}
-				write_operand(sb, &inst.ops[slot], &display, opts)
-			}
-		}
+		write_instruction(sb, inst, &display, opts)
 		strings.write_string(sb, opts.separator)
 	}
 }
@@ -279,61 +282,41 @@ write_mnemonic :: proc(sb: ^strings.Builder, m: Mnemonic, uppercase: bool) {
 }
 
 @(private="file")
-write_register :: proc(sb: ^strings.Builder, r: Register, uppercase: bool, element: u8) {
+write_name :: proc(sb: ^strings.Builder, name: string, uppercase: bool) {
+	for i in 0..<len(name) {
+		c := name[i]
+		if uppercase && c >= 'a' && c <= 'z' {
+			strings.write_byte(sb, c - 32)
+		} else {
+			strings.write_byte(sb, c)
+		}
+	}
+}
+
+@(private="file")
+write_register :: proc(sb: ^strings.Builder, r: Register, uppercase: bool) {
 	if r == NONE {
 		strings.write_string(sb, "<none>")
 		return
 	}
-	cls := reg_class(r)
-	hw  := reg_hw(r)
-
-	// Vector flag regs print without `$`.
-	if cls == REG_VC {
-		s: string
-		switch hw {
-		case 0: s = uppercase ? "VCO" : "vco"
-		case 1: s = uppercase ? "VCC" : "vcc"
-		case 2: s = uppercase ? "VCE" : "vce"
-		case:   s = "?"
-		}
-		strings.write_string(sb, s)
-		return
-	}
-
-	strings.write_byte(sb, '$')
-	switch cls {
+	hw := reg_hw(r)
+	switch reg_class(r) {
 	case REG_GPR:
-		name := GPR_NAMES_ABI[hw]
-		if uppercase {
-			for i in 0..<len(name) {
-				c := name[i]
-				if c >= 'a' && c <= 'z' { strings.write_byte(sb, c - 32) }
-				else                    { strings.write_byte(sb, c)      }
-			}
-		} else {
-			strings.write_string(sb, name)
-		}
+		write_name(sb, GPR_NAMES_ABI[hw], uppercase)
 	case REG_VR:
-		strings.write_byte(sb, uppercase ? 'V' : 'v')
+		// rsp.inc only defines the two-digit spellings ($v01, not $v1).
+		strings.write_string(sb, uppercase ? "$V" : "$v")
+		if hw < 10 { strings.write_byte(sb, '0') }
 		write_decimal_u32(sb, u32(hw))
-		if element != 0xFF {
-			strings.write_byte(sb, '[')
-			write_decimal_u32(sb, u32(element))
-			strings.write_byte(sb, ']')
-		}
+	case REG_VC:
+		// cfc2/ctc2 take the control register number: vco=$0, vcc=$1, vce=$2.
+		strings.write_byte(sb, '$')
+		write_decimal_u32(sb, u32(hw))
 	case REG_CP0:
 		if int(hw) < len(CP0_NAMES) {
-			name := CP0_NAMES[hw]
-			if uppercase {
-				for i in 0..<len(name) {
-					c := name[i]
-					if c >= 'a' && c <= 'z' { strings.write_byte(sb, c - 32) }
-					else                    { strings.write_byte(sb, c)      }
-				}
-			} else {
-				strings.write_string(sb, name)
-			}
+			strings.write_string(sb, CP0_NAMES[hw])
 		} else {
+			strings.write_byte(sb, '$')
 			write_decimal_u32(sb, u32(hw))
 		}
 	case:
@@ -342,23 +325,182 @@ write_register :: proc(sb: ^strings.Builder, r: Register, uppercase: bool, eleme
 }
 
 @(private="file")
-write_operand :: proc(
+write_comma :: proc(sb: ^strings.Builder, opts: ^Print_Options) {
+	strings.write_byte(sb, ',')
+	if opts.space_after_comma {
+		strings.write_byte(sb, ' ')
+	}
+}
+
+// Access size in bytes of a vector load/store: the unit its 7-bit offset
+// field counts in.
+@(private="file")
+vector_ls_size :: proc(m: Mnemonic) -> i32 {
+	#partial switch m {
+	case .LBV, .SBV:                     return 1
+	case .LSV, .SSV:                     return 2
+	case .LLV, .SLV:                     return 4
+	case .LDV, .SDV, .LPV, .SPV, .LUV, .SUV: return 8
+	}
+	return 16
+}
+
+// Single-lane ops: vs holds the destination lane (`de`), not a register.
+@(private="file")
+is_single_lane :: proc(m: Mnemonic) -> bool {
+	#partial switch m {
+	case .VRCP, .VRCPL, .VRCPH, .VRSQ, .VRSQL, .VRSQH:
+		return true
+	}
+	return false
+}
+
+// Mnemonic plus operands. Most instructions print their operands in order;
+// the cases below are where rsp.inc's macros want a different shape.
+@(private="file")
+write_instruction :: proc(
 	sb:      ^strings.Builder,
-	op:      ^Operand,
+	inst:    ^Instruction,
 	display: ^isa.Label_Display,
 	opts:    ^Print_Options,
+) {
+	ops := inst.ops[:inst.operand_count]
+	m   := inst.mnemonic
+
+	// rsp.inc has no `lwv` macro; `loadVector` is the helper its load
+	// macros expand to, and takes the raw 7-bit offset field.
+	if m == .LWV && len(ops) == 2 && ops[1].kind == .VECTOR_MEM {
+		strings.write_string(sb, "loadVector 0b01010")
+		write_comma(sb, opts)
+		write_register(sb, ops[0].reg, opts.uppercase)
+		write_comma(sb, opts)
+		write_decimal_u32(sb, u32(ops[1].vmem.element))
+		write_comma(sb, opts)
+		write_decimal_u32(sb, u32(ops[1].vmem.offset) & 0x7F)
+		write_comma(sb, opts)
+		write_register(sb, ops[1].vmem.base, opts.uppercase)
+		return
+	}
+
+	// rsp.inc's `vsar` only takes `vsar vd, element` with vs = vt = 0 and an
+	// accumulator slice (8-10); anything else goes through its `vectorOp`.
+	if m == .VSAR && len(ops) == 3 {
+		vs, vt, element := ops[1].reg, ops[2].reg, ops[2].element
+		if reg_hw(vs) == 0 && reg_hw(vt) == 0 && element >= 8 && element <= 10 {
+			write_mnemonic(sb, m, opts.uppercase)
+			strings.write_byte(sb, ' ')
+			write_register(sb, ops[0].reg, opts.uppercase)
+			write_comma(sb, opts)
+			write_decimal_u32(sb, u32(element))
+		} else {
+			strings.write_string(sb, "vectorOp 0b011101")
+			for i in 0..<3 {
+				write_comma(sb, opts)
+				write_register(sb, ops[i].reg, opts.uppercase)
+			}
+			write_comma(sb, opts)
+			write_decimal_u32(sb, u32(element))
+		}
+		return
+	}
+
+	write_mnemonic(sb, m, opts.uppercase)
+	if len(ops) == 0 {
+		return
+	}
+	strings.write_byte(sb, ' ')
+
+	switch {
+	case is_single_lane(m) && len(ops) == 3:
+		// `op vd, de, vt, element`
+		write_register(sb, ops[0].reg, opts.uppercase)
+		write_comma(sb, opts)
+		write_decimal_u32(sb, u32(reg_hw(ops[1].reg)))
+		write_comma(sb, opts)
+		write_register(sb, ops[2].reg, opts.uppercase)
+		write_comma(sb, opts)
+		write_decimal_u32(sb, u32(ops[2].element))
+
+	case m == .VMOV && len(ops) == 2:
+		// `vmov vd, de, vt, element`; the table encodes no de, so it is 0.
+		write_register(sb, ops[0].reg, opts.uppercase)
+		write_comma(sb, opts)
+		strings.write_byte(sb, '0')
+		write_comma(sb, opts)
+		write_register(sb, ops[1].reg, opts.uppercase)
+		write_comma(sb, opts)
+		write_decimal_u32(sb, u32(ops[1].element))
+
+	case len(ops) == 2 && ops[1].kind == .VECTOR_MEM:
+		// `op vt, element, byte_offset, base`. The encoder takes the element
+		// from the VECTOR_MEM operand, so vt prints without a suffix even when
+		// a builder mirrored the element onto it.
+		write_register(sb, ops[0].reg, opts.uppercase)
+		write_comma(sb, opts)
+		write_operand(sb, &ops[1], m, display, opts)
+
+	case m == .BREAK && len(ops) == 1 && ops[0].kind == .IMMEDIATE:
+		// The 20-bit code sits in bits 25-6, but GNU as puts a lone
+		// `break N` in bits 25-16; `break hi, lo` fills both halves.
+		code := u32(ops[0].immediate) & 0xFFFFF
+		write_decimal_u32(sb, code >> 10)
+		if code & 0x3FF != 0 {
+			write_comma(sb, opts)
+			write_decimal_u32(sb, code & 0x3FF)
+		}
+
+	case (m == .MTC2 || m == .MFC2) && len(ops) == 2:
+		// `mtc2 rt, vs[, element]`, element = byte offset (bits 10-7).
+		// rsp.inc resolves rt as `hex.<name>`, which only knows `at` for $1.
+		if reg_class(ops[0].reg) == REG_GPR && reg_hw(ops[0].reg) == 1 {
+			write_name(sb, "at", opts.uppercase)
+		} else {
+			write_register(sb, ops[0].reg, opts.uppercase)
+		}
+		write_comma(sb, opts)
+		write_register(sb, ops[1].reg, opts.uppercase)
+		if ops[1].element != 0 {
+			write_comma(sb, opts)
+			write_decimal_u32(sb, u32(ops[1].element))
+		}
+
+	case:
+		for &op, slot in ops {
+			if slot > 0 {
+				write_comma(sb, opts)
+			}
+			write_operand(sb, &op, m, display, opts)
+		}
+	}
+}
+
+@(private="file")
+write_operand :: proc(
+	sb:       ^strings.Builder,
+	op:       ^Operand,
+	mnemonic: Mnemonic,
+	display:  ^isa.Label_Display,
+	opts:     ^Print_Options,
 ) {
 	switch op.kind {
 	case .NONE:
 
 	case .REGISTER:
-		write_register(sb, op.reg, opts.uppercase, 0xFF)
+		write_register(sb, op.reg, opts.uppercase)
 
 	case .VECTOR_REG:
-		// Print element only when non-zero (idiomatic disassembly).
-		elem := op.element
-		if elem == 0 { elem = 0xFF }
-		write_register(sb, op.reg, opts.uppercase, elem)
+		write_register(sb, op.reg, opts.uppercase)
+		// Element 0 is the whole vector and needs no suffix.
+		if op.element != 0 {
+			name := VU_ELEMENT_NAMES[op.element & 0x0F]
+			if name != "" {
+				strings.write_byte(sb, '.')
+				write_name(sb, name, opts.uppercase)
+			} else {
+				write_comma(sb, opts)
+				write_decimal_u32(sb, u32(op.element))
+			}
+		}
 
 	case .IMMEDIATE:
 		write_signed_decimal(sb, op.immediate)
@@ -366,16 +508,17 @@ write_operand :: proc(
 	case .MEMORY:
 		write_signed_decimal(sb, i64(op.mem.disp))
 		strings.write_byte(sb, '(')
-		write_register(sb, op.mem.base, opts.uppercase, 0xFF)
+		write_register(sb, op.mem.base, opts.uppercase)
 		strings.write_byte(sb, ')')
 
 	case .VECTOR_MEM:
-		// Syntax: `offset(base)` -- element comes from the paired vector reg
-		// operand, not from VECTOR_MEM, so we don't repeat it here.
-		write_signed_decimal(sb, i64(op.vmem.offset))
-		strings.write_byte(sb, '(')
-		write_register(sb, op.vmem.base, opts.uppercase, 0xFF)
-		strings.write_byte(sb, ')')
+		// `element, byte_offset, base` (the operand after vt). The encoded
+		// offset counts access-size units; rsp.inc wants bytes.
+		write_decimal_u32(sb, u32(op.vmem.element))
+		write_comma(sb, opts)
+		write_signed_decimal(sb, i64(op.vmem.offset) * i64(vector_ls_size(mnemonic)))
+		write_comma(sb, opts)
+		write_register(sb, op.vmem.base, opts.uppercase)
 
 	case .RELATIVE:
 		target := u32(op.relative)
