@@ -173,8 +173,9 @@ cop2_forms :: asm() {
 	ctc2  %zero, %vce
 }
 
-// Every VU instruction: the three-operand ones through every element accessor, the
-// single-lane ones with two lanes each, vmov and vnop.
+// Every VU instruction: the three-operand ones through every element accessor, vsar
+// with each accumulator slice, the single-lane ones and vmov with two lane pairs
+// each, and vnop.
 @(rsp)
 vu_forms :: asm() {
 	vmulf %v00, %v11, %v23
@@ -194,7 +195,9 @@ vu_forms :: asm() {
 	vabs  %v02, %v13, %v25.e7
 	vaddc %v09, %v20, %v00
 	vsubc %v16, %v27, %v07.q0
-	vsar  %v23, %v02, %v14.q1
+	vsar  %v23, %acc_hi
+	vsar  %v00, %acc_md
+	vsar  %v31, %acc_lo
 	vlt   %v30, %v09, %v21.h0
 	veq   %v05, %v16, %v28.h1
 	vne   %v12, %v23, %v03.h2
@@ -224,6 +227,8 @@ vu_forms :: asm() {
 	vmov  %v00.e0, %v31.e0
 	vmov  %v30.e0, %v01.e7
 	vmov  %v12.e0, %v12.e4
+	vmov  %v01.e3, %v02.e0
+	vmov  %v31.e7, %v15.e2
 	vnop
 }
 
@@ -261,12 +266,9 @@ vls_forms :: asm() {
 	lfv   %v27, [%s2]
 	lfv   %v06.e3, [%t0 - 1024]
 	lfv   %v17.b11, [%zero + 1008]
-	lwv   %v30, [%t0]
-	lwv   %v09.e4, [%zero - 1024]
-	lwv   %v20.b14, [%s1 + 1008]
-	ltv   %v01, [%zero]
-	ltv   %v12.e5, [%s1 - 1024]
-	ltv   %v23.e7, [%s2 + 1008]
+	ltv   %v16, [%zero]
+	ltv   %v08.e5, [%s1 - 1024]
+	ltv   %v24.e7, [%s2 + 1008]
 	sbv   %v04, [%s1]
 	sbv   %v15.e6, [%s2 - 64]
 	sbv   %v26.b4, [%t0 + 63]
@@ -300,9 +302,9 @@ vls_forms :: asm() {
 	swv   %v02, [%t0]
 	swv   %v13.e2, [%zero - 1024]
 	swv   %v24.b2, [%s1 + 1008]
-	stv   %v05, [%zero]
+	stv   %v00, [%zero]
 	stv   %v16.e3, [%s1 - 1024]
-	stv   %v27.e7, [%s2 + 1008]
+	stv   %v24.e7, [%s2 + 1008]
 }
 
 SCALAR    :: intrinsics.rsp_template_code(scalar_forms)
@@ -316,8 +318,9 @@ VU        :: intrinsics.rsp_template_code(vu_forms)
 VLS       :: intrinsics.rsp_template_code(vls_forms)
 
 // rexcode's RSP mnemonics an @(rsp) template may not use (asm_tables_rsp.cpp's
-// mnemonic_unavailable_reason; bad.odin's `profile` checks each one's error).
-REJECTED :: bit_set[rsp.Mnemonic]{.J, .JAL, .JR, .JALR, .BLTZAL, .BGEZAL, .MFC0, .MTC0, .BREAK}
+// mnemonic_unavailable_reason; bad.odin's `profile` checks each one's error). LWV is
+// one rexcode encodes but the RSP does not implement.
+REJECTED :: bit_set[rsp.Mnemonic]{.J, .JAL, .JR, .JALR, .BLTZAL, .BGEZAL, .MFC0, .MTC0, .BREAK, .LWV}
 
 vr :: proc(n: int) -> rsp.Register {
 	return rsp.Register(rsp.REG_VR | u16(n))
@@ -525,7 +528,9 @@ expected_vu :: proc() -> (code: [dynamic]rsp.Instruction) {
 		vu(.VABS, 2, 13, 25, 15),
 		vu(.VADDC, 9, 20, 0, 0),
 		vu(.VSUBC, 16, 27, 7, 2),
-		vu(.VSAR, 23, 2, 14, 3),
+		rsp.inst_vsar_acc(vr(23), .HI),
+		rsp.inst_vsar_acc(vr(0), .MD),
+		rsp.inst_vsar_acc(vr(31), .LO),
 		vu(.VLT, 30, 9, 21, 4),
 		vu(.VEQ, 5, 16, 28, 5),
 		vu(.VNE, 12, 23, 3, 6),
@@ -555,8 +560,23 @@ expected_vu :: proc() -> (code: [dynamic]rsp.Instruction) {
 		rsp.inst_vmov(vr(0), vr(31), 8),
 		rsp.inst_vmov(vr(30), vr(1), 15),
 		rsp.inst_vmov(vr(12), vr(12), 12),
+		rsp.inst_vmov(vr(1), vr(2), 8),
+		rsp.inst_vmov(vr(31), vr(15), 10),
 		rsp.inst_vnop(),
 	)
+	return
+}
+
+// rexcode's vmov form has no destination lane field (`de`, the vs field), which the
+// RSP honours (ares: vd.u16(de) = vt(e).u16(de)), so the vmov words with a lane other
+// than 0 are rexcode's with `de << 11` added: expected_vu's index and lane.
+VMOV_DE :: [?][2]int{{49, 3}, {50, 7}}
+
+vu_extra :: proc() -> (extra: []u32) {
+	extra = make([]u32, len(VU))
+	for d in VMOV_DE {
+		extra[d[0]] = u32(d[1]) << 11
+	}
 	return
 }
 
@@ -592,12 +612,9 @@ expected_vls :: proc() -> (code: [dynamic]rsp.Instruction) {
 		vls(.LFV, 27, rsp.S2, 0, 0),
 		vls(.LFV, 6, rsp.T0, 6, -64),
 		vls(.LFV, 17, rsp.ZERO, 11, 63),
-		vls(.LWV, 30, rsp.T0, 0, 0),
-		vls(.LWV, 9, rsp.ZERO, 8, -64),
-		vls(.LWV, 20, rsp.S1, 14, 63),
-		vls(.LTV, 1, rsp.ZERO, 0, 0),
-		vls(.LTV, 12, rsp.S1, 10, -64),
-		vls(.LTV, 23, rsp.S2, 14, 63),
+		vls(.LTV, 16, rsp.ZERO, 0, 0),
+		vls(.LTV, 8, rsp.S1, 10, -64),
+		vls(.LTV, 24, rsp.S2, 14, 63),
 		vls(.SBV, 4, rsp.S1, 0, 0),
 		vls(.SBV, 15, rsp.S2, 12, -64),
 		vls(.SBV, 26, rsp.T0, 4, 63),
@@ -631,9 +648,9 @@ expected_vls :: proc() -> (code: [dynamic]rsp.Instruction) {
 		vls(.SWV, 2, rsp.T0, 0, 0),
 		vls(.SWV, 13, rsp.ZERO, 4, -64),
 		vls(.SWV, 24, rsp.S1, 2, 63),
-		vls(.STV, 5, rsp.ZERO, 0, 0),
+		vls(.STV, 0, rsp.ZERO, 0, 0),
 		vls(.STV, 16, rsp.S1, 6, -64),
-		vls(.STV, 27, rsp.S2, 14, 63),
+		vls(.STV, 24, rsp.S2, 14, 63),
 	)
 	return
 }
@@ -692,7 +709,8 @@ expected_transform :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynami
 
 failures := 0
 
-compare :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []rsp.Instruction, labels: []rsp.Label_Definition) {
+// `extra`, when given, holds bits to add to each of rexcode's words: fields its forms lack.
+compare :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []rsp.Instruction, labels: []rsp.Label_Definition, extra: []u32 = nil) {
 	code := make([]u8, len(want)*4)
 	relocs: [dynamic]rsp.Relocation
 	errors: [dynamic]rsp.Error
@@ -712,6 +730,9 @@ compare :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []rsp.Instr
 			continue
 		}
 		w := u32(code[i*4])<<24 | u32(code[i*4+1])<<16 | u32(code[i*4+2])<<8 | u32(code[i*4+3])
+		if i < len(extra) {
+			w |= extra[i]
+		}
 		if w != line.word {
 			fmt.printfln("MISMATCH %s[%d] (line %d): compiler %08x, rexcode %08x", name, i, line.line, line.word, w)
 			failures += 1
@@ -733,7 +754,7 @@ main :: proc() {
 	cop2 := expected_cop2()
 	compare("cop2_forms", COP2, cop2[:], nil)
 	vu_code := expected_vu()
-	compare("vu_forms", VU, vu_code[:], nil)
+	compare("vu_forms", VU, vu_code[:], nil, vu_extra())
 	vls_code := expected_vls()
 	compare("vls_forms", VLS, vls_code[:], nil)
 

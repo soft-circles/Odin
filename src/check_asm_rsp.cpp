@@ -423,7 +423,6 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 			case Asm_rsp::OP_VR_LS_EVEN:
 			case Asm_rsp::OP_VR_BYTE:
 			case Asm_rsp::OP_VR_DE:
-			case Asm_rsp::OP_VR_DE0:
 			case Asm_rsp::OP_VR_LANE: {
 				String flag = {};
 				if (!rsp_template_operand_register(e, expr, &reg, &flag)) {
@@ -431,19 +430,17 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 				}
 				i32 el = Asm_rsp::element_from_flag(type, flag);
 				if (el < 0) {
-					char const *why = flag.len == 0 ? Asm_rsp::missing_flag_reason(type) : nullptr;
-					if (why != nullptr) {
-						gbString s = expr_to_string(expr);
-						error(expr, "'%.*s' operand-%td %s %s", LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]), i, s, why);
-						gb_string_free(s);
-					}
-					return false; // a flag that does not fit was reported by the check
+					// a flag that does not fit, or a missing lane (register_missing_flag_reason),
+					// was reported by the check
+					return false;
 				}
 				element = cast(u32)el;
 				break;
 			}
 			case Asm_rsp::OP_VC:
-				// only a literal %vco/%vcc/%vce fills it (operand_type_named_reg_class)
+			case Asm_rsp::OP_ACC:
+				// only a literal %vco/%vcc/%vce or %acc_hi/%acc_md/%acc_lo fills it
+				// (operand_type_named_reg_class)
 				if (!rsp_template_operand_register(e, expr, &reg, nullptr)) {
 					return false;
 				}

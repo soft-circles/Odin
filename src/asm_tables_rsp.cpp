@@ -12,14 +12,16 @@
 // here through both and diffs the words.
 //
 // Scope: every rexcode RSP mnemonic (core:rexcode/isa/rsp/tablegen/
-// encoding_table.odin, 116 mnemonics, one form each) except the nine a job
-// body may not use, which mnemonic_unavailable_reason names:
+// encoding_table.odin, 116 mnemonics, one form each) except the ten a job body
+// may not use, which mnemonic_unavailable_reason names:
 //
 //     j jal jr jalr    jumps and calls: a body branches only to its own labels
 //     bltzal bgezal    they write %ra, which holds the rspq return address
 //     mfc0 mtc0        CP0 (DMA, semaphore, RDP registers): the prologue's and
 //                      epilogue's
 //     break            halting the RSP is rspq's
+//     lwv              not implemented by the RSP: LWC2 sub-opcode 0x0a does
+//                      nothing (ares), and rsp.inc has no lwv. swv is real.
 //
 // Spelling (libdragon's rsp.inc and rexcode's printer):
 //
@@ -29,19 +31,24 @@
 //   * A VU operand's element is a register accessor: none (whole vector),
 //     .q0 .q1, .h0-.h3, .e0-.e7 (element fields 0, 2-3, 4-7, 8-15). Element
 //     field 1 has no meaning and no accessor.
-//   * Single-lane ops (vrcp vrcpl vrcph vrsq vrsql vrsqh) take two operands,
-//     each with a lane, as rsp.inc's two-operand form does: `vrcp %v01.e3,
-//     %v02.e5` writes lane 3 of %v01 from lane 5 of %v02. The destination lane
-//     goes in the vs field as 0-7 (rexcode's `de`; rsp.inc writes 8-15, and the
-//     RSP reads only its low three bits), the source lane in the element field
-//     as 8-15. vmov is spelled the same, but rexcode's vmov has no destination
-//     lane field, so its destination is always .e0 (vs = 0).
+//   * Single-lane ops (vrcp vrcpl vrcph vmov vrsq vrsql vrsqh) take two
+//     operands, each with a lane, as rsp.inc's two-operand form does: `vrcp
+//     %v01.e3, %v02.e5` writes lane 3 of %v01 from lane 5 of %v02. The
+//     destination lane goes in the vs field as 0-7 (rexcode's `de`; rsp.inc
+//     writes 8-15, and the RSP reads only its low three bits, so the words
+//     differ from rsp.inc's but behave the same), the source lane in the
+//     element field as 8-15.
+//   * vsar reads one slice of the accumulator into vd: `vsar %v01, %acc_hi`
+//     (or %acc_md, %acc_lo), rsp.inc's `vsar vd, COP2_ACC_HI`. The slice is
+//     the element field (8, 9, 10); vs and vt are unused and 0.
 //   * mtc2/mfc2 name a byte of the vector register: .e0-.e7 (lane N, byte 2N)
 //     or .b0-.b15 (byte N), or none for byte 0, into bits 10-7.
 //   * A vector load/store names its element as rsp.inc does for that
 //     instruction: .e0-.e7 (byte 2N) or .b0-.b15 (byte N) for most; lpv, luv,
 //     spv and suv take a lane, .e0-.e7, encoded as N; ltv and stv take a lane,
-//     .e0-.e7, encoded as byte 2N. No accessor is element 0. Each takes a BYTE
+//     .e0-.e7, encoded as byte 2N, and their vt is the first of a group of 8
+//     registers, so it is %v00, %v08, %v16 or %v24 (the RSP uses vt & ~7). No
+//     accessor is element 0. Each takes a BYTE
 //     offset that must be a multiple of its access size and within -64..63
 //     units of it: 1 (lbv sbv), 2 (lsv ssv), 4 (llv slv), 8 (ldv sdv lpv spv
 //     luv suv) or 16 bytes (the rest), e.g. `lqv %v01.e0, [input + 16]`. The
@@ -81,7 +88,7 @@
 	X(VRSQ, "vrsq") X(VRSQL, "vrsql") X(VRSQH, "vrsqh") X(VNOP, "vnop") \
 	/* vector loads */ \
 	X(LBV, "lbv") X(LSV, "lsv") X(LLV, "llv") X(LDV, "ldv") X(LQV, "lqv") X(LRV, "lrv") \
-	X(LPV, "lpv") X(LUV, "luv") X(LHV, "lhv") X(LFV, "lfv") X(LWV, "lwv") X(LTV, "ltv") \
+	X(LPV, "lpv") X(LUV, "luv") X(LHV, "lhv") X(LFV, "lfv") X(LTV, "ltv") \
 	/* vector stores */ \
 	X(SBV, "sbv") X(SSV, "ssv") X(SLV, "slv") X(SDV, "sdv") X(SQV, "sqv") X(SRV, "srv") \
 	X(SPV, "spv") X(SUV, "suv") X(SHV, "shv") X(SFV, "sfv") X(SWV, "swv") X(STV, "stv")
@@ -105,7 +112,8 @@
 	X(V20, "v20", VR, 20) X(V21, "v21", VR, 21) X(V22, "v22", VR, 22) X(V23, "v23", VR, 23) \
 	X(V24, "v24", VR, 24) X(V25, "v25", VR, 25) X(V26, "v26", VR, 26) X(V27, "v27", VR, 27) \
 	X(V28, "v28", VR, 28) X(V29, "v29", VR, 29) X(V30, "v30", VR, 30) X(V31, "v31", VR, 31) \
-	X(VCO, "vco", VC, 0)  X(VCC, "vcc", VC, 1)  X(VCE, "vce", VC, 2)
+	X(VCO, "vco", VC, 0)  X(VCC, "vcc", VC, 1)  X(VCE, "vce", VC, 2) \
+	X(ACC_HI, "acc_hi", ACC, 8) X(ACC_MD, "acc_md", ACC, 9) X(ACC_LO, "acc_lo", ACC, 10)
 
 
 struct Asm_rsp {
@@ -130,6 +138,7 @@ struct Asm_rsp {
 	static const u16 REG_CLASS_GPR  = 0x0100; // $0..$31, 32-bit
 	static const u16 REG_CLASS_VR   = 0x0200; // $v00..$v31, 8 x 16-bit lanes
 	static const u16 REG_CLASS_VC   = 0x0300; // COP2 control: VCO, VCC, VCE, only fillable by name
+	static const u16 REG_CLASS_ACC  = 0x0400; // vsar's accumulator slices, numbered by element field
 
 	enum Register : u16 {
 		REG_INVALID,
@@ -151,9 +160,9 @@ struct Asm_rsp {
 		OP_VR_LS_EVEN,  // ltv/stv vt, optional lane element: .e0-.e7 (byte 2N)
 		OP_VR_BYTE,     // mtc2/mfc2 vs, optional byte element: .e0-.e7 (2N) or .b0-.b15 (N)
 		OP_VR_DE,       // single-lane vd, required destination lane: .e0-.e7 (N, in vs)
-		OP_VR_DE0,      // vmov vd, required destination lane .e0 (rexcode encodes none)
 		OP_VR_LANE,     // single-lane vt, required source lane: .e0-.e7 (8+N)
 		OP_VC,          // a COP2 control register (%vco, %vcc, %vce), only by name
+		OP_ACC,         // vsar's accumulator slice (%acc_hi, %acc_md, %acc_lo), only by name
 		OP_SIMM16,      // signed 16-bit
 		OP_UIMM16,      // unsigned 16-bit
 		OP_SHAMT,       // 5-bit shift amount
@@ -178,6 +187,7 @@ struct Asm_rsp {
 		ENC_VS_ELEM,      // vs in bits 15..11, byte element in bits 10..7 (mtc2/mfc2)
 		ENC_VT,           // vt in bits 20..16, VU element in bits 24..21
 		ENC_VT_LS,        // vt in bits 20..16, L/S element in bits 10..7
+		ENC_ELEM,         // the register's number in the VU element field, bits 24..21 (vsar)
 		ENC_VBASE,        // base in bits 25..21, offset/size in bits 6..0
 	};
 
@@ -440,6 +450,7 @@ struct Asm_rsp {
 		case REG_CLASS_GPR: return GPRLEN;
 		case REG_CLASS_VR:  return VRLEN;
 		case REG_CLASS_VC:  return 16;
+		case REG_CLASS_ACC: return 16;
 		}
 		return 0;
 	}
@@ -474,7 +485,8 @@ struct Asm_rsp {
 		case REG_RA:
 			return true;
 		}
-		return reg_class(register_codes[r]) == REG_CLASS_VC;
+		u16 cls = reg_class(register_codes[r]);
+		return cls == REG_CLASS_VC || cls == REG_CLASS_ACC;
 	}
 
 	static bool operand_type_is_vector(OperandType type) {
@@ -486,7 +498,6 @@ struct Asm_rsp {
 		case OP_VR_LS_EVEN:
 		case OP_VR_BYTE:
 		case OP_VR_DE:
-		case OP_VR_DE0:
 		case OP_VR_LANE:
 			return true;
 		}
@@ -503,6 +514,7 @@ struct Asm_rsp {
 
 		case OP_GPR:
 		case OP_VC:
+		case OP_ACC:
 			return AsmOperand_Register;
 
 		case OP_SIMM16:
@@ -555,14 +567,20 @@ struct Asm_rsp {
 		return reg_class_from_operand_type(t);
 	}
 
-	// A COP2 control slot is filled only by %vco, %vcc or %vce, never a parameter.
+	// A COP2 control slot is filled only by %vco, %vcc or %vce, and vsar's slice
+	// only by %acc_hi, %acc_md or %acc_lo, never a parameter.
 	u16 operand_type_named_reg_class(OperandType t) const {
-		return t == OP_VC ? REG_CLASS_VC : REG_CLASS_NONE;
+		switch (t) {
+		case OP_VC:  return REG_CLASS_VC;
+		case OP_ACC: return REG_CLASS_ACC;
+		}
+		return REG_CLASS_NONE;
 	}
 
 	String named_reg_class_string(u16 reg_class) const {
-		if (reg_class == REG_CLASS_VC) {
-			return str_lit("COP2 control");
+		switch (reg_class) {
+		case REG_CLASS_VC:  return str_lit("COP2 control");
+		case REG_CLASS_ACC: return str_lit("accumulator slice");
 		}
 		return str_lit("hardware");
 	}
@@ -584,6 +602,7 @@ struct Asm_rsp {
 		case OP_NONE:     return 0;
 		case OP_GPR:      return GPRLEN;
 		case OP_VC:       return 0; // named only
+		case OP_ACC:      return 0; // named only
 		case OP_SIMM16:   return 16;
 		case OP_UIMM16:   return 16;
 		case OP_SHAMT:    return 5;
@@ -649,8 +668,16 @@ struct Asm_rsp {
 		case M_LPV: case M_SPV:
 		case M_LUV: case M_SUV:
 			return 8;
+		case M_LQV: case M_SQV:
+		case M_LRV: case M_SRV:
+		case M_LHV: case M_SHV:
+		case M_LFV: case M_SFV:
+		case M_SWV:
+		case M_LTV: case M_STV:
+			return 16;
 		}
-		return 16; // lqv lrv lhv lfv lwv ltv and their stores
+		GB_PANIC("asm_tables_rsp: %.*s is not a vector load/store", LIT(mnemonic_strings[m]));
+		return 0;
 	}
 
 	// Bytes moved by a load/store form; 0 for everything else.
@@ -722,6 +749,9 @@ struct Asm_rsp {
 			return "halts the RSP, which only rspq does; an @(rsp) template ends by falling through to the "
 			       "generated epilogue";
 		}
+		if (name == "lwv") {
+			return "is not implemented by the RSP; LWC2 sub-opcode 0x0a does nothing";
+		}
 		return nullptr;
 	}
 
@@ -791,22 +821,26 @@ struct Asm_rsp {
 		return nullptr;
 	}
 
-	// A literal register may carry an element accessor only when it is a vector
-	// register; which accessors fit is a property of the slot
-	// (register_flag_reject_reason).
+	// A literal COP2 register (vector, control or accumulator slice) may carry an
+	// accessor; which accessors fit is a property of the slot
+	// (register_flag_reject_reason), so `%vce.b0` in cfc2 says it takes none. A
+	// GPR's `.flag` stays the shared "only on %flags" error.
 	bool register_accepts_flag(Register r, String const &flag) const {
 		gb_unused(flag);
-		return reg_is_vector(r);
+		if (r == REG_INVALID) {
+			return false;
+		}
+		u16 cls = reg_class(register_codes[r]);
+		return cls == REG_CLASS_VR || cls == REG_CLASS_VC || cls == REG_CLASS_ACC;
 	}
 
 	// The element field an accessor encodes in a slot, or -1 when it does not fit
 	// (rsp.inc's accessor encoders). No accessor is element 0, except in the
-	// single-lane slots, which need one (missing_flag_reason).
+	// single-lane slots, which need one (register_missing_flag_reason).
 	static i32 element_from_flag(OperandType slot, String const &flag) {
 		if (flag.len == 0) {
 			switch (slot) {
 			case OP_VR_DE:
-			case OP_VR_DE0:
 			case OP_VR_LANE:
 				return -1;
 			}
@@ -847,9 +881,6 @@ struct Asm_rsp {
 		case OP_VR_LS_EVEN:  // laneAsByteAccessorEncoder
 			if (kind == 'e' && n <= 7)  return cast(i32)(2*n);
 			return -1;
-		case OP_VR_DE0:
-			if (kind == 'e' && n == 0)  return 0;
-			return -1;
 		case OP_VR_LANE:     // singleLaneAccessorEncoder
 			if (kind == 'e' && n <= 7)  return cast(i32)(8 + n);
 			return -1;
@@ -875,9 +906,6 @@ struct Asm_rsp {
 			return "is not an mtc2/mfc2 element accessor; use .e0-.e7 (lanes) or .b0-.b15 (bytes)";
 		case OP_VR_DE:
 			return "is not a destination lane; a single-lane instruction writes one lane, .e0-.e7";
-		case OP_VR_DE0:
-			return "is not vmov's destination lane: the table encodes vmov with no destination lane field, "
-			       "which is lane 0, so write .e0";
 		case OP_VR_LANE:
 			return "is not a source lane; a single-lane instruction reads one lane, .e0-.e7";
 		case OP_VR:
@@ -886,14 +914,13 @@ struct Asm_rsp {
 		return "takes no element accessor";
 	}
 
-	// Why a vector operand with no accessor does not fit `slot`, or nullptr when it
-	// does: the single-lane slots name their lane, as in rsp.inc. The encoder reports it.
-	static char const *missing_flag_reason(OperandType slot) {
+	// Why a literal register with no accessor does not fit `slot`, or nullptr when
+	// it does: the single-lane slots name their lane, as in rsp.inc. The check
+	// reports it once a form matches, for every such operand.
+	char const *register_missing_flag_reason(OperandType slot) const {
 		switch (slot) {
 		case OP_VR_DE:
 			return "needs a destination lane, .e0-.e7: a single-lane instruction writes one lane";
-		case OP_VR_DE0:
-			return "needs its destination lane, .e0: the table encodes vmov with no destination lane field";
 		case OP_VR_LANE:
 			return "needs a source lane, .e0-.e7: a single-lane instruction reads one lane";
 		}
@@ -913,12 +940,19 @@ struct Asm_rsp {
 			return cls == REG_CLASS_GPR;
 		case OP_VC:
 			return cls == REG_CLASS_VC;
+		case OP_ACC:
+			return cls == REG_CLASS_ACC;
 		}
 		return false;
 	}
 
 	char const *literal_register_reject_reason(OperandType t, Register r) const {
 		if (operand_type_accepts_register(t, r)) {
+			// ltv/stv move a lane of 8 registers and the RSP ignores vt's low three bits
+			if (t == OP_VR_LS_EVEN && (reg_number(r) & 7) != 0) {
+				return "%v00, %v08, %v16 or %v24: ltv and stv address a group of 8 registers, which starts at a "
+				       "multiple of 8";
+			}
 			return nullptr;
 		}
 		if (operand_type_is_vector(t)) {
@@ -932,8 +966,25 @@ struct Asm_rsp {
 			return "a general-purpose register";
 		case OP_VC:
 			return "a COP2 control register (%vco, %vcc or %vce)";
+		case OP_ACC:
+			return "an accumulator slice (%acc_hi, %acc_md or %acc_lo)";
 		}
 		return "a register";
+	}
+
+	// A memory operand's base is a GPR; a COP2 register there would otherwise get
+	// the shared "must be a 32-bit or 64-bit register" for its width.
+	char const *memory_base_reject_reason(Register r) const {
+		if (r == REG_INVALID) {
+			return nullptr;
+		}
+		switch (reg_class(register_codes[r])) {
+		case REG_CLASS_GPR: return nullptr;
+		case REG_CLASS_VR:  return "is a vector register; a base is a general-purpose register";
+		case REG_CLASS_VC:  return "is a COP2 control register; a base is a general-purpose register";
+		case REG_CLASS_ACC: return "is an accumulator slice; a base is a general-purpose register";
+		}
+		return "is not a general-purpose register";
 	}
 
 	// gp and ra hold rspq state; a body reads them only through the prologue. A
@@ -1005,6 +1056,9 @@ struct Asm_rsp {
 		case ENC_VT_LS:
 			if (element > 15) *ok = false;
 			return ((reg & 0x1F) << 16) | ((element & 0xF) << 7);
+		case ENC_ELEM:
+			if (reg > 15) *ok = false;
+			return (reg & 0xF) << 21;
 		case ENC_VBASE:
 			if (value < -64 || value > 63) *ok = false;
 			return ((reg & 0x1F) << 21) | (cast(u32)value & 0x7F);
@@ -1062,10 +1116,10 @@ enum Asm_rsp::Shape : u8 {
 	SH_MEM,        // rt, [base + disp]                  lb lh lw lbu lhu sb sh sw
 	SH_MXC2,       // rt, vs.byte                        mfc2 mtc2
 	SH_CXC2,       // rt, %vco/%vcc/%vce                 cfc2 ctc2
-	SH_VU,         // vd, vs, vt.e                       vmulf ... vnxor, vsar
-	SH_VSINGLE,    // vd.lane, vt.lane                   vrcp vrcpl vrcph vrsq vrsql vrsqh
-	SH_VMOV,       // vd.e0, vt.lane                     vmov
-	SH_VLS,        // vt.byte, [base + disp]             lbv lsv llv ldv lqv lrv lhv lfv lwv (and stores)
+	SH_VU,         // vd, vs, vt.e                       vmulf ... vnxor
+	SH_VSAR,       // vd, %acc_hi/%acc_md/%acc_lo        vsar
+	SH_VSINGLE,    // vd.lane, vt.lane                   vrcp vrcpl vrcph vmov vrsq vrsql vrsqh
+	SH_VLS,        // vt.byte, [base + disp]             lbv lsv llv ldv lqv lrv lhv lfv (and stores, swv)
 	SH_VLS_LANE,   // vt.lane, [base + disp]             lpv luv spv suv
 	SH_VLS_EVEN,   // vt.lane (byte 2N), [base + disp]   ltv stv
 
@@ -1090,8 +1144,8 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 	/* SH_MXC2     */ RS((OP_GPR,ENC_RT), (OP_VR_BYTE,ENC_VS_ELEM), N_, N_),
 	/* SH_CXC2     */ RS((OP_GPR,ENC_RT), (OP_VC,ENC_RD), N_, N_),
 	/* SH_VU       */ RS((OP_VR,ENC_VD), (OP_VR,ENC_VS), (OP_VR_ELEM,ENC_VT), N_),
+	/* SH_VSAR     */ RS((OP_VR,ENC_VD), (OP_ACC,ENC_ELEM), N_, N_),
 	/* SH_VSINGLE  */ RS((OP_VR_DE,ENC_VD_DE), (OP_VR_LANE,ENC_VT), N_, N_),
-	/* SH_VMOV     */ RS((OP_VR_DE0,ENC_VD), (OP_VR_LANE,ENC_VT), N_, N_),
 	/* SH_VLS      */ RS((OP_VR_LS,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
 	/* SH_VLS_LANE */ RS((OP_VR_LS_LANE,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
 	/* SH_VLS_EVEN */ RS((OP_VR_LS_EVEN,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
@@ -1123,7 +1177,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_C_W0_R1   RSP_CLB(RSP_O0, RSP_O1,        false, false, 0)  // rt <- rs op imm
 #define RSP_C_LOAD    RSP_CLB(RSP_O0, RSP_O1,        false, true,  0)
 #define RSP_C_STORE   RSP_CLB(0,      RSP_O0|RSP_O1, true,  false, 0)
-#define RSP_C_W0      RSP_CLB(RSP_O0, 0,             false, false, 0)  // lui
+#define RSP_C_W0      RSP_CLB(RSP_O0, 0,             false, false, 0)  // lui, vsar
 #define RSP_C_W1_R0   RSP_CLB(RSP_O1, RSP_O0,        false, false, 0)  // mtc2, ctc2
 #define RSP_C_BR1     RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND)
 #define RSP_C_BR2     RSP_CLB(0,      RSP_O0|RSP_O1, false, false, RSP_CTL|RSP_COND)
@@ -1194,7 +1248,7 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(VABS,   SH_VU,        0x4A000013, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VADDC,  SH_VU,        0x4A000014, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VSUBC,  SH_VU,        0x4A000015, 0xFE00003F, RSP_VU,     RSP_C_VU),
-	R(VSAR,   SH_VU,        0x4A00001D, 0xFE00003F, RSP_VU,     RSP_C_VU),
+	R(VSAR,   SH_VSAR,      0x4A00001D, 0xFE00003F, RSP_VU,     RSP_C_W0),
 	R(VLT,    SH_VU,        0x4A000020, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VEQ,    SH_VU,        0x4A000021, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VNE,    SH_VU,        0x4A000022, 0xFE00003F, RSP_VU,     RSP_C_VU),
@@ -1212,7 +1266,7 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(VRCP,   SH_VSINGLE,   0x4A000030, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
 	R(VRCPL,  SH_VSINGLE,   0x4A000031, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
 	R(VRCPH,  SH_VSINGLE,   0x4A000032, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
-	R(VMOV,   SH_VMOV,      0x4A000033, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
+	R(VMOV,   SH_VSINGLE,   0x4A000033, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
 	R(VRSQ,   SH_VSINGLE,   0x4A000034, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
 	R(VRSQL,  SH_VSINGLE,   0x4A000035, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
 	R(VRSQH,  SH_VSINGLE,   0x4A000036, 0xFE00003F, RSP_VU,     RSP_C_W0_R1),
@@ -1227,7 +1281,6 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(LUV,    SH_VLS_LANE,  0xC8003800, 0xFC00F800, RSP_VLS,    RSP_C_LOAD),
 	R(LHV,    SH_VLS,       0xC8004000, 0xFC00F800, RSP_VLS,    RSP_C_LOAD),
 	R(LFV,    SH_VLS,       0xC8004800, 0xFC00F800, RSP_VLS,    RSP_C_LOAD),
-	R(LWV,    SH_VLS,       0xC8005000, 0xFC00F800, RSP_VLS,    RSP_C_LOAD),
 	R(LTV,    SH_VLS_EVEN,  0xC8005800, 0xFC00F800, RSP_VLS,    RSP_C_LOAD),
 	R(SBV,    SH_VLS,       0xE8000000, 0xFC00F800, RSP_VLS,    RSP_C_STORE),
 	R(SSV,    SH_VLS,       0xE8000800, 0xFC00F800, RSP_VLS,    RSP_C_STORE),

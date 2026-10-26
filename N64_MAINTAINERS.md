@@ -305,10 +305,19 @@ value: the template's file, the line and column of its name, and its name as
 `procedure`; `lb_build_builtin_proc` builds it.
 
 The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
-(one form each, with its bits and mask) except the nine a Microcode body may not
-use: `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`), `mfc0`,
-`mtc0` and `break`. Those fail the mnemonic lookup, and
-`mnemonic_unavailable_reason` says why. The golden program in
+(one form each, with its bits and mask) except ten: the nine a Microcode body
+may not use, `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`),
+`mfc0`, `mtc0` and `break`, and `lwv`, which the RSP does not implement (LWC2
+sub-opcode 0x0a does nothing; `swv` is real and in the table). Those fail the
+mnemonic lookup, and `mnemonic_unavailable_reason` says why.
+
+Where rexcode's form is wider than the hardware, the table follows the
+hardware: `ltv`/`stv` take only `%v00`, `%v08`, `%v16` or `%v24` (the RSP uses
+`vt & ~7`), `vsar` is `vsar %vNN, %acc_hi|%acc_md|%acc_lo` (element 8, 9 or 10,
+vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`), and
+`vmov` takes a destination lane like the other single-lane ops, which
+rexcode's `vmov` form has no field for (the golden program adds those bits to
+rexcode's word). The golden program in
 [tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
 through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode
 mnemonic is neither diffed nor in its `REJECTED` set, so a mnemonic rexcode
@@ -337,8 +346,10 @@ Preserve these guarantees:
 Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
 `memory_disp_scale`, `input_parameters_are_writable`,
 `unpinned_parameter_reason`, `register_write_reject_reason`,
-`register_accepts_flag`, `register_flag_reject_reason` and
-`mnemonic_unavailable_reason`.
+`register_accepts_flag`, `register_flag_reject_reason`,
+`register_missing_flag_reason` (a single-lane operand with no lane, reported by
+the check for every occurrence), `memory_base_reject_reason` (a COP2 register as
+a memory base) and `mnemonic_unavailable_reason`.
 
 ## Setup defaults
 
