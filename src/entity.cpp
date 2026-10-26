@@ -212,6 +212,13 @@ struct AsmTemplateEntityDecl {
 	bool no_init;
 };
 
+// The instruction set an asm template is checked for: the build target's, or the N64
+// RSP's for an @(rsp) template, whatever the build targets (see check_asm_rsp.cpp).
+enum AsmTemplateArch : u8 {
+	AsmTemplateArch_Target,
+	AsmTemplateArch_Rsp,
+};
+
 // An Entity is a named "thing" in the language
 struct Entity {
 	EntityKind  kind;
@@ -367,6 +374,7 @@ struct Entity {
 		struct {
 			Ast *node;
 			Type *proc_type; // of its signature, as an asm group can make the entity's type invalid before its body is checked
+			AsmTemplateArch arch; // set when the declaration is collected, before any table is chosen
 			bool is_volatile;
 			bool is_align_stack;
 			bool is_pure;

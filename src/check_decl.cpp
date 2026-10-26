@@ -2121,6 +2121,10 @@ gb_internal void check_asm_group_decl(CheckerContext *ctx, Entity *asm_entity, D
 			error(arg, "Expected an asm template");
 			continue;
 		}
+		if (e->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+			error(arg, "An @(rsp) template is RSP Microcode and cannot be in an asm template group, which CPU code calls");
+			continue;
+		}
 
 		if (ptr_set_update(&entity_set, e)) {
 			error(arg, "Previous use of `%.*s` in asm template group", LIT(e->token.string));

@@ -37,6 +37,7 @@ def quick_stages(artifacts: Path = Path("/artifacts")) -> list[Stage]:
         Stage("float min/max lowering", (PYTHON, "tests/n64_float_min_max/test_float_min_max.py"), environment=environment),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
+        Stage("RSP asm templates", (PYTHON, "tests/rsp_templates/test_rsp_templates.py"), environment=environment),
         Stage("asm template ROM probe", ("./odin", "check", "tests/n64_asm/rom", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("bit_field ROM probe", ("./odin", "check", "tests/n64_bit_field/rom", "-target:n64", "-vet", "-warnings-as-errors")),
         Stage("standalone runtime probe", ("./odin", "check", "tests/n64_runtime", "-target:n64", "-vet", "-warnings-as-errors")),

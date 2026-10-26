@@ -10,6 +10,35 @@ enum {
 	ASM_WIDTH_REG_COUNT = 16
 };
 
+// The architecture and pointer width an asm template is checked for. The dispatch
+// (check_asm_template_body_from_entity) sets them from the template's table for the
+// length of its check: they are the build target's, except for an @(rsp) template,
+// which is checked for the RSP whatever the build targets, so no host rule applies
+// to it. Shared checker code asks these rather than build_context.metrics.
+struct AsmCheckTarget {
+	TargetArchKind arch;
+	i32            pointer_bits;
+	bool           set;
+};
+gb_thread_local AsmCheckTarget asm_check_target_current;
+
+gb_internal TargetArchKind asm_check_arch(void) {
+	return asm_check_target_current.set ? asm_check_target_current.arch : build_context.metrics.arch;
+}
+gb_internal i32 asm_check_pointer_bits(void) {
+	return asm_check_target_current.set ? asm_check_target_current.pointer_bits : cast(i32)(build_context.metrics.ptr_size*8);
+}
+
+struct AsmCheckTargetScope {
+	AsmCheckTarget prev;
+	AsmCheckTargetScope(TargetArchKind arch, i32 pointer_bits) : prev(asm_check_target_current) {
+		asm_check_target_current = {arch, pointer_bits, true};
+	}
+	~AsmCheckTargetScope() {
+		asm_check_target_current = prev;
+	}
+};
+
 // Sub-register width tracking
 // 0 means "this instruction does not read/write that named register"
 struct AsmRegW {
@@ -17,8 +46,8 @@ struct AsmRegW {
 };
 
 gb_internal u8 asm_reg_def_width_after(u8 prev, u8 w) {
-	bool x86 = build_context.metrics.arch == TargetArch_amd64 ||
-	           build_context.metrics.arch == TargetArch_i386; // TODO(bill): actually support x86 32-bit :P
+	bool x86 = asm_check_arch() == TargetArch_amd64 ||
+	           asm_check_arch() == TargetArch_i386; // TODO(bill): actually support x86 32-bit :P
 	if (x86 && w == 32) {
 		return 64;
 	}
@@ -80,7 +109,7 @@ struct AsmInstructionFacts {
 };
 
 gb_internal u16 asm_full_kill_mask(AsmInstructionFacts *f) {
-	u16 full = cast(u16)(build_context.metrics.ptr_size*8);
+	u16 full = cast(u16)asm_check_pointer_bits();
 	u16 kill = 0;
 	for (u16 bit = 1; bit != 0; bit <<= 1) {
 		if ((f->gen_regs & bit) == 0) {
@@ -481,7 +510,7 @@ gb_internal void check_asm_cfg_analyse(AsmCtx *asm_ctx, AsmCfg *cfg, CheckerCont
 	}
 	seed_regs |= preserve_bits;
 	{
-		u8 full = cast(u8)(build_context.metrics.ptr_size * 8);
+		u8 full = cast(u8)asm_check_pointer_bits();
 		for (i32 idx = 0; idx < ASM_WIDTH_REG_COUNT; idx++) {
 			if (preserve_bits & cast(u16)(1u << idx)) {
 				entry_seed_w.e[idx] = gb_max(entry_seed_w.e[idx], full);

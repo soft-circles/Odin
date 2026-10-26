@@ -52,6 +52,16 @@ CPU `asm` templates for `TargetArch_mips32be` sit beside that flow:
 
 The user contract is [`MIPS_ASM.md`](MIPS_ASM.md).
 
+RSP Microcode written as `@(rsp)` asm templates sits beside it, checked in
+whatever build compiles it (Odin64's host Microcode generator):
+
+- [`src/asm_tables_rsp.cpp`](src/asm_tables_rsp.cpp) is the RSP table, laid
+  out like the MIPS one. Its header comment is the reference for spelling,
+  element accessors, vector offsets and the register model.
+- [`src/check_asm_rsp.cpp`](src/check_asm_rsp.cpp) holds the RSP-only part of
+  a template's check, the encoder, `intrinsics.rsp_template_code` (the encoded
+  words) and `intrinsics.rsp_template_location` (the declaration).
+
 ## Interfaces
 
 The external interface is deliberately small:
@@ -271,6 +281,60 @@ time; `register_unavailable_reason` explains `%at`; `pinned_integer_operand_min_
 on the generator widens narrow pinned operands to 32 bits, since LLVM's MIPS
 backend asserts on an i8/i16 explicit-register constraint.
 
+## RSP asm templates
+
+An `@(rsp)` template is RSP Microcode. The collector reads the attribute into
+`Entity.AsmTemplate.arch` (`src/checker.cpp`) before any table is chosen, and
+`check_asm_template_body_from_entity` checks it against `g_asm_rsp` on every
+build target. It is never lowered: calling one, or putting one in an asm group,
+is an error, and `lb_emit_asm_template_call` asserts it never sees one.
+`check_rsp_template_body` runs the shared check, then the RSP-only checks
+(no `int`/`uint`/`uintptr` parameter, no `size_of`/`align_of`/`offset_of` of a
+type whose layout is the build target's), and, when the template's check
+reported nothing on its thread (`thread_error_count`), encodes it: `odin check`
+reports every encoder rejection whether or not anything takes the words. It
+runs once, under `rsp_template_body_mutex`, with an in-progress flag so a
+template whose operands take its own words (directly or through another
+template) gets one error instead of a second check.
+`intrinsics.rsp_template_code(t)` forces that check and returns the words as a
+constant `[]intrinsics.Rsp_Code_Line{word: u32, line: i32}`, laid out in the
+build target's byte order, like the slice `#load(path, []T)` makes; for a
+template with errors it is an empty constant, so nothing cascades.
+`intrinsics.rsp_template_location(t)` is a `runtime.Source_Code_Location`
+value: the template's file, the line and column of its name, and its name as
+`procedure`; `lb_build_builtin_proc` builds it.
+
+The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
+plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
+from `core/rexcode/isa/rsp/tablegen/encoding_table.odin`), a shape and
+`encode_field` case if no existing one fits, and its forms to the golden
+program in [tests/rsp_templates/golden](tests/rsp_templates/golden), which
+encodes every form through both the table and `core:rexcode/isa/rsp`.
+
+Preserve these guarantees:
+
+- Shared checker code reads `asm_check_arch()` and `asm_check_pointer_bits()`
+  (`src/check_asm_cfg.cpp`), never `build_context.metrics` directly. The
+  dispatch sets both from the template's table, so an arm64 or amd64 host's
+  rules (`#pre`/`#post`, `>>` scales, lane syntax, x86 def widths) never apply
+  to an `@(rsp)` template, and its pointer parameters are 32 bits wide.
+- Nothing the host decides changes a template's words: target-sized types are
+  rejected (and given 32 bits in `check_asm_operand_bit_width`, so no host adds
+  a width error), and so is measuring a type whose layout is the target's,
+  including through a constant the template names.
+- Every parameter is pinned. Pinned inputs may be written
+  (`input_parameters_are_writable`); no write needs a `#clobber`.
+- `gp` and `ra` are never written or pinned and `sp` is not a register name.
+- Branches take template labels only; the table has no jump, CP0 or `break`
+  form. The instruction after a branch is its delay slot; nothing is inserted.
+- Def-before-use, delay-slot structure and VU effects stay in Odin64's
+  generator check.
+
+Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
+`memory_disp_scale`, `input_parameters_are_writable`,
+`unpinned_parameter_reason`, `register_write_reject_reason`,
+`register_accepts_flag` and `register_flag_reject_reason`.
+
 ## Setup defaults
 
 [Odin64's toolchain.lock.toml](https://github.com/soft-circles/Odin64/blob/main/toolchain.lock.toml)
@@ -306,7 +370,11 @@ covers the encodings, the branch interpreter, delay slots, labels and the
 `ext` encodings in the target-feature tests. CI builds Odin with stock LLVM, so
 CI does not check encodings; run the suite with a fork build before merging
 template changes. When `N64_INST` or `MIPS_O64_OBJDUMP` is set, or in full
-mode, an ELF64 object fails these tests instead of skipping them. The "asm
+mode, an ELF64 object fails these tests instead of skipping them. The "RSP asm
+templates" stage runs
+[tests/rsp_templates/test_rsp_templates.py](tests/rsp_templates/test_rsp_templates.py):
+checker rejections and acceptance on hosts and the N64, and a golden diff of
+every RSP form against `core:rexcode/isa/rsp`. The "asm
 template ROM probe" stage type-checks [tests/n64_asm/rom](tests/n64_asm/rom).
 No project-local binding is required.
 

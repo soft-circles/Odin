@@ -1664,6 +1664,25 @@ gb_internal void init_universal(void) {
 		t_objc_instancetype = add_global_type_name(intrinsics_pkg->scope, str_lit("objc_instancetype"), t_objc_id);
 	}
 
+	// intrinsics.Rsp_Code_Line :: struct {word: u32, line: i32}, the element of intrinsics.rsp_template_code
+	{
+		Scope *scope = create_scope(nullptr, nullptr);
+		Token word_token = blank_token; word_token.string = str_lit("word");
+		Token line_token = blank_token; line_token.string = str_lit("line");
+		Entity *word = alloc_entity_field(scope, word_token, t_u32, false, 0, EntityState_Resolved);
+		Entity *line = alloc_entity_field(scope, line_token, t_i32, false, 1, EntityState_Resolved);
+		scope_insert(scope, word);
+		scope_insert(scope, line);
+		auto fields = array_make<Entity *>(permanent_allocator(), 0, 2);
+		array_add(&fields, word);
+		array_add(&fields, line);
+
+		Type *rsp_code_line = alloc_type_struct_complete();
+		rsp_code_line->Struct.scope  = scope;
+		rsp_code_line->Struct.fields = slice_from_array(fields);
+		t_rsp_code_line = add_global_type_name(intrinsics_pkg->scope, str_lit("Rsp_Code_Line"), rsp_code_line);
+	}
+
 	// intrinsics types for C stuff
 	{
 		Scope *scope = create_scope(nullptr, nullptr);
@@ -5618,12 +5637,17 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 					error(name, "Asm template groups are not allowed within a foreign block");
 				}
 			}else if (init->kind == Ast_AsmTemplate) {
+				bool is_rsp = false;
 				for (auto attribute : vd->attributes) {
 					for (auto element : attribute->Attribute.elems) {
 						Ast *field = element->kind == Ast_FieldValue ? element->FieldValue.field : element;
 						if (field->kind == Ast_Ident &&
 						    (field->Ident.token.string == "rspq_command_words" || field->Ident.token.string == "rspq_scratch_bytes")) {
 							error(element, "RSP template metadata requires -build-mode:rsp-asm; RSP commands are not CPU callables");
+						}
+						// @(rsp) picks the table, so it is read here, before anything checks the template
+						if (field->kind == Ast_Ident && field->Ident.token.string == "rsp") {
+							is_rsp = true;
 						}
 					}
 				}
@@ -5633,6 +5657,9 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 				}
 				ast_node(at, AsmTemplate, init);
 				e = alloc_entity_asm_template(d->scope, token, nullptr, init);
+				if (is_rsp) {
+					e->AsmTemplate.arch = AsmTemplateArch_Rsp;
+				}
 				if (fl != nullptr) {
 					error(name, "Asm templates are not allowed within a foreign block");
 				}

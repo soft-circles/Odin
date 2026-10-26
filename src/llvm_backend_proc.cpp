@@ -3104,6 +3104,12 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 	}
 
 	switch (id) {
+	case BuiltinProc_rsp_template_location: {
+		// an @(rsp) template's declaration (check_asm_rsp.cpp)
+		Entity *e = entity_of_node(ce->args[0]);
+		GB_ASSERT(e != nullptr && e->kind == Entity_AsmTemplate);
+		return lb_emit_source_code_location_as_global(p, e->token.string, e->token.pos);
+	}
 	case BuiltinProc_DIRECTIVE: {
 		ast_node(bd, BasicDirective, ce->proc);
 		String name = bd->name.string;
