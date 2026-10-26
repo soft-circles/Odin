@@ -155,6 +155,7 @@ forms :: asm(p: ^[8]u32) [p = %s1] {
 	#unroll for step, i in ([3]i32{1, 2, 3}) {
 		addiu %t1, %t1, step
 		addiu %t2, %t2, -i
+		addiu %t1, %t1, step * 2
 	}
 	#unroll for r, i in {%t3, %t5, %a0} {
 		addiu r, %r, i
@@ -171,6 +172,7 @@ forms :: asm(p: ^[8]u32) [p = %s1] {
 	vsar  %v23, %acc_hi
 	vmov  %v00.e0, %v31.e0
 	lw    %t3, [p + 16 - 4 + 2*4 - 2]
+	addu  %t0, %t1 << 2, %t2
 	#unroll for c in {%vco, %vcc, %vce} {
 		cfc2  %t0, %c
 	}
@@ -261,6 +263,30 @@ forms :: asm(p: ^[8]u32) [p = %s1] {
 			testing.expect_value(t, file.src[mem.terms[3].pos.offset:mem.terms[3].end.offset], "+ 2*4")
 		}
 	}
+
+	// a shifted or scaled register or name is a plain operand too
+	scaled := unrolls[1].instructions[2].derived.(^ast.Asm_Instruction)
+	if mul, is_binary := scaled.operands[2].derived.(^ast.Binary_Expr); testing.expect(t, is_binary, "`step * 2` is a binary expression") {
+		testing.expect_value(t, mul.op.kind, tokenizer.Token_Kind.Mul)
+		testing.expect_value(t, ident_name(mul.left), "step")
+		testing.expect_value(t, file.src[mul.pos.offset:mul.end.offset], "step * 2")
+	}
+	found_shift := false
+	for s in template.instructions {
+		ins, is_ins := s.derived.(^ast.Asm_Instruction)
+		if !is_ins || ins.name.name != "addu" {
+			continue
+		}
+		found_shift = true
+		testing.expect_value(t, len(ins.operands), 3)
+		if shl, is_binary := ins.operands[1].derived.(^ast.Binary_Expr); testing.expect(t, is_binary, "`%t1 << 2` is a binary expression") {
+			testing.expect_value(t, shl.op.kind, tokenizer.Token_Kind.Shl)
+			_, left_is_reg := shl.left.derived.(^ast.Asm_Register)
+			testing.expect(t, left_is_reg, "the shifted operand is a register")
+			testing.expect_value(t, file.src[shl.pos.offset:shl.end.offset], "%t1 << 2")
+		}
+	}
+	testing.expect(t, found_shift, "the addu instruction is parsed")
 
 	expect_same_tokens(t, print_asm_body(file.src, template.instructions),
 	                   file.src[template.instructions[0].pos.offset:template.end.offset-1])
