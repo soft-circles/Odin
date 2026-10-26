@@ -4171,6 +4171,11 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 
 		case_end;
 
+		case Ast_AsmUnroll: // an @(rsp) template's are expanded before its check (check_asm_rsp.cpp)
+			error(instruction_, "'#unroll for' in an asm template body is supported only in @(rsp) templates");
+			all_instructions_good = false;
+			break;
+
 		default:
 			error(instruction_, "Unexpected instruction in asm template");
 			break;

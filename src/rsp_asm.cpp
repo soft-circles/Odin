@@ -428,6 +428,7 @@ static bool rsp_collect_instructions(RspUnit &unit, Ast *entry, i64 scratch, Rsp
 			}
 			continue;
 		}
+		if (node->kind == Ast_AsmUnroll) { error(node, "#unroll for is supported only in @(rsp) templates"); return false; }
 		if (node->kind != Ast_AsmInstruction) { error(node, "RSP directives are unsupported"); return false; }
 		RspInstruction instruction;
 		instruction.node = node;
