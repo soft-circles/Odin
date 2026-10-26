@@ -314,6 +314,21 @@ gb_internal char const *asm_hook_register_write_reject_reason(AsmCtx *, typename
 	return nullptr;
 }
 
+// char const *mnemonic_unavailable_reason(String const &name) const;
+//
+// Non-null when `name`, which is not in the table, is an instruction of the
+// architecture that a template may not use: the reason, phrased to follow "'name' ".
+// The unknown-mnemonic error then reports that instead of a did-you-mean list.
+template <typename AsmCtx>
+gb_internal auto asm_hook_mnemonic_unavailable_reason(AsmCtx *asm_ctx, String const &name, int)
+	-> decltype(asm_ctx->mnemonic_unavailable_reason(name)) {
+	return asm_ctx->mnemonic_unavailable_reason(name);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_mnemonic_unavailable_reason(AsmCtx *, String const &, long) {
+	return nullptr;
+}
+
 // bool register_accepts_flag(Register r, String const &flag) const;
 // char const *register_flag_reject_reason(OperandType slot, String const &flag) const;
 //
@@ -1560,6 +1575,10 @@ gb_internal CheckMnemomicResult check_mnemonic_name(AsmCtx *asm_ctx, AstAsmInstr
 	}
 
 	ERROR_BLOCK();
+	if (char const *why = asm_hook_mnemonic_unavailable_reason(asm_ctx, name, 0)) {
+		error(instr->name, "'%.*s' %s", LIT(name), why);
+		return CheckMnemomic_Invalid;
+	}
 	if (instr->operands.count == 0) {
 		error(instr->name, "Unknown mnemonic/prefix for this target platform: %.*s", LIT(name));
 	} else {

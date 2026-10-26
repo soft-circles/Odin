@@ -304,12 +304,15 @@ template with errors it is an empty constant, so nothing cascades.
 value: the template's file, the line and column of its name, and its name as
 `procedure`; `lb_build_builtin_proc` builds it.
 
-The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
-plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
-from `core/rexcode/isa/rsp/tablegen/encoding_table.odin`), a shape and
-`encode_field` case if no existing one fits, and its forms to the golden
-program in [tests/rsp_templates/golden](tests/rsp_templates/golden), which
-encodes every form through both the table and `core:rexcode/isa/rsp`.
+The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
+(one form each, with its bits and mask) except the nine a Microcode body may not
+use: `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`), `mfc0`,
+`mtc0` and `break`. Those fail the mnemonic lookup, and
+`mnemonic_unavailable_reason` says why. The golden program in
+[tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
+through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode
+mnemonic is neither diffed nor in its `REJECTED` set, so a mnemonic rexcode
+adds must be added to one of them.
 
 Preserve these guarantees:
 
@@ -325,15 +328,17 @@ Preserve these guarantees:
 - Every parameter is pinned. Pinned inputs may be written
   (`input_parameters_are_writable`); no write needs a `#clobber`.
 - `gp` and `ra` are never written or pinned and `sp` is not a register name.
-- Branches take template labels only; the table has no jump, CP0 or `break`
-  form. The instruction after a branch is its delay slot; nothing is inserted.
+- Branches take template labels only; the table has no jump, call, CP0 or
+  `break` form. The instruction after a branch is its delay slot; nothing is
+  inserted.
 - Def-before-use, delay-slot structure and VU effects stay in Odin64's
   generator check.
 
 Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
 `memory_disp_scale`, `input_parameters_are_writable`,
 `unpinned_parameter_reason`, `register_write_reject_reason`,
-`register_accepts_flag` and `register_flag_reject_reason`.
+`register_accepts_flag`, `register_flag_reject_reason` and
+`mnemonic_unavailable_reason`.
 
 ## Setup defaults
 
