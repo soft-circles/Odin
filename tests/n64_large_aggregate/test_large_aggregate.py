@@ -42,10 +42,21 @@ class LargeAggregateArguments(unittest.TestCase):
         self.assertRegex(function_body(self.asm, "sum_small"), r"\bdaddu\s+\$2, \$4, \$6\b")
 
     def test_c_procedure_gets_a_large_struct_by_value(self):
-        # A C callee owns its copy: the caller copies the struct into the outgoing argument area.
+        # A C callee owns its copy: O64 passes the first 32 bytes in $4-$7 and the caller copies the other 65504 into
+        # the outgoing argument area from 32($sp). Which register the four doublewords are loaded through is LLVM's
+        # choice (a local temporary before upstream bf9d09619, the caller's own pointer since), so only the offsets
+        # and the copy are checked.
         body = function_body(self.asm, "call_take_big_c")
+        bases = set()
+        for register in (4, 5, 6, 7):
+            load = re.search(rf"\bld\s+\${register}, (\d+)\((\$\w+)\)", body)
+            self.assertIsNotNone(load, f"${register} is not loaded from the struct")
+            bases.add((load[2], int(load[1]) - 8 * register + 32))
+        self.assertEqual(len(bases), 1, f"$4-$7 are not loaded from the first four doublewords of one struct: {bases}")
         self.assertRegex(body, r"\bjal\s+memcpy\b")
-        self.assertRegex(body, r"\bld\s+\$7, 32\(\$sp\)")
+        self.assertRegex(body, r"\baddiu\s+\$4, \$sp, 32\b", "the copy does not go to 32($sp)")
+        self.assertRegex(body, r"\baddiu\s+\$5, \$\w+, 32\b", "the copy does not start 32 bytes into the struct")
+        self.assertRegex(body, r"\bori\s+\$6, \$zero, 65504\b", "the copy is not the struct's last 65504 bytes")
         self.assertRegex(body, r"\bjal\s+take_big_c\b")
 
     def test_c_struct_spills_past_the_registers_as_gcc_lays_it_out(self):

@@ -35,6 +35,7 @@ def quick_stages(artifacts: Path = Path("/artifacts")) -> list[Stage]:
         Stage("large aggregate arguments", (PYTHON, "tests/n64_large_aggregate/test_large_aggregate.py"), environment=environment),
         Stage("matrix multiply-add lowering", (PYTHON, "tests/n64_mul_add/test_mul_add.py"), environment=environment),
         Stage("float min/max lowering", (PYTHON, "tests/n64_float_min_max/test_float_min_max.py"), environment=environment),
+        Stage("bounds-check elision safety", (PYTHON, "tests/n64_bounds_check/test_bounds_check.py"), environment=environment),
         Stage("RSP artifact CLI", (PYTHON, "tests/rsp_asm/test_rsp_asm.py")),
         Stage("CPU asm templates", (PYTHON, "tests/n64_asm/test_n64_asm.py"), environment=environment),
         Stage("RSP asm templates", (PYTHON, "tests/rsp_templates/test_rsp_templates.py"), environment=environment),
