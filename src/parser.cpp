@@ -617,6 +617,12 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 	case Ast_AsmDirective:
 		n->AsmDirective.operands = clone_ast_array(n->AsmDirective.operands, f);
 		break;
+	case Ast_AsmUnroll:
+		n->AsmUnroll.val0         = clone_ast(n->AsmUnroll.val0, f);
+		n->AsmUnroll.val1         = clone_ast(n->AsmUnroll.val1, f);
+		n->AsmUnroll.expr         = clone_ast(n->AsmUnroll.expr, f);
+		n->AsmUnroll.instructions = clone_ast_array(n->AsmUnroll.instructions, f);
+		break;
 	}
 	return n;
 }
@@ -2718,17 +2724,15 @@ gb_internal Ast *parse_asm_operand(AstFile *f, bool allow_memory_operand) {
 				}
 				break;
 			default:
-				if (allow_token(f, Token_Comma)) {
-					// allow for trailing comma
+				// `{%a}`, `{%a, %b}`, `{%a, %b,}`
+				if (first_reg != nullptr) {
+					array_add(&registers, first_reg);
 				}
-				while (f->curr_token.kind != Token_CloseBrace &&
+				while (allow_token(f, Token_Comma) &&
+				       f->curr_token.kind != Token_CloseBrace &&
 				       f->curr_token.kind != Token_EOF) {
 					Ast *reg = parse_asm_operand(f, false);
 					array_add(&registers, reg);
-
-					if (!allow_token(f, Token_Comma)) {
-						break;
-					}
 				}
 				break;
 			}
@@ -2823,6 +2827,52 @@ gb_internal Ast *parse_asm_ident(AstFile *f, bool allow_poly_names=false) {
 }
 
 
+gb_internal Ast *parse_asm_instruction(AstFile *f);
+gb_internal Array<Ast *> parse_ident_list(AstFile *f, bool allow_poly_names);
+
+// `#unroll for v[, i] in <range | constant array | {register group}> { instructions }`
+// in a template body. The checker expands it (check_asm_rsp.cpp); only @(rsp) templates accept it.
+gb_internal Ast *parse_asm_unroll(AstFile *f, Token token) {
+	Ast *unroll = alloc_ast_node(f, Ast_AsmUnroll);
+	unroll->AsmUnroll.token     = token;
+	unroll->AsmUnroll.for_token = expect_token(f, Token_for);
+
+	Array<Ast *> idents = parse_ident_list(f, false);
+	if (idents.count == 1 || idents.count == 2) {
+		unroll->AsmUnroll.val0 = idents[0];
+		unroll->AsmUnroll.val1 = idents.count == 2 ? idents[1] : nullptr;
+	} else {
+		syntax_error(unroll->AsmUnroll.for_token, "Expected either 1 or 2 identifiers");
+	}
+	expect_token(f, Token_in);
+
+	if (f->curr_token.kind == Token_OpenBrace) {
+		unroll->AsmUnroll.expr = parse_asm_operand(f, true); // a register group
+	} else {
+		bool  prev_allow_range = f->allow_range;
+		isize prev_level       = f->expr_level;
+		f->allow_range = true;
+		f->expr_level  = -1; // `x in 0..<4 {`: the brace opens the body, not a compound literal
+		unroll->AsmUnroll.expr = parse_expr(f, false);
+		f->expr_level  = prev_level;
+		f->allow_range = prev_allow_range;
+	}
+
+	Array<Ast *> instructions = {};
+	instructions.allocator = heap_allocator();
+	expect_token(f, Token_OpenBrace);
+	while (f->curr_token.kind != Token_CloseBrace &&
+	       f->curr_token.kind != Token_EOF) {
+		Ast *instruction = parse_asm_instruction(f);
+		if (instruction != nullptr) {
+			array_add(&instructions, instruction);
+		}
+	}
+	unroll->AsmUnroll.close        = expect_token(f, Token_CloseBrace);
+	unroll->AsmUnroll.instructions = slice_from_array(instructions);
+	return unroll;
+}
+
 gb_internal Ast *parse_asm_instruction(AstFile *f) {
 	if (allow_token(f, Token_Semicolon)) {
 		return nullptr;
@@ -2863,6 +2913,9 @@ gb_internal Ast *parse_asm_instruction(AstFile *f) {
 		{
 			Token token   = expect_token(f, Token_Hash);
 			Token name    = expect_token(f, Token_Ident);
+			if (name.string == "unroll") {
+				return parse_asm_unroll(f, token);
+			}
 			auto operands = parse_asm_operands(f);
 			Ast *dir = alloc_ast_node(f, Ast_AsmDirective);
 			dir->AsmDirective.token = token;

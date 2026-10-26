@@ -189,6 +189,13 @@ class RspArtifactTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertEqual(result.stdout.count("1..62"), 1, result.stdout)
 
+    def test_unroll_is_template_only(self):
+        source = MINIMAL.replace("    jr %ra\n", "    #unroll for i in 0..<2 {\n        nop\n    }\n    jr %ra\n")
+        result = self.build(source)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("#unroll for is supported only in @(rsp) templates", result.stdout)
+        self.assertNotIn("RSP directives are unsupported", result.stdout)
+
     def test_published_artifact_honours_umask(self):
         self.addCleanup(os.umask, os.umask(0o022))
         self.assertEqual(self.build().returncode, 0)
