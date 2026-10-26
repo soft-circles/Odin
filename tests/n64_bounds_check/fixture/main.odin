@@ -1,7 +1,8 @@
 package n64_bounds_check
 
-// Each exported procedure below indexes past what the compiler can prove, so upstream's bounds-check elision must
-// keep its `runtime.bounds_check_error*` call; `fixed_array_constant_in_range` is the one it may (and should) drop.
+// Most exported procedures below index past what the compiler can prove, so upstream's bounds-check elision must keep
+// their `runtime.bounds_check_error*` or `runtime.slice_expr_error*` calls. `fixed_array_constant_in_range`,
+// `loop_bound_is_len` and `slice_expression_constant_in_range` are provably in range and must have none.
 
 Holder :: struct {
 	items: []u32,
@@ -53,4 +54,54 @@ loop_bound_is_len :: proc "contextless" (s: []u32) -> (sum: u32) {
 		sum += s[i]
 	}
 	return
+}
+
+// Upstream 2804ac31c: `k` changes inside the loop, so the `s[k]` in the loop's bound is not covered by the `s[k]` check
+// before it. Each keeps its own check.
+@(export)
+loop_interval_end_index_prechecked :: proc "contextless" (s: []u32) -> (sum: u32) {
+	k := 0
+	sum = s[k]
+	for i in 0 ..< int(s[k]) {
+		sum += u32(i)
+		k += 5
+	}
+	return
+}
+
+Iterator :: struct {
+	n: int,
+}
+
+next_value :: proc "contextless" (v: u32, it: ^Iterator) -> (u32, bool) {
+	it.n += 1
+	return v, it.n < 10
+}
+
+// Upstream 2804ac31c: the same for an index in an iterator call's arguments, which runs once per iteration.
+@(export)
+loop_iterator_argument_index_prechecked :: proc "contextless" (s: []u32) -> (sum: u32) {
+	it: Iterator
+	k := 0
+	sum = s[k]
+	for v in next_value(s[k], &it) {
+		sum += v
+		k += 5
+	}
+	return
+}
+
+// `lo` and `hi` are only known to be in order, not to be within `len(s)`.
+@(export)
+slice_expression_past_len :: proc "contextless" (s: []u32, lo, hi: int) -> []u32 {
+	if lo < 0 || lo > hi {
+		return nil
+	}
+	return s[lo:hi]
+}
+
+// Constant ends inside the array's four elements.
+@(export)
+slice_expression_constant_in_range :: proc "contextless" (a: ^[4]u32) -> []u32 {
+	return a[1:3]
 }
