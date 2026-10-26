@@ -304,6 +304,25 @@ template with errors it is an empty constant, so nothing cascades.
 value: the template's file, the line and column of its name, and its name as
 `procedure`; `lb_build_builtin_proc` builds it.
 
+The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
+(one form each, with its bits and mask) except ten: the nine a Microcode body
+may not use, `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`),
+`mfc0`, `mtc0` and `break`, and `lwv`, which the RSP does not implement (LWC2
+sub-opcode 0x0a does nothing; `swv` is real and in the table). Those fail the
+mnemonic lookup, and `mnemonic_unavailable_reason` says why.
+
+Where rexcode's form is wider than the hardware, the table follows the
+hardware: `ltv`/`stv` take only `%v00`, `%v08`, `%v16` or `%v24` (the RSP uses
+`vt & ~7`), `vsar` is `vsar %vNN, %acc_hi|%acc_md|%acc_lo` (element 8, 9 or 10,
+vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`), and
+`vmov` takes a destination lane like the other single-lane ops, which
+rexcode's `vmov` form has no field for (the golden program adds those bits to
+rexcode's word). The golden program in
+[tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
+through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode
+mnemonic is neither diffed nor in its `REJECTED` set, so a mnemonic rexcode
+adds must be added to one of them.
+
 `#unroll for v[, i] in X { ... }` in an `@(rsp)` body (`AsmUnroll`, parsed by
 `parse_asm_unroll`) is expanded by `rsp_expand_unrolls` before the shared
 check, so the check, the CFG and the encoder see a flat body. `X` is a constant
@@ -313,6 +332,12 @@ range, a constant fixed array of integers, or a register group
 of the body (always, so no two iterations share nodes) with an integer variable
 replaced by a literal wherever it names a value, and a register variable (`%r`,
 `%r.e0` or bare `r` as an operand) replaced by the iteration's register.
+A register group may hold any register the table names, so a body can step
+the `ltv`/`stv` group registers (`{%v00, %v08}`), the COP2 control registers
+(`{%vco, %vcc, %vce}`) or the vector register of a single-lane op or `vsar`
+(`%r.e3`, `vsar %r, %acc_hi`); the table's lane, group and displacement checks
+run on each iteration's instruction (golden `unroll_operand_forms`, bad
+`unrolled_operand_errors`).
 `rsp_unroll_each_child` lists the children walked: every expression and type
 kind, but not a selector's field, a compound literal's `field =` name,
 `offset_of`'s field, or the inside of struct, union, enum, bit_field and
@@ -333,13 +358,6 @@ Most of the expansion's size is its rejections, each with a test in
 [tests/rsp_templates/bad](tests/rsp_templates/bad), and the child walk;
 the expansion itself is short.
 
-The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
-plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
-from `core/rexcode/isa/rsp/tablegen/encoding_table.odin`), a shape and
-`encode_field` case if no existing one fits, and its forms to the golden
-program in [tests/rsp_templates/golden](tests/rsp_templates/golden), which
-encodes every form through both the table and `core:rexcode/isa/rsp`.
-
 Preserve these guarantees:
 
 - Shared checker code reads `asm_check_arch()` and `asm_check_pointer_bits()`
@@ -354,8 +372,9 @@ Preserve these guarantees:
 - Every parameter is pinned. Pinned inputs may be written
   (`input_parameters_are_writable`); no write needs a `#clobber`.
 - `gp` and `ra` are never written or pinned and `sp` is not a register name.
-- Branches take template labels only; the table has no jump, CP0 or `break`
-  form. The instruction after a branch is its delay slot; nothing is inserted.
+- Branches take template labels only; the table has no jump, call, CP0 or
+  `break` form. The instruction after a branch is its delay slot; nothing is
+  inserted.
 - Def-before-use, delay-slot structure and VU effects stay in Odin64's
   generator check.
 - An `#unroll for` iterates over constants that fit in an i64; its count is
@@ -371,7 +390,10 @@ Preserve these guarantees:
 Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
 `memory_disp_scale`, `input_parameters_are_writable`,
 `unpinned_parameter_reason`, `register_write_reject_reason`,
-`register_accepts_flag` and `register_flag_reject_reason`.
+`register_accepts_flag`, `register_flag_reject_reason`,
+`register_missing_flag_reason` (a single-lane operand with no lane, reported by
+the check for every occurrence), `memory_base_reject_reason` (a COP2 register as
+a memory base) and `mnemonic_unavailable_reason`.
 
 ## Setup defaults
 

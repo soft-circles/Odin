@@ -257,7 +257,8 @@ class Encode(unittest.TestCase):
             parts = row.split()
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
-        for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "transform"):
+        for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
+                     "vls_forms", "transform"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 
@@ -274,6 +275,19 @@ class Encode(unittest.TestCase):
             with self.subTest(transform_unrolled=i):
                 self.assertEqual(unrolled_text[unrolled - 1].split()[0], flat_text[flat - 1].split()[0])
         self.assertEqual(len(set(unrolled_lines)), 28)  # 61 words from 28 written instructions
+
+        # unroll_operand_forms: each word is from its instruction's line in the
+        # unrolled body: 3 iterations of 3 lines, 4 of 2, 3 of 2.
+        golden_text = (HERE / "golden" / "golden.odin").read_text().splitlines()
+        start = next(n for n, text in enumerate(golden_text, 1) if text.startswith("unroll_operand_forms ::"))
+        body = []
+        for number in range(start + 1, len(golden_text) + 1):
+            text = golden_text[number - 1]
+            if text == "}":
+                break
+            if text.strip() and not text.strip().startswith(("#unroll", "}")):
+                body.append(number)
+        self.assertEqual(printed.get("unroll_operand_forms"), body[0:3]*3 + body[3:5]*4 + body[5:7]*3)
 
         # intrinsics.rsp_template_location: the declaration's file, line and column
         locations = {}

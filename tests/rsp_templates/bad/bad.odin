@@ -34,16 +34,27 @@ ok :: asm(args: ^Args, input: ^u32, count: i32) [args = %s6, input = %s1, count 
 	addiu count, count, -1
 }
 
-// A body with no jumps, calls, CP0, DMA or break: the table has no such mnemonic.
+// A body with no jumps, calls, CP0, DMA or break. rexcode encodes these, and lwv,
+// which the RSP does not implement, so each one says why a template cannot use it; an
+// instruction rexcode lacks too is unknown.
 @(rsp)
 profile :: asm() {
-	j     .end // ERROR: Unknown mnemonic for this target platform: j
-	jr    %t0 // ERROR: Unknown mnemonic for this target platform: jr
-	jal   .end // ERROR: Unknown mnemonic for this target platform: jal
-	break // ERROR: Unknown mnemonic/prefix for this target platform: break
-	mtc0  %t0, %t1 // ERROR: Unknown mnemonic for this target platform: mtc0
-	addu  %t0, %t1, %t2 // ERROR: Unknown mnemonic for this target platform: addu
+	j     .end // ERROR: 'j' jumps out of the template, which an @(rsp) template cannot
+	jal   .end // ERROR: 'jal' jumps out of the template
+	jr    %t0 // ERROR: 'jr' jumps out of the template
+	jalr  %t1, %t0 // ERROR: 'jalr' jumps out of the template
+	bltzal %t0, .end // ERROR: 'bltzal' writes %ra, which holds the rspq return address
+	bgezal %t0, .end // ERROR: 'bgezal' writes %ra
+	break // ERROR: 'break' halts the RSP, which only rspq does
+	break 1 // ERROR: 'break' halts the RSP
+	mfc0  %t0, %t1 // ERROR: 'mfc0' is CP0 access (DMA, semaphore and RDP registers)
+	mtc0  %t0, %t1 // ERROR: 'mtc0' is CP0 access
+	lwv   %v01, [%s1] // ERROR: 'lwv' is not implemented by the RSP; LWC2 sub-opcode 0x0a does nothing
+	swv   %v01, [%s1]
+	mult  %t0, %t1 // ERROR: Unknown mnemonic for this target platform: mult
 	bgtz  %t0, 4 // ERROR: 'bgtz' operands
+	beq   %t0, %t1, 4 // ERROR: 'beq' operands
+	bne   %t0, %t1, .end
 .end:
 }
 
@@ -54,7 +65,16 @@ reserved :: asm() {
 	or    %ra, %t0, %t0 // ERROR: 'or' writes %ra, which holds the rspq return address
 	addiu %t0, %sp, 4 // ERROR: Register %sp ($29) must not be used in RSP Microcode
 	lw    %t0, [%sp + 4] // ERROR: Register %sp ($29) must not be used in RSP Microcode
+	lui   %ra, 1 // ERROR: 'lui' writes %ra, which holds the rspq return address
+	mfc2  %gp, %v01 // ERROR: 'mfc2' writes %gp, which holds the rspq command pointer
+	cfc2  %ra, %vco // ERROR: 'cfc2' writes %ra
+	sllv  %gp, %t0, %t1 // ERROR: 'sllv' writes %gp
 	or    %t0, %gp, %ra
+	mtc2  %gp, %v01
+	ctc2  %ra, %vcc
+	sw    %ra, [%gp + 4]
+	lbu   %ra, [%s1] // ERROR: 'lbu' writes %ra, which holds the rspq return address
+	lw    %gp, [%s1 + 4] // ERROR: 'lw' writes %gp, which holds the rspq command pointer
 }
 
 @(rsp)
@@ -80,6 +100,88 @@ elements :: asm() {
 	sqv   %v01.e8, [%s1] // ERROR: '.e8' on %v01 is not a load/store element accessor
 	lqv   %v01.b16, [%s1] // ERROR: '.b16' on %v01 is not a load/store element accessor
 	or    %t0.e0, %t1, %t2 // ERROR: Register flags can only be called on %flags
+	mtc2  %t0, %v01.q0 // ERROR: '.q0' on %v01 is not an mtc2/mfc2 element accessor
+	mfc2  %t0, %v01.b16 // ERROR: '.b16' on %v01 is not an mtc2/mfc2 element accessor
+	lpv   %v01.b1, [%s1] // ERROR: '.b1' on %v01 is not a packed load/store element accessor
+	suv   %v01.e8, [%s1] // ERROR: '.e8' on %v01 is not a packed load/store element accessor
+	ltv   %v08.b2, [%s1] // ERROR: '.b2' on %v08 is not a transposed load/store element accessor
+	stv   %v16.h0, [%s1] // ERROR: '.h0' on %v16 is not a transposed load/store element accessor
+	lbv   %v01.q1, [%s1] // ERROR: '.q1' on %v01 is not a load/store element accessor
+	vrcp  %v01.q0, %v02.e0 // ERROR: '.q0' on %v01 is not a destination lane
+	vrsqh %v01.e8, %v02.e0 // ERROR: '.e8' on %v01 is not a destination lane
+	vrsq  %v01.e0, %v02.h1 // ERROR: '.h1' on %v02 is not a source lane
+	vrcpl %v01.e7, %v02.b0 // ERROR: '.b0' on %v02 is not a source lane
+	vmov  %v01.e8, %v02.e0 // ERROR: '.e8' on %v01 is not a destination lane
+	vmov  %v01.e0, %v02.q1 // ERROR: '.q1' on %v02 is not a source lane
+	vsar  %v01.e0, %acc_hi // ERROR: '.e0' on %v01 takes no element accessor
+	vsar  %v01, %acc_md.e0 // ERROR: '.e0' on %acc_md takes no element accessor
+	cfc2  %t0, %vco.e0 // ERROR: '.e0' on %vco takes no element accessor
+	cfc2  %t0, %vce.b0 // ERROR: '.b0' on %vce takes no element accessor
+	ctc2  %t0.b0, %vcc // ERROR: Register flags can only be called on %flags
+	mtc2  %t0, %v01.e7
+	lpv   %v01.e7, [%s1]
+	ltv   %v24.e7, [%s1]
+	vrcp  %v01.e7, %v02.e7
+	vmov  %v01.e0, %v02.e7
+	vmov  %v01.e5, %v02.e7
+	vsar  %v01, %acc_lo
+}
+
+// A single-lane instruction names both lanes, as rsp.inc requires. The check reports
+// every missing one.
+@(rsp)
+missing_lanes :: asm() {
+	vrcp  %v01, %v02.e0 // ERROR: 'vrcp' operand-0 %v01 needs a destination lane, .e0-.e7
+	vrcph %v01.e0, %v02 // ERROR: 'vrcph' operand-1 %v02 needs a source lane, .e0-.e7
+	vmov  %v01, %v02.e3 // ERROR: 'vmov' operand-0 %v01 needs a destination lane, .e0-.e7
+	vrsql %v01, %v02.e3 // ERROR: 'vrsql' operand-0 %v01 needs a destination lane
+	vmov  %v01, %v02 // ERROR: 'vmov' operand-1 %v02 needs a source lane
+	vrsq  %v01.e1, %v02.e3
+}
+
+// vsar names the accumulator slice it reads; vs and vt are not operands.
+@(rsp)
+accumulator :: asm() {
+	vsar  %v01, %v02 // ERROR: 'vsar' operand-1 must be a named accumulator slice register, got %v02
+	vsar  %v01, %v02, %v03.e0 // ERROR: The asm instruction 'vsar' expects 2 operands, got 3
+	vsar  %v01, %vcc // ERROR: 'vsar' operand-1 must be a named accumulator slice register, got %vcc
+	vsar  %acc_hi, %acc_hi // ERROR: 'vsar' operand-0 cannot be %acc_hi, it must be a vector register
+	or    %t0, %acc_lo, %t1 // ERROR: 'or' operand-1 cannot be %acc_lo, it must be a general-purpose register
+	vsar  %v01, %acc_hi
+	vsar  %v02, %acc_md
+}
+
+// ltv and stv move one lane of each of a group of 8 registers, which the RSP
+// addresses by vt & ~7.
+@(rsp)
+transposed :: asm() {
+	ltv   %v12.e5, [%s1] // ERROR: 'ltv' operand-0 cannot be %v12, it must be %v00, %v08, %v16 or %v24: ltv and stv address a group of 8 registers
+	stv   %v01, [%s1] // ERROR: 'stv' operand-0 cannot be %v01, it must be %v00, %v08, %v16 or %v24
+	stv   %v31.e7, [%s1 + 16] // ERROR: 'stv' operand-0 cannot be %v31
+	ltv   %v00, [%s1]
+	ltv   %v08.e7, [%s1]
+	stv   %v16.e2, [%s1]
+	stv   %v24, [%s1 - 16]
+}
+
+// cfc2 and ctc2 take a COP2 control register by name, and nothing else does.
+@(rsp)
+control :: asm(p: ^u32) [p = %s1] {
+	cfc2  %t0, %t1 // ERROR: 'cfc2' operand-1 must be a named COP2 control register, got %t1
+	ctc2  %t0, %v01 // ERROR: 'ctc2' operand-1 must be a named COP2 control register, got %v01
+	ctc2  %t0, p // ERROR: 'ctc2' operand-1 must be a named COP2 control register, got the parameter 'p', whose pinned register cannot be one
+	lw    %t0, [%vcc + 0] // ERROR: A memory operand's base cannot be %vcc: it is a COP2 control register; a base is a general-purpose register
+	sw    %t0, [%v01] // ERROR: A memory operand's base cannot be %v01: it is a vector register
+	lqv   %v01, [%acc_hi + 16] // ERROR: A memory operand's base cannot be %acc_hi: it is an accumulator slice
+	or    %t0, %vco, %t1 // ERROR: 'or' operand-1 cannot be %vco, it must be a general-purpose register
+	vmudn %v01, %v02, %vcc // ERROR: 'vmudn' operand-2 cannot be %vcc, it must be a vector register
+	cfc2  %t0, %vco
+	ctc2  %t1, %vce
+}
+
+@(rsp)
+pinned_control :: asm(p: ^u32) [p = %vcc] { // ERROR: 'asm' parameter 'p' cannot be pinned to %vcc
+	lw    %t0, [p]
 }
 
 // Vector registers have two digits; %v0 and %v1 are GPRs.
@@ -89,6 +191,12 @@ vector_names :: asm() {
 	lqv   %v0, [%s1] // ERROR: 'lqv' operands
 	vmudn %v2, %v02, %v03 // ERROR: Register %v2 is not a register; vector registers are written with two digits
 	or    %v0, %v1, %v1
+	addu  %t0, %v01, %t1 // ERROR: 'addu' operand-1 cannot be %v01, it must be a general-purpose register
+	lw    %v02, [%s1] // ERROR: 'lw' operand-0 cannot be %v02, it must be a general-purpose register
+	mtc2  %v03, %v04 // ERROR: 'mtc2' operand-0 cannot be %v03, it must be a general-purpose register
+	mfc2  %t0, %t1 // ERROR: 'mfc2' operand-1 cannot be %t1, it must be a vector register
+	vrcp  %v01, %v02, %v03.e0 // ERROR: The asm instruction 'vrcp' expects 2 operands, got 3
+	vmov  %v01, %v02, %v03.e0 // ERROR: The asm instruction 'vmov' expects 2 operands, got 3
 }
 
 // Offsets: scalar bytes in a signed 16-bit field; vector bytes, a multiple of the
@@ -102,6 +210,25 @@ offsets :: asm(p: ^[64]u8) [p = %s1] {
 	lqv   %v01, [p - 1040] // ERROR: 'lqv' operand-1 memory displacement -1040 does not fit
 	lqv   %v01, [p + 1008]
 	sqv   %v01, [p - 1024]
+	lbv   %v01, [p + 64] // ERROR: 'lbv' operand-1 memory displacement 64 does not fit
+	sbv   %v01, [p - 65] // ERROR: 'sbv' operand-1 memory displacement -65 does not fit
+	lsv   %v01, [p + 1] // ERROR: 'lsv' operand-1 memory displacement 1 is not a multiple of the 2-byte access size
+	ssv   %v01, [p + 128] // ERROR: 'ssv' operand-1 memory displacement 128 does not fit
+	llv   %v01, [p + 2] // ERROR: 'llv' operand-1 memory displacement 2 is not a multiple of the 4-byte access size
+	slv   %v01, [p - 260] // ERROR: 'slv' operand-1 memory displacement -260 does not fit
+	ldv   %v01, [p + 512] // ERROR: 'ldv' operand-1 memory displacement 512 does not fit
+	lpv   %v01, [p + 4] // ERROR: 'lpv' operand-1 memory displacement 4 is not a multiple of the 8-byte access size
+	suv   %v01, [p - 520] // ERROR: 'suv' operand-1 memory displacement -520 does not fit
+	ltv   %v08, [p + 8] // ERROR: 'ltv' operand-1 memory displacement 8 is not a multiple of the 16-byte access size
+	shv   %v01, [p + 1024] // ERROR: 'shv' operand-1 memory displacement 1024 does not fit
+	lfv   %v01, [p + 24] // ERROR: 'lfv' operand-1 memory displacement 24 is not a multiple of the 16-byte access size
+	lbv   %v01, [p + 63]
+	sbv   %v01, [p - 64]
+	ssv   %v01, [p + 126]
+	llv   %v01, [p - 256]
+	sdv   %v01, [p + 504]
+	lb    %t0, [p + 32768] // ERROR: 'lb' operand-1 memory displacement 32768 does not fit
+	sh    %t0, [p - 32768]
 }
 
 @(rsp)
@@ -110,6 +237,17 @@ immediates :: asm() {
 	andi  %t0, %t0, -1 // ERROR: 'andi' operand-2 immediate -1 does not fit
 	sll   %t0, %t0, 32 // ERROR: 'sll' operand-2 immediate 32 does not fit
 	sra   %t0, %t0, -1 // ERROR: 'sra' operand-2 immediate -1 does not fit
+	srl   %t0, %t0, 32 // ERROR: 'srl' operand-2 immediate 32 does not fit
+	addi  %t0, %t0, -32769 // ERROR: 'addi' operand-2 immediate -32769 does not fit
+	slti  %t0, %t0, 32768 // ERROR: 'slti' operand-2 immediate 32768 does not fit
+	sltiu %t0, %t0, -32769 // ERROR: 'sltiu' operand-2 immediate -32769 does not fit
+	ori   %t0, %t0, 65536 // ERROR: 'ori' operand-2 immediate 65536 does not fit
+	xori  %t0, %t0, -1 // ERROR: 'xori' operand-2 immediate -1 does not fit
+	lui   %t0, 65536 // ERROR: 'lui' operand-1 immediate 65536 does not fit
+	lui   %t0, -1 // ERROR: 'lui' operand-1 immediate -1 does not fit
+	sllv  %t0, %t1, 3 // ERROR: 'sllv' operands
+	lui   %t0, 0xffff
+	sltiu %t0, %t0, -1
 }
 
 // Rules of the host's own architecture do not apply to an @(rsp) template,
@@ -326,5 +464,24 @@ unroll_nested_empty :: asm() {
 			#unroll for k in 0..<1024 {
 			}
 		}
+	}
+}
+
+// `#unroll for` over the operand kinds the full table added: a lane, group or
+// control-register error in an unrolled body is reported at the body's line.
+@(rsp)
+unrolled_operand_errors :: asm(p: ^u32) [p = %s1] {
+	#unroll for r in {%v01..=%v02} {
+		vrcp  %r, %v17.e5 // ERROR: 'vrcp' operand-0 %v01 needs a destination lane, .e0-.e7
+		vsar  %r, %v03 // ERROR: 'vsar' operand-1 must be a named accumulator slice register, got %v03
+	}
+	#unroll for g in {%v00, %v04} {
+		ltv   %g, [p] // ERROR: 'ltv' operand-0 cannot be %v04, it must be %v00, %v08, %v16 or %v24
+	}
+	#unroll for g, i in {%v08, %v16} {
+		stv   %g.e2, [p + (8*i)] // ERROR: 'stv' operand-1 memory displacement 8 is not a multiple of the 16-byte access size
+	}
+	#unroll for c in {%vco, %v01} {
+		cfc2  %t0, %c // ERROR: 'cfc2' operand-1 must be a named COP2 control register, got %v01
 	}
 }

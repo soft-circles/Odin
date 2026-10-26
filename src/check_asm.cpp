@@ -314,6 +314,21 @@ gb_internal char const *asm_hook_register_write_reject_reason(AsmCtx *, typename
 	return nullptr;
 }
 
+// char const *mnemonic_unavailable_reason(String const &name) const;
+//
+// Non-null when `name`, which is not in the table, is an instruction of the
+// architecture that a template may not use: the reason, phrased to follow "'name' ".
+// The unknown-mnemonic error then reports that instead of a did-you-mean list.
+template <typename AsmCtx>
+gb_internal auto asm_hook_mnemonic_unavailable_reason(AsmCtx *asm_ctx, String const &name, int)
+	-> decltype(asm_ctx->mnemonic_unavailable_reason(name)) {
+	return asm_ctx->mnemonic_unavailable_reason(name);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_mnemonic_unavailable_reason(AsmCtx *, String const &, long) {
+	return nullptr;
+}
+
 // bool register_accepts_flag(Register r, String const &flag) const;
 // char const *register_flag_reject_reason(OperandType slot, String const &flag) const;
 //
@@ -338,6 +353,36 @@ gb_internal auto asm_hook_register_flag_reject_reason(AsmCtx *asm_ctx, typename 
 template <typename AsmCtx>
 gb_internal char const *asm_hook_register_flag_reject_reason(AsmCtx *, typename AsmCtx::OperandType, String const &, long) {
 	return "is not a register flag";
+}
+
+// char const *register_missing_flag_reason(OperandType slot) const;
+//
+// Non-null when a literal register written without a `.flag` cannot fill `slot`
+// (an RSP single-lane operand names its lane): the reason, phrased to follow
+// "'mnemonic' operand-N %r ".
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_missing_flag_reason(AsmCtx *asm_ctx, typename AsmCtx::OperandType slot, int)
+	-> decltype(asm_ctx->register_missing_flag_reason(slot)) {
+	return asm_ctx->register_missing_flag_reason(slot);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_register_missing_flag_reason(AsmCtx *, typename AsmCtx::OperandType, long) {
+	return nullptr;
+}
+
+// char const *memory_base_reject_reason(Register r) const;
+//
+// Non-null when the literal register `r` cannot be a memory operand's base: the
+// reason, phrased to follow "A memory operand's base cannot be %r: it ". A table
+// without it gets the width and class checks of check_asm_addr_register only.
+template <typename AsmCtx>
+gb_internal auto asm_hook_memory_base_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->memory_base_reject_reason(r)) {
+	return asm_ctx->memory_base_reject_reason(r);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_memory_base_reject_reason(AsmCtx *, typename AsmCtx::Register, long) {
+	return nullptr;
 }
 
 gb_internal bool is_valid_asm_parameter_type(Type *type) {
@@ -1560,6 +1605,10 @@ gb_internal CheckMnemomicResult check_mnemonic_name(AsmCtx *asm_ctx, AstAsmInstr
 	}
 
 	ERROR_BLOCK();
+	if (char const *why = asm_hook_mnemonic_unavailable_reason(asm_ctx, name, 0)) {
+		error(instr->name, "'%.*s' %s", LIT(name), why);
+		return CheckMnemomic_Invalid;
+	}
 	if (instr->operands.count == 0) {
 		error(instr->name, "Unknown mnemonic/prefix for this target platform: %.*s", LIT(name));
 	} else {
@@ -2287,9 +2336,16 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 		// A register's `.flag` (an RSP vector element) must fit the slot it fills. Only a
 		// flag the table accepted (check_register) is checked here; check_register has
-		// reported every other one.
+		// reported every other one. A slot that needs a flag says so when it has none.
 		for_array(oi, operands) {
 			Ast *e = operands[oi].expr;
+			if (e != nullptr && e->kind == Ast_AsmRegister && e->AsmRegister.flag.kind != Token_Ident) {
+				auto slot = operand_slot_type(forms[valid_form_index], cast(int)oi);
+				if (char const *why = asm_hook_register_missing_flag_reason(asm_ctx, slot, 0)) {
+					error(e, "'%.*s' operand-%td %%%.*s %s", LIT(name), oi, LIT(e->AsmRegister.name.string), why);
+				}
+				continue;
+			}
 			if (e == nullptr || e->kind != Ast_AsmRegister || e->AsmRegister.flag.kind != Token_Ident ||
 			    e->AsmRegister.name.string == "flags" ||
 			    !asm_hook_register_accepts_flag(asm_ctx, asm_ctx->register_lookup(e->AsmRegister.name.string), e->AsmRegister.flag.string, 0)) {
@@ -2866,6 +2922,10 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			if (e->kind == Ast_AsmRegister) {
 				error(e, "'%.*s' operand-%td must be a named %.*s register, got %%%.*s",
 				      LIT(name), i, LIT(cls), LIT(e->AsmRegister.name.string));
+			} else if (pe != nullptr && pe->kind == Entity_Variable && asm_hook_unpinned_parameter_reason(asm_ctx, 0) != nullptr) {
+				// every parameter is pinned (an @(rsp) template), and none to a named-only register
+				error(e, "'%.*s' operand-%td must be a named %.*s register, got the parameter '%.*s', whose pinned register cannot be one",
+				      LIT(name), i, LIT(cls), LIT(pe->token.string));
 			} else if (pe != nullptr && pe->kind == Entity_Variable) {
 				error(e, "'%.*s' operand-%td must be a named %.*s register, got the parameter '%.*s', which the compiler allocates",
 				      LIT(name), i, LIT(cls), LIT(pe->token.string));
@@ -3266,6 +3326,10 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			if (base.expr->kind == Ast_AsmRegister) {
 				reg_name = base.expr->AsmRegister.name.string;
 				if (check_register(asm_ctx, &base, &base.expr->AsmRegister)) {
+					if (char const *why = asm_hook_memory_base_reject_reason(asm_ctx, asm_ctx->register_lookup(reg_name), 0)) {
+						error(base.expr, "A memory operand's base cannot be %%%.*s: it %s", LIT(reg_name), why);
+						break;
+					}
 					have_base = check_asm_addr_register(&base, AsmAddr_Base, reg_name, &base_w);
 				}
 				break;

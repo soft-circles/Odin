@@ -66,6 +66,22 @@ inst_v_v_v :: #force_inline proc "contextless" (m: Mnemonic, vd, vs, vt: Registe
 					   ops = {op_vr(vd), op_vr(vs), op_vr(vt, vt_element), {}}}
 }
 
+// vsar's accumulator slice: the element field it reads (rsp.inc's COP2_ACC_HI/MD/LO).
+Accumulator_Slice :: enum u8 {
+	HI = 8,
+	MD = 9,
+	LO = 10,
+}
+
+// `vsar vd, slice`: vs and vt are unused and 0, and only elements 8-10 read the
+// accumulator. The table's form takes any vs, vt and element, as the decoder must;
+// this is the one the RSP gives a meaning to, which the printer prints as rsp.inc's
+// `vsar vd, element`.
+@(require_results)
+inst_vsar_acc :: #force_inline proc "contextless" (vd: Register, slice: Accumulator_Slice) -> Instruction {
+	return inst_v_v_v(.VSAR, vd, VR0, VR0, u8(slice))
+}
+
 // Vector load/store: $vt[element], offset(base).
 @(require_results)
 inst_v_vmem :: #force_inline proc "contextless" (m: Mnemonic, vt: Register, vmem_op: Vector_Mem) -> Instruction {

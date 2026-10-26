@@ -418,18 +418,33 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 				break;
 			case Asm_rsp::OP_VR:
 			case Asm_rsp::OP_VR_ELEM:
-			case Asm_rsp::OP_VR_LS: {
+			case Asm_rsp::OP_VR_LS:
+			case Asm_rsp::OP_VR_LS_LANE:
+			case Asm_rsp::OP_VR_LS_EVEN:
+			case Asm_rsp::OP_VR_BYTE:
+			case Asm_rsp::OP_VR_DE:
+			case Asm_rsp::OP_VR_LANE: {
 				String flag = {};
 				if (!rsp_template_operand_register(e, expr, &reg, &flag)) {
 					return false;
 				}
 				i32 el = Asm_rsp::element_from_flag(type, flag);
 				if (el < 0) {
-					return false; // reported by the check
+					// a flag that does not fit, or a missing lane (register_missing_flag_reason),
+					// was reported by the check
+					return false;
 				}
 				element = cast(u32)el;
 				break;
 			}
+			case Asm_rsp::OP_VC:
+			case Asm_rsp::OP_ACC:
+				// only a literal %vco/%vcc/%vce or %acc_hi/%acc_md/%acc_lo fills it
+				// (operand_type_named_reg_class)
+				if (!rsp_template_operand_register(e, expr, &reg, nullptr)) {
+					return false;
+				}
+				break;
 			case Asm_rsp::OP_SIMM16:
 			case Asm_rsp::OP_UIMM16:
 			case Asm_rsp::OP_SHAMT:
@@ -439,7 +454,7 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 				}
 				break;
 			case Asm_rsp::OP_MEM:
-			case Asm_rsp::OP_VMEM16: {
+			case Asm_rsp::OP_VMEM: {
 				Ast *m = unparen_expr(expr);
 				if (m == nullptr || m->kind != Ast_AsmMemoryOperand) {
 					return false;
@@ -453,7 +468,7 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 					return false;
 				}
 				value = cl.has_disp_const ? cl.disp_total : 0;
-				if (type == Asm_rsp::OP_VMEM16) {
+				if (type == Asm_rsp::OP_VMEM) {
 					i64 size = g_asm_rsp.memory_disp_scale(form, type);
 					if (value % size != 0) {
 						return false; // reported by the check
