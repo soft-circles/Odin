@@ -110,10 +110,44 @@ edge_forms :: asm(p: ^u32) [p = %s1] {
 	nop
 }
 
+// `#unroll for` over a constant slice, a constant array with its index, register lists
+// (a variable spelled bare and with '%'), a register range, an empty range, and a
+// branch to a label outside the unrolled body.
+UNROLL_OFFSETS :: []i32{-8, 0, 4, 32764}
+UNROLL_STEPS   :: [3]i32{1, -2, 3}
+
+@(rsp)
+unroll_forms :: asm(p: ^u32, count: i32) [p = %s1, count = %s3] {
+.top:
+	#unroll for offset in UNROLL_OFFSETS {
+		sw    %t0, [p + offset]
+	}
+	#unroll for step, i in UNROLL_STEPS {
+		addiu %t1, %t1, step
+		addiu %t2, %t2, -i
+	}
+	#unroll for r, i in {%t3, %t5, %a0} {
+		or    r, r, %zero
+		sll   %r, %r, (i + 1)
+	}
+	#unroll for vr in {%v08..<%v10} {
+		vmudn %vr, %vr, %v01.e1
+	}
+	#unroll for n in 0..<0 {
+		addiu %t0, %t0, n
+	}
+	#unroll for _, i in 2..=3 {
+		bgtz  count, .top
+		addiu count, count, i
+	}
+}
+
 SCALAR    :: intrinsics.rsp_template_code(scalar_forms)
+UNROLL    :: intrinsics.rsp_template_code(unroll_forms)
 EDGE      :: intrinsics.rsp_template_code(edge_forms)
 FILL      :: intrinsics.rsp_template_code(valid.fill)
 TRANSFORM :: intrinsics.rsp_template_code(transform.transform)
+TRANSFORM_UNROLLED :: intrinsics.rsp_template_code(transform.transform_unrolled)
 VECTOR :: intrinsics.rsp_template_code(vector_forms)
 
 vr :: proc(n: int) -> rsp.Register {
@@ -173,6 +207,25 @@ expected_edge :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynamic]rsp
 		rsp.inst_bgtz(rsp.T3, SECOND),
 		rsp.inst_nop(),
 	)
+	return
+}
+
+expected_unroll :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynamic]rsp.Label_Definition) {
+	TOP :: 0
+	append(&labels, rsp.Label_Definition(0))
+	for offset in ([]i32{-8, 0, 4, 32764}) {
+		append(&code, rsp.inst_sw(rsp.T0, rsp.mem(rsp.S1, offset)))
+	}
+	for step, i in ([]i32{1, -2, 3}) {
+		append(&code, rsp.inst_addiu(rsp.T1, rsp.T1, i64(step)), rsp.inst_addiu(rsp.T2, rsp.T2, -i64(i)))
+	}
+	for r, i in ([]rsp.Register{rsp.T3, rsp.T5, rsp.A0}) {
+		append(&code, rsp.inst_or(r, r, rsp.ZERO), rsp.inst_sll(r, r, i64(i) + 1))
+	}
+	append(&code, rsp.inst_vmudn(vr(8), vr(8), vr(1), 9), rsp.inst_vmudn(vr(9), vr(9), vr(1), 9))
+	for i in i64(0)..<2 {
+		append(&code, rsp.inst_bgtz(rsp.S3, TOP), rsp.inst_addiu(rsp.S3, rsp.S3, i))
+	}
 	return
 }
 
@@ -305,6 +358,8 @@ main :: proc() {
 	compare("scalar_forms", SCALAR, scalar[:], labels[:])
 	edge, edge_labels := expected_edge()
 	compare("edge_forms", EDGE, edge[:], edge_labels[:])
+	unroll, unroll_labels := expected_unroll()
+	compare("unroll_forms", UNROLL, unroll[:], unroll_labels[:])
 	fill := expected_fill()
 	compare("fill", FILL, fill[:], nil)
 	vector := expected_vector()
@@ -314,6 +369,21 @@ main :: proc() {
 	if len(TRANSFORM) != 61 {
 		fmt.printfln("transform: %d words, want the builder body's 61", len(TRANSFORM))
 		failures += 1
+	}
+
+	// The same body written with `#unroll for`: the same 61 words as the flat template
+	unrolled_body, unrolled_labels := expected_transform() // rexcode.encode resolves a body's labels in place
+	compare("transform_unrolled", TRANSFORM_UNROLLED, unrolled_body[:], unrolled_labels[:])
+	flat, unrolled := TRANSFORM, TRANSFORM_UNROLLED
+	if len(unrolled) != len(flat) {
+		fmt.printfln("transform_unrolled: %d words, want the flat template's %d", len(unrolled), len(flat))
+		failures += 1
+	}
+	for i in 0..<min(len(flat), len(unrolled)) {
+		if unrolled[i].word != flat[i].word {
+			fmt.printfln("MISMATCH transform_unrolled[%d] (line %d): %08x, flat %08x", i, unrolled[i].line, unrolled[i].word, flat[i].word)
+			failures += 1
+		}
 	}
 
 	// Where each template is declared, for test_rsp_templates.py to check

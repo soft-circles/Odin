@@ -304,6 +304,17 @@ template with errors it is an empty constant, so nothing cascades.
 value: the template's file, the line and column of its name, and its name as
 `procedure`; `lb_build_builtin_proc` builds it.
 
+`#unroll for v[, i] in X { ... }` in an `@(rsp)` body (`AsmUnroll`, parsed by
+`parse_asm_unroll`) is expanded by `rsp_expand_unrolls` before the shared
+check, so the check, the CFG and the encoder see a flat body. `X` is a constant
+range, a constant array or slice of integers, or a register group
+(`{%v10..=%v14}`, `{%t3, %t5}`). Each iteration is a clone of the body with an
+integer variable replaced by a literal (in immediates, memory terms and
+parenthesised expressions) and a register variable (`%r`, `%r.e0` or bare `r`)
+replaced by the iteration's register. Clones keep their tokens, so errors and
+`Rsp_Code_Line.line` are the body's lines. Labels inside an unrolled body are
+rejected. A CPU template's `#unroll for` is an error in `check_asm_template_body`.
+
 The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
 plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
 from `core/rexcode/isa/rsp/tablegen/encoding_table.odin`), a shape and

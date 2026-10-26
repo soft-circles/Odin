@@ -499,6 +499,403 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 	return true;
 }
 
+// `#unroll for` in an @(rsp) body, expanded before the body's check
+//
+//     #unroll for lane in 0..<4 { sw %t4, [scratch + (16 + 4*lane)] }  // a constant range
+//     #unroll for off in OFFSETS { sw %t0, [p + off] }                 // a constant array
+//     #unroll for r, i in {%v10..=%v14} { lqv %r.e0, [scratch + (16*i)] } // a register group
+//
+// Each iteration is a copy of the body. An integer loop variable becomes a constant
+// literal wherever it is named: an immediate, a memory term, inside parentheses. A
+// register loop variable is spelled as a register, `%r` (with any accessor, `%r.e0`) or
+// bare `r`, and stands for the iteration's register. A register range steps the number
+// at the end of the name and keeps its digit count (`%v08..=%v11`, `%t0..<%t4`). The
+// second name, when given, is the iteration's index. The copies keep the body's tokens,
+// so an error inside an unrolled body is reported at the body's line (once, for the
+// first iteration that has it) and each word's `line` is the body line it came from.
+// A label can't be declared inside an unrolled body: each copy would declare it again.
+
+struct RspUnrollBinding {
+	String name;
+	String reg;   // a register loop variable's register, without '%'
+	i64    value; // an integer loop variable's value
+};
+
+gb_internal RspUnrollBinding const *rsp_unroll_find(Array<RspUnrollBinding> const &bindings, String const &name) {
+	for (isize i = bindings.count-1; i >= 0; i--) {
+		if (bindings[i].name == name) {
+			return &bindings[i];
+		}
+	}
+	return nullptr;
+}
+
+gb_internal Ast *rsp_unroll_literal(Ast *at, i64 value) {
+	Token token = ast_token(at);
+	token.kind = Token_Integer;
+	char buf[32] = {};
+	snprintf(buf, gb_size_of(buf), "%lld", cast(long long)value);
+	token.string = copy_string(permanent_allocator(), make_string_c(buf));
+	Ast *lit = alloc_ast_node(at->file(), Ast_BasicLit);
+	lit->BasicLit.token = token;
+	lit->tav.mode = Addressing_Constant;
+	lit->tav.set_value(exact_value_i64(value));
+	return lit;
+}
+
+// Replaces the loop variables in a copy of the body. `is_operand`: `*slot` is an
+// instruction operand or memory term, where a register variable may stand bare.
+gb_internal void rsp_unroll_substitute(Ast **slot, Array<RspUnrollBinding> const &b, bool is_operand) {
+	Ast *node = *slot;
+	if (node == nullptr) {
+		return;
+	}
+	switch (node->kind) {
+	case Ast_Ident: {
+		RspUnrollBinding const *found = rsp_unroll_find(b, node->Ident.token.string);
+		if (found == nullptr) {
+			break;
+		}
+		if (found->reg.len == 0) {
+			*slot = rsp_unroll_literal(node, found->value);
+		} else if (is_operand) {
+			Ast *reg = alloc_ast_node(node->file(), Ast_AsmRegister);
+			reg->AsmRegister.token = node->Ident.token;
+			reg->AsmRegister.token.kind = Token_Mod;
+			reg->AsmRegister.name = node->Ident.token;
+			reg->AsmRegister.name.string = found->reg;
+			*slot = reg;
+		}
+		break;
+	}
+	case Ast_AsmRegister: {
+		RspUnrollBinding const *found = rsp_unroll_find(b, node->AsmRegister.name.string);
+		if (found != nullptr && found->reg.len != 0) {
+			node->AsmRegister.name.string = found->reg;
+		}
+		break;
+	}
+	case Ast_AsmInstruction:
+		for (Ast *&op : node->AsmInstruction.operands) rsp_unroll_substitute(&op, b, true);
+		break;
+	case Ast_AsmDirective:
+		for (Ast *&op : node->AsmDirective.operands) rsp_unroll_substitute(&op, b, true);
+		break;
+	case Ast_AsmMemoryOperand:
+		rsp_unroll_substitute(&node->AsmMemoryOperand.segment_override, b, true);
+		for (Ast *&term : node->AsmMemoryOperand.terms) rsp_unroll_substitute(&term, b, true);
+		break;
+	case Ast_AsmMemoryTerm:
+		rsp_unroll_substitute(&node->AsmMemoryTerm.operand, b, true);
+		rsp_unroll_substitute(&node->AsmMemoryTerm.scale, b, false);
+		break;
+	case Ast_AsmRegisterGroup:
+		for (Ast *&r : node->AsmRegisterGroup.registers) rsp_unroll_substitute(&r, b, true);
+		break;
+	case Ast_UnaryExpr:
+		rsp_unroll_substitute(&node->UnaryExpr.expr, b, false);
+		break;
+	case Ast_BinaryExpr:
+		rsp_unroll_substitute(&node->BinaryExpr.left,  b, false);
+		rsp_unroll_substitute(&node->BinaryExpr.right, b, false);
+		break;
+	case Ast_ParenExpr:
+		rsp_unroll_substitute(&node->ParenExpr.expr, b, false);
+		break;
+	case Ast_SelectorExpr:
+		rsp_unroll_substitute(&node->SelectorExpr.expr, b, false);
+		break;
+	case Ast_IndexExpr:
+		rsp_unroll_substitute(&node->IndexExpr.expr,  b, false);
+		rsp_unroll_substitute(&node->IndexExpr.index, b, false);
+		break;
+	case Ast_TernaryIfExpr:
+		rsp_unroll_substitute(&node->TernaryIfExpr.x,    b, false);
+		rsp_unroll_substitute(&node->TernaryIfExpr.cond, b, false);
+		rsp_unroll_substitute(&node->TernaryIfExpr.y,    b, false);
+		break;
+	case Ast_TernaryWhenExpr:
+		rsp_unroll_substitute(&node->TernaryWhenExpr.x,    b, false);
+		rsp_unroll_substitute(&node->TernaryWhenExpr.cond, b, false);
+		rsp_unroll_substitute(&node->TernaryWhenExpr.y,    b, false);
+		break;
+	case Ast_CallExpr: {
+		// `offset_of(T, field)` names a field, not a value
+		Ast *proc = unparen_expr(node->CallExpr.proc);
+		bool names_field = proc != nullptr && proc->kind == Ast_Ident &&
+		                   (proc->Ident.token.string == "offset_of" || proc->Ident.token.string == "offset_of_by_string");
+		for_array(i, node->CallExpr.args) {
+			if (!(names_field && i > 0)) {
+				rsp_unroll_substitute(&node->CallExpr.args[i], b, false);
+			}
+		}
+		break;
+	}
+	}
+}
+
+struct RspUnrollValue {
+	String reg;   // a register group's register
+	i64    value; // otherwise, the integer
+};
+
+// "v10" -> ("v", 10, 2 digits). False when the name has no number at its end.
+gb_internal bool rsp_unroll_split_register(String const &name, String *prefix_, i64 *number_, isize *digits_) {
+	isize n = name.len;
+	while (n > 0 && gb_char_is_digit(cast(char)name[n-1])) {
+		n -= 1;
+	}
+	if (n == name.len || name.len - n > 4) {
+		return false;
+	}
+	*prefix_ = substring(name, 0, n);
+	*digits_ = name.len - n;
+	i64 number = 0;
+	for (isize i = n; i < name.len; i++) {
+		number = number*10 + (name[i] - '0');
+	}
+	*number_ = number;
+	return true;
+}
+
+gb_internal bool rsp_unroll_group_values(Ast *group, Array<RspUnrollValue> *values) {
+	ast_node(rg, AsmRegisterGroup, group);
+	for (Ast *r : rg->registers) {
+		if (r == nullptr || r->kind != Ast_AsmRegister || r->AsmRegister.flag.kind == Token_Ident) {
+			error(r ? r : group, "An '#unroll for' register group holds registers without accessors, such as {%%v10..=%%v14} or {%%t0, %%t2}");
+			return false;
+		}
+	}
+	if (rg->range_token.kind == Token_RangeHalf || rg->range_token.kind == Token_RangeFull) {
+		String lo_name = rg->registers[0]->AsmRegister.name.string;
+		String hi_name = rg->registers[1]->AsmRegister.name.string;
+		String lo_prefix = {}, hi_prefix = {};
+		i64 lo = 0, hi = 0;
+		isize lo_digits = 0, hi_digits = 0;
+		if (!rsp_unroll_split_register(lo_name, &lo_prefix, &lo, &lo_digits) ||
+		    !rsp_unroll_split_register(hi_name, &hi_prefix, &hi, &hi_digits) ||
+		    lo_prefix != hi_prefix) {
+			error(group, "An '#unroll for' register range steps the number at the end of one register name, such as {%%v10..=%%v14}; got '%%%.*s' and '%%%.*s'",
+			      LIT(lo_name), LIT(hi_name));
+			return false;
+		}
+		if (rg->range_token.kind == Token_RangeHalf) {
+			hi -= 1;
+		}
+		for (i64 n = lo; n <= hi; n++) {
+			char buf[64] = {};
+			snprintf(buf, gb_size_of(buf), "%.*s%0*lld", LIT(lo_prefix), cast(int)lo_digits, cast(long long)n);
+			RspUnrollValue v = {copy_string(permanent_allocator(), make_string_c(buf)), 0};
+			array_add(values, v);
+		}
+	} else {
+		for (Ast *r : rg->registers) {
+			RspUnrollValue v = {r->AsmRegister.name.string, 0};
+			array_add(values, v);
+		}
+	}
+	for (RspUnrollValue const &v : *values) {
+		if (g_asm_rsp.register_lookup(v.reg) == Asm_rsp::REG_INVALID) {
+			error(group, "'%%%.*s' in this '#unroll for' register group is not an RSP register", LIT(v.reg));
+			return false;
+		}
+	}
+	return true;
+}
+
+// A parameter's value is a register's at run time, not a constant.
+gb_internal bool rsp_unroll_names_parameter(Entity *e, Ast *expr) {
+	Ast *x = unparen_expr(expr);
+	if (x == nullptr || x->kind != Ast_Ident ||
+	    scope_lookup_current(e->AsmTemplate.param_scope, x->Ident.interned, x->Ident.hash) == nullptr) {
+		return false;
+	}
+	error(x, "'%.*s' is a parameter of the template, a register at run time; an '#unroll for' iterates over constants",
+	      LIT(x->Ident.token.string));
+	return true;
+}
+
+gb_internal bool rsp_unroll_constant_integer(CheckerContext *ctx, Entity *e, Ast *expr, i64 *value_) {
+	if (rsp_unroll_names_parameter(e, expr)) {
+		return false;
+	}
+	Operand o = {};
+	check_expr(ctx, &o, expr);
+	if (o.mode == Addressing_Invalid) {
+		return false;
+	}
+	if (o.mode != Addressing_Constant || !is_type_integer(o.type)) {
+		gbString s = expr_to_string(expr);
+		error(expr, "An '#unroll for' range is of constant integers, got '%s'", s);
+		gb_string_free(s);
+		return false;
+	}
+	*value_ = exact_value_to_i64(exact_value_to_integer(o.value));
+	return true;
+}
+
+// The values an `#unroll for` takes, in order: a range's integers, a constant array's
+// elements (integers), or a register group's registers.
+gb_internal bool rsp_unroll_values(CheckerContext *ctx, Entity *e, Ast *expr, Array<RspUnrollValue> *values) {
+	if (expr->kind == Ast_AsmRegisterGroup) {
+		return rsp_unroll_group_values(expr, values);
+	}
+	Ast *range = unparen_expr(expr);
+	if (is_ast_range(range)) {
+		ast_node(be, BinaryExpr, range);
+		i64 lo = 0, hi = 0;
+		if (!rsp_unroll_constant_integer(ctx, e, be->left, &lo) || !rsp_unroll_constant_integer(ctx, e, be->right, &hi)) {
+			return false;
+		}
+		if (be->op.kind == Token_RangeHalf) {
+			hi -= 1;
+		}
+		for (i64 n = lo; n <= hi && values->count <= 1024; n++) {
+			RspUnrollValue v = {{}, n};
+			array_add(values, v);
+		}
+		return true;
+	}
+
+	if (rsp_unroll_names_parameter(e, expr)) {
+		return false;
+	}
+	Operand o = {};
+	check_expr(ctx, &o, expr);
+	if (o.mode == Addressing_Invalid) {
+		return false;
+	}
+	Type *t = base_type(o.type);
+	Type *elem = t->kind == Type_Array ? t->Array.elem : t->kind == Type_Slice ? t->Slice.elem : nullptr;
+	if (o.mode != Addressing_Constant || o.value.kind != ExactValue_Compound || elem == nullptr || !is_type_integer(elem) ||
+	    o.value.value_compound == nullptr || o.value.value_compound->kind != Ast_CompoundLit) {
+		gbString s = expr_to_string(expr);
+		gbString ts = type_to_string(o.type);
+		error(expr, "An '#unroll for' in an @(rsp) template iterates over a constant range, a constant array of integers or a register group, got '%s' of type '%s'", s, ts);
+		gb_string_free(ts);
+		gb_string_free(s);
+		return false;
+	}
+	ast_node(cl, CompoundLit, o.value.value_compound);
+	i64 count = t->kind == Type_Array ? t->Array.count : cl->elems.count;
+	if (t->kind == Type_Slice && cl->elems.count > 0 && cl->elems[0]->kind == Ast_FieldValue) {
+		error(expr, "An '#unroll for' over a constant slice takes positional elements");
+		return false;
+	}
+	for (i64 k = 0; k < count && values->count <= 1024; k++) {
+		Ast *e = constant_compound_elem_node(cl, k);
+		RspUnrollValue v = {};
+		if (e != nullptr) { // an element left out of an array literal is zero
+			ExactValue ev = exact_value_to_integer(e->tav.value());
+			if (e->tav.mode != Addressing_Constant || ev.kind != ExactValue_Integer) {
+				error(e, "An '#unroll for' element must be a constant integer");
+				return false;
+			}
+			v.value = exact_value_to_i64(ev);
+		}
+		array_add(values, v);
+	}
+	return true;
+}
+
+gb_internal bool rsp_unroll_bind(Entity *e, Array<RspUnrollBinding> *b, Ast *name) {
+	if (name == nullptr || is_blank_ident(name)) {
+		return false;
+	}
+	String s = name->Ident.token.string;
+	char const *why = nullptr;
+	if (scope_lookup_current(e->AsmTemplate.param_scope, name->Ident.interned, name->Ident.hash) != nullptr) {
+		why = "a parameter of the template";
+	} else if (rsp_unroll_find(*b, s) != nullptr) {
+		why = "the variable of an enclosing '#unroll for'";
+	} else if (g_asm_rsp.register_lookup(s) != Asm_rsp::REG_INVALID) {
+		why = "an RSP register's name";
+	}
+	if (why != nullptr) {
+		error(name, "'#unroll for' variable '%.*s' is %s; choose another name", LIT(s), why);
+		return false;
+	}
+	RspUnrollBinding binding = {s};
+	array_add(b, binding);
+	return true;
+}
+
+gb_internal void rsp_unroll_expand(CheckerContext *ctx, Entity *e, Slice<Ast *> const &body,
+                                   Array<RspUnrollBinding> const &bindings, Array<Ast *> *out) {
+	for (Ast *node : body) {
+		if (node->kind != Ast_AsmUnroll) {
+			if (bindings.count == 0) {
+				array_add(out, node);
+			} else {
+				Ast *copy = clone_ast(node);
+				rsp_unroll_substitute(&copy, bindings, false);
+				array_add(out, copy);
+			}
+			continue;
+		}
+
+		ast_node(u, AsmUnroll, node);
+		bool ok = true;
+		for (Ast *inner : u->instructions) {
+			if (inner->kind == Ast_AsmLabelDecl) {
+				error(inner, "An asm label can't be declared inside an '#unroll for' body: each iteration would declare it again");
+				ok = false;
+			}
+		}
+		Ast *expr = clone_ast(u->expr);
+		rsp_unroll_substitute(&expr, bindings, false);
+		Array<RspUnrollValue> values = {};
+		array_init(&values, heap_allocator());
+		defer (array_free(&values));
+		ok = rsp_unroll_values(ctx, e, expr, &values) && ok;
+		if (ok && values.count > 1024) {
+			error(u->expr, "Too many iterations for an '#unroll for' in an @(rsp) template, expected <= 1024");
+			ok = false;
+		}
+
+		Array<RspUnrollBinding> inner = {};
+		array_init(&inner, heap_allocator(), 0, bindings.count + 2);
+		defer (array_free(&inner));
+		array_add_elems(&inner, bindings.data, bindings.count);
+		bool has_val0 = rsp_unroll_bind(e, &inner, u->val0);
+		bool has_val1 = rsp_unroll_bind(e, &inner, u->val1);
+		ok = ok && (has_val0 || u->val0 == nullptr || is_blank_ident(u->val0))
+		        && (has_val1 || u->val1 == nullptr || is_blank_ident(u->val1));
+		if (!ok) {
+			continue;
+		}
+		for_array(k, values) {
+			isize at = bindings.count;
+			if (has_val0) {
+				inner[at].reg   = values[k].reg;
+				inner[at].value = values[k].value;
+				at += 1;
+			}
+			if (has_val1) {
+				inner[at].value = cast(i64)k; // the index
+			}
+			rsp_unroll_expand(ctx, e, u->instructions, inner, out);
+		}
+	}
+}
+
+// Replaces each `#unroll for` in the template's body with its iterations.
+gb_internal void rsp_expand_unrolls(CheckerContext *ctx, Entity *e) {
+	ast_node(at, AsmTemplate, e->AsmTemplate.node);
+	bool any = false;
+	for (Ast *node : at->instructions) {
+		any |= node->kind == Ast_AsmUnroll;
+	}
+	if (!any) {
+		return;
+	}
+	Array<Ast *> out = {};
+	array_init(&out, heap_allocator());
+	Array<RspUnrollBinding> none = {};
+	rsp_unroll_expand(ctx, e, at->instructions, none, &out);
+	at->instructions = slice_from_array(out);
+}
+
 // The check of an @(rsp) template's body, from its queued check or from a builtin
 // that needs its words (check_asm_template_body_from_entity). It runs once.
 gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInfo *d) {
@@ -520,6 +917,7 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 	i64 errors_before = thread_error_count();
 	{
 		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
+		rsp_expand_unrolls(ctx, e);
 		check_asm_template_body(&g_asm_rsp, ctx, e, d);
 		rsp_check_parameter_types(e);
 		rsp_check_template_layout_measures(e);

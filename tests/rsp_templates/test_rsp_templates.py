@@ -3,7 +3,8 @@
 
 Packages under tests/rsp_templates/:
   valid/   templates every target accepts under -vet -strict-style, including
-           Odin64's rsp_jobs/transform body written out flat (valid/transform)
+           Odin64's rsp_jobs/transform body written out flat and with `#unroll for`
+           (valid/transform)
   bad/     rejections; a line that must report an error ends with
            `// ERROR: <message prefix>`
   golden/  a host program that encodes every form of src/asm_tables_rsp.cpp
@@ -228,6 +229,16 @@ class Check(unittest.TestCase):
                    if d[1] == 4 and (".zf" in d[3] or "register flag" in d[3].lower())]
         self.assertEqual(at_flag, ["Register flags can only be called on %flags"], output)
 
+    def test_unroll_is_rsp_only(self):
+        # A CPU template's body is lowered as written, so `#unroll for` is an error there.
+        directory = unique_dir("cpu-unroll")
+        (directory / "cpu.odin").write_text(
+            "package cpu\n\nt :: asm() {\n\t#unroll for i in 0..<2 {\n\t\tnop\n\t}\n}\n")
+        code, output = check_package(directory, "linux_amd64")
+        self.assertNotEqual(code, 0)
+        self.assertEqual([(d[1], d[3]) for d in diagnostics(output)],
+                         [(4, "'#unroll for' in an asm template body is supported only in @(rsp) templates")], output)
+
 
 class Encode(unittest.TestCase):
     def test_every_form_matches_rexcode(self):
@@ -249,6 +260,20 @@ class Encode(unittest.TestCase):
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "transform"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
+
+        # Each word of the unrolled transform is from the line, inside the unrolled
+        # body, of the same instruction as the flat template's word.
+        flat_path = HERE / "valid" / "transform" / "transform.odin"
+        unrolled_path = HERE / "valid" / "transform" / "transform_unrolled.odin"
+        flat_text = flat_path.read_text().splitlines()
+        unrolled_text = unrolled_path.read_text().splitlines()
+        unrolled_lines = [int(row.split()[3]) for row in output.splitlines()
+                          if len(row.split()) == 4 and row.split()[0] == "transform_unrolled"]
+        self.assertEqual(len(unrolled_lines), len(lines["transform"]))
+        for i, (flat, unrolled) in enumerate(zip(lines["transform"], unrolled_lines)):
+            with self.subTest(transform_unrolled=i):
+                self.assertEqual(unrolled_text[unrolled - 1].split()[0], flat_text[flat - 1].split()[0])
+        self.assertEqual(len(set(unrolled_lines)), 28)  # 61 words from 28 written instructions
 
         # intrinsics.rsp_template_location: the declaration's file, line and column
         locations = {}
