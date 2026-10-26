@@ -47,6 +47,8 @@ enum BuiltinProcId {
 
 	BuiltinProc_has_target_feature,
 
+	BuiltinProc_rsp_template_code,
+
 	BuiltinProc_constant_log2,
 
 	BuiltinProc_constant_floor,
@@ -461,6 +463,8 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("is_package_imported"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 
 	{STR_LIT("has_target_feature"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+
+	{STR_LIT("rsp_template_code"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 
 	{STR_LIT("constant_log2"),     1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("constant_floor"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},

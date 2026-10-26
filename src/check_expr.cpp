@@ -9746,6 +9746,14 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 				c->asm_template_hint = unnested_proc;
 				check_expr_or_type(c, operand, proc);
 				c->asm_template_hint = prev_hint;
+
+				Entity *callee = entity_of_node(operand->expr);
+				if (callee != nullptr && callee->kind == Entity_AsmTemplate && callee->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+					error(proc, "'%.*s' is an @(rsp) template: RSP Microcode, which CPU code cannot call; "
+					            "take its words with 'intrinsics.rsp_template_code(%.*s)'",
+					      LIT(callee->token.string), LIT(callee->token.string));
+					operand->mode = Addressing_Invalid;
+				}
 			}
 		} else {
 			GB_ASSERT(operand->expr != nullptr);

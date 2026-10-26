@@ -124,6 +124,15 @@ Futex_Operation :: enum {
 
 atomic_type_is_lock_free :: proc($T: typeid) -> bool ---
 
+// N64 RSP Microcode
+// One word of an @(rsp) asm template and the template line it came from
+Rsp_Code_Line :: struct {
+	word: u32,
+	line: i32,
+}
+// The encoded words of the @(rsp) asm template `t`, one per instruction, as a constant
+rsp_template_code :: proc(t: $T) -> []Rsp_Code_Line ---
+
 atomic_thread_fence :: proc(order: Atomic_Memory_Order) ---
 atomic_signal_fence :: proc(order: Atomic_Memory_Order) ---
 

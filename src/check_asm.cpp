@@ -25,6 +25,9 @@ gb_internal i32 check_asm_operand_bit_width(Type *type) {
 	if (is_type_untyped(type)) {
 		return -1;
 	}
+	if (is_type_internally_pointer_like(type)) {
+		return asm_check_pointer_bits(); // a DMEM address under @(rsp), whatever the host's pointers are
+	}
 	i64 sz = type_size_of(base_type(type));
 	if (sz <= 0) {
 		return 0;
@@ -33,7 +36,7 @@ gb_internal i32 check_asm_operand_bit_width(Type *type) {
 }
 
 gb_internal bool check_asm_target_supports_label_memory_operand(void) {
-	switch (build_context.metrics.arch) {
+	switch (asm_check_arch()) {
 	case TargetArch_amd64:
 		return true;
 	}
@@ -218,6 +221,115 @@ gb_internal auto asm_hook_pin_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::Re
 template <typename AsmCtx>
 gb_internal char const *asm_hook_pin_reject_reason(AsmCtx *, typename AsmCtx::Register, long) {
 	return nullptr;
+}
+
+// The hooks below serve @(rsp) templates (asm_tables_rsp.cpp); no CPU table has them.
+
+// TargetArchKind table_arch() const; i32 table_pointer_bits() const;
+//
+// The architecture and pointer width the table checks for, which asm_check_arch and
+// asm_check_pointer_bits report while it checks a template. A table without them is
+// the build target's.
+template <typename AsmCtx>
+gb_internal auto asm_hook_table_arch(AsmCtx *asm_ctx, int) -> decltype(asm_ctx->table_arch()) {
+	return asm_ctx->table_arch();
+}
+template <typename AsmCtx>
+gb_internal TargetArchKind asm_hook_table_arch(AsmCtx *, long) {
+	return build_context.metrics.arch;
+}
+template <typename AsmCtx>
+gb_internal auto asm_hook_table_pointer_bits(AsmCtx *asm_ctx, int) -> decltype(asm_ctx->table_pointer_bits()) {
+	return asm_ctx->table_pointer_bits();
+}
+template <typename AsmCtx>
+gb_internal i32 asm_hook_table_pointer_bits(AsmCtx *, long) {
+	return cast(i32)(build_context.metrics.ptr_size*8);
+}
+
+// i64 memory_disp_scale(Encoding const &form, OperandType slot) const;
+//
+// A constant displacement in memory slot `slot` must be a multiple of the returned
+// value (a vector load/store's access size). A table without it imposes none.
+template <typename AsmCtx>
+gb_internal auto asm_hook_memory_disp_scale(AsmCtx *asm_ctx, typename AsmCtx::Encoding const &form,
+                                            typename AsmCtx::OperandType slot, int)
+	-> decltype(asm_ctx->memory_disp_scale(form, slot)) {
+	return asm_ctx->memory_disp_scale(form, slot);
+}
+template <typename AsmCtx>
+gb_internal i64 asm_hook_memory_disp_scale(AsmCtx *, typename AsmCtx::Encoding const &,
+                                           typename AsmCtx::OperandType, long) {
+	return 1;
+}
+
+// bool input_parameters_are_writable() const;
+//
+// True when a template may write an untied input, by name or through its pinned
+// register: there is no caller that keeps using the value. A table without it rejects
+// such writes (check_asm_input_parameter_write).
+template <typename AsmCtx>
+gb_internal auto asm_hook_input_parameters_are_writable(AsmCtx *asm_ctx, int)
+	-> decltype(asm_ctx->input_parameters_are_writable()) {
+	return asm_ctx->input_parameters_are_writable();
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_input_parameters_are_writable(AsmCtx *, long) {
+	return false;
+}
+
+// char const *unpinned_parameter_reason() const;
+//
+// Non-null when every parameter must be pinned to a register: the reason, reported
+// against each one that is not.
+template <typename AsmCtx>
+gb_internal auto asm_hook_unpinned_parameter_reason(AsmCtx *asm_ctx, int)
+	-> decltype(asm_ctx->unpinned_parameter_reason()) {
+	return asm_ctx->unpinned_parameter_reason();
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_unpinned_parameter_reason(AsmCtx *, long) {
+	return nullptr;
+}
+
+// char const *register_write_reject_reason(Register r) const;
+//
+// Non-null when no instruction may write the literal register `r`: the reason,
+// phrased to follow "%r ".
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_write_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::Register r, int)
+	-> decltype(asm_ctx->register_write_reject_reason(r)) {
+	return asm_ctx->register_write_reject_reason(r);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_register_write_reject_reason(AsmCtx *, typename AsmCtx::Register, long) {
+	return nullptr;
+}
+
+// bool register_accepts_flag(Register r, String const &flag) const;
+// char const *register_flag_reject_reason(OperandType slot, String const &flag) const;
+//
+// A literal register written with a `.flag` suffix (an RSP vector element, `%v01.q0`)
+// is accepted when register_accepts_flag says so; a table without it allows flags on
+// %flags only. Once a form matches, register_flag_reject_reason says whether the flag
+// fits the slot: nullptr, or the reason, phrased to follow "'.flag' ".
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_accepts_flag(AsmCtx *asm_ctx, typename AsmCtx::Register r, String const &flag, int)
+	-> decltype(asm_ctx->register_accepts_flag(r, flag)) {
+	return asm_ctx->register_accepts_flag(r, flag);
+}
+template <typename AsmCtx>
+gb_internal bool asm_hook_register_accepts_flag(AsmCtx *, typename AsmCtx::Register, String const &, long) {
+	return false;
+}
+template <typename AsmCtx>
+gb_internal auto asm_hook_register_flag_reject_reason(AsmCtx *asm_ctx, typename AsmCtx::OperandType slot, String const &flag, int)
+	-> decltype(asm_ctx->register_flag_reject_reason(slot, flag)) {
+	return asm_ctx->register_flag_reject_reason(slot, flag);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_register_flag_reject_reason(AsmCtx *, typename AsmCtx::OperandType, String const &, long) {
+	return "is not a register flag";
 }
 
 gb_internal bool is_valid_asm_parameter_type(Type *type) {
@@ -684,7 +796,7 @@ gb_internal bool check_asm_addr_register(Operand const *operand, AsmAddrRole rol
 		return false;
 	}
 	if (role == AsmAddr_Index && reg_name.len != 0) {
-		if (build_context.metrics.arch == TargetArch_amd64) {
+		if (asm_check_arch() == TargetArch_amd64) {
 			// TODO(bill): This is a complete bodge for AMD64, and I need to see if regnalize this further
 			// rsp/esp cannot be encoded as an index register.
 			if (reg_name == "rsp" || reg_name == "esp") {
@@ -875,11 +987,12 @@ gb_internal bool check_asm_memory_disp_fits(AsmCtx *asm_ctx, typename AsmCtx::En
 	if (!asm_hook_memory_disp_range(asm_ctx, form, slot, &lo, &hi, 0)) {
 		return true;
 	}
-	i64 disp = m->classify.disp_total;
+	i64 disp  = m->classify.disp_total;
+	i64 scale = asm_hook_memory_disp_scale(asm_ctx, form, slot, 0);
 	if (disp_) *disp_ = disp;
 	if (min_)  *min_  = lo;
 	if (max_)  *max_  = hi;
-	return lo <= disp && disp <= hi;
+	return lo <= disp && disp <= hi && (scale <= 1 || disp % scale == 0);
 }
 
 // "a signed 16-bit <noun> (-32768..=32767)", "an unsigned 12-bit <noun> (0..=4095)",
@@ -1237,7 +1350,10 @@ gb_internal void check_asm_specs(AsmCtx *asm_ctx, CheckerContext *ctx, Scope *sc
 template <typename AsmCtx>
 gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegister *asm_reg) {
 	String name = asm_reg->name.string;
-	if (asm_reg->flag.kind == Token_Ident) {
+	if (asm_reg->flag.kind == Token_Ident && name != "flags" &&
+	    asm_hook_register_accepts_flag(asm_ctx, asm_ctx->register_lookup(name), asm_reg->flag.string, 0)) {
+		// a table-defined accessor (an RSP vector element); the slot checks it once a form matches
+	} else if (asm_reg->flag.kind == Token_Ident) {
 		bool ok = true;
 		i32 width = 0;
 
@@ -1332,7 +1448,7 @@ enum CheckMnemomicResult {
 template <typename AsmCtx>
 gb_internal bool check_pseudo_macro_mnemonic(AsmCtx *asm_ctx, Entity *tmpl_entity,
                                              AstAsmInstruction *instr, Slice<Operand> const &operands) {
-	if (build_context.metrics.arch != TargetArch_riscv64) {
+	if (asm_check_arch() != TargetArch_riscv64) {
 		return false;
 	}
 
@@ -1343,7 +1459,7 @@ gb_internal bool check_pseudo_macro_mnemonic(AsmCtx *asm_ctx, Entity *tmpl_entit
 		handle them directly any way.
 	*/
 
-	int const XLEN = cast(int)(build_context.metrics.ptr_size*8);
+	int const XLEN = cast(int)asm_check_pointer_bits();
 
 	String name = instr->name->Ident.token.string;
 
@@ -1481,7 +1597,7 @@ gb_internal bool check_asm_instr_targets_internal_label(AstAsmInstruction *instr
 
 template <typename AsmCtx>
 gb_internal void check_operand_constraints(AsmCtx *asm_ctx, Slice<Operand> const &operands, u16 mnemonic, String const &name) {
-	i32 word_bits = cast(i32)(build_context.metrics.ptr_size * 8);
+	i32 word_bits = asm_check_pointer_bits();
 
 	// Value-range constraints (shift-count in range, non-zero divisor). Every mnemonic
 	// decision lives in asm_ctx->operand_value_constraint; the logic below names none.
@@ -1669,7 +1785,8 @@ gb_internal void check_asm_literal_register_write(AsmCtx *asm_ctx, AsmCfg *cfg, 
 		if (!pr || asm_register_code(asm_ctx, pr) != code) {
 			continue;
 		}
-		if (ed.param_group == AsmTemplateEntityDeclParamGroup_Input && ed.tie < 0) {
+		if (ed.param_group == AsmTemplateEntityDeclParamGroup_Input && ed.tie < 0 &&
+		    !asm_hook_input_parameters_are_writable(asm_ctx, 0)) {
 			array_add(&cfg->reported_write_reg_codes, cast(AsmRegCode)code);
 			error(reg_expr, "'%.*s' writes %%%.*s, which holds the input '%.*s'; the compiler assumes an input keeps its value, "
 			                "so tie '%.*s' to an output or copy it into a scratch register before writing",
@@ -2160,13 +2277,26 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 		check_operand_constraints(asm_ctx, operands, mnemonic, name);
 
+		// A register's `.flag` (an RSP vector element) must fit the slot it fills.
+		for_array(oi, operands) {
+			Ast *e = operands[oi].expr;
+			if (e == nullptr || e->kind != Ast_AsmRegister || e->AsmRegister.flag.kind != Token_Ident ||
+			    e->AsmRegister.name.string == "flags") {
+				continue;
+			}
+			auto slot = operand_slot_type(forms[valid_form_index], cast(int)oi);
+			if (char const *why = asm_hook_register_flag_reject_reason(asm_ctx, slot, e->AsmRegister.flag.string, 0)) {
+				error(e->AsmRegister.flag, "'.%.*s' on %%%.*s %s", LIT(e->AsmRegister.flag.string), LIT(e->AsmRegister.name.string), why);
+			}
+		}
+
 
 		// NOTE(bill): The scaled-index shift must equal log2(transfer size) on targets that require it
 		// e.g. on AArch64 register-offset loads/stores.
 		// Generic: forms with form_transfer_bytes()==0, or operands with no constant scale, impose nothing.
 		{
 			u16 tb = asm_ctx->form_transfer_bytes(forms[valid_form_index]);
-			if (build_context.metrics.arch == TargetArch_arm64 && tb != 0) {
+			if (asm_check_arch() == TargetArch_arm64 && tb != 0) {
 				i64 want = 0;
 				{
 					u16 b = tb;
@@ -2293,6 +2423,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				u16 b = asm_ctx->clobber_bit_for_reg_name(e->AsmRegister.name.string);
 				produced |= b;
 				explicit_writes |= b;
+				if (char const *why = asm_hook_register_write_reject_reason(asm_ctx, asm_ctx->register_lookup(e->AsmRegister.name.string), 0)) {
+					error(e, "'%.*s' writes %%%.*s, which %s", LIT(name), LIT(e->AsmRegister.name.string), why);
+				}
 				check_asm_literal_register_write(asm_ctx, cfg, ate->decls, name, e);
 				continue;
 			}
@@ -2307,7 +2440,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				check_asm_find_group(pe, ate->decls, &di);
 				u16 pin_bit = asm_decl_resolve_pin_bit(asm_ctx, ate->decls, di);
 				pinned_param_writes |= pin_bit;
-				check_asm_input_parameter_write(cfg, ate->decls, name, di, operands[i].expr);
+				if (!asm_hook_input_parameters_are_writable(asm_ctx, 0)) {
+					check_asm_input_parameter_write(cfg, ate->decls, name, di, operands[i].expr);
+				}
 
 				// NOTE(bill): A write through a pinned parameter defines its register at the operand's width
 				i32 idx = asm_reg_index_from_bit(pin_bit);
@@ -2319,7 +2454,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		}
 
 		if (is_pseudo &&
-		    build_context.metrics.arch == TargetArch_riscv64) {
+		    asm_check_arch() == TargetArch_riscv64) {
 			// Synthesized register sources (e.g. ra in `jal off` -> `jal ra, off`) also
 			// write a physical register; record them so ra is treated as produced/clobbered.
 			u16 synth = 0;
@@ -2328,7 +2463,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 					continue;
 				}
 				if (alias.src[i] == asm_ctx->AliasSrc_LINK) {
-					GB_ASSERT(build_context.metrics.arch == TargetArch_riscv64);
+					GB_ASSERT(asm_check_arch() == TargetArch_riscv64);
 					synth |= 1<<0; // ClobberReg_RA
 				}
 			}
@@ -2414,7 +2549,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		{
 			// NOTE(bill): A written register with no operand width, e.g. an implicit write such as RDTSC -> EDX:EAX,
 			// is treated as a full-width definition, matching asm_full_kill_mask
-			u8 full = cast(u8)(build_context.metrics.ptr_size*8);
+			u8 full = cast(u8)asm_check_pointer_bits();
 			for (i32 idx = 0; idx < ASM_WIDTH_REG_COUNT; idx++) {
 				if ((facts->gen_regs & (1u << idx)) != 0 && facts->gen_reg_w.e[idx] == 0) {
 					facts->gen_reg_w.e[idx] = full;
@@ -2597,6 +2732,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 	i64         disp_val [MAX_VARIANT_COUNT] = {};
 	i64         disp_min [MAX_VARIANT_COUNT] = {}; // also an immediate's declared range (AsmMismatch_ImmBounds)
 	i64         disp_max [MAX_VARIANT_COUNT] = {};
+	i64         disp_scale[MAX_VARIANT_COUNT] = {};
 	if (best_form >= 0) {
 		auto &form = forms[best_form];
 		for_array(i, operands) {
@@ -2620,6 +2756,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				                                &disp_val[i], &disp_min[i], &disp_max[i])) {
 					ok = false;
 					m  = AsmMismatch_DispRange;
+					disp_scale[i] = asm_hook_memory_disp_scale(asm_ctx, form, type, 0);
 				}
 				if (dst == AsmOperand_Immediate && i < MAX_VARIANT_COUNT) {
 					int in_range = check_asm_immediate_table_range(asm_ctx, form, type, &operands[i], &disp_min[i], &disp_max[i]);
@@ -2662,7 +2799,11 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		end_error_block();
 		begin_error_block();
 
-		if (m == AsmMismatch_DispRange) {
+		if (m == AsmMismatch_DispRange && disp_scale[i] > 1 &&
+		    disp_min[i] <= disp_val[i] && disp_val[i] <= disp_max[i]) {
+			error(operands[i].expr, "'%.*s' operand-%td memory displacement %lld is not a multiple of the %lld-byte access size",
+			      LIT(name), i, cast(long long)disp_val[i], cast(long long)disp_scale[i]);
+		} else if (m == AsmMismatch_DispRange) {
 			gbString range = asm_describe_range(disp_min[i], disp_max[i], "offset");
 			error(operands[i].expr, "'%.*s' operand-%td memory displacement %lld does not fit in %s",
 			      LIT(name), i, cast(long long)disp_val[i], range);
@@ -2928,7 +3069,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			break;
 		case AsmMemoryOperand_Pre:
 		case AsmMemoryOperand_Post:
-			if (build_context.metrics.arch != TargetArch_arm64) {
+			if (asm_check_arch() != TargetArch_arm64) {
 				error(expr, "#pre/#post asm memory operands are not supported by the target platform");
 			}
 			break;
@@ -3168,7 +3309,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		// base and index must be the same width
 		// AArch64 register-offset addressing allows a 32-bit index with a 64-bit base
 		// (extended-register form: uxtw/sxtw). Other targets require equal widths.
-		bool ext_index_ok = build_context.metrics.arch == TargetArch_arm64 &&
+		bool ext_index_ok = asm_check_arch() == TargetArch_arm64 &&
 		                    base_w == 64 && index_w == 32;
 		if (have_base && have_index && base_w != index_w && !ext_index_ok) {
 			Ast *at = base.expr ? base.expr : expr;
@@ -3227,7 +3368,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 					}
 
 					if (op.kind == Token_Shr) {
-						if (build_context.metrics.arch != TargetArch_arm64) {
+						if (asm_check_arch() != TargetArch_arm64) {
 							error(op, "The target platform does not support '%.*s' for shifting scale parameters in memory operands", LIT(op.string));
 						}
 					}
@@ -3384,7 +3525,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			}
 		}
 
-		if (build_context.metrics.arch != TargetArch_arm64) {
+		if (asm_check_arch() != TargetArch_arm64) {
 			error(expr, "The target platform does not support vector element extraction syntax");
 		}
 
@@ -3412,7 +3553,7 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			return;
 		}
 
-		if (build_context.metrics.arch != TargetArch_arm64) {
+		if (asm_check_arch() != TargetArch_arm64) {
 			error(expr, "Asm shifted/scaled register operands are not supported by the target platform");
 			return;
 		}
@@ -3470,6 +3611,18 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 }
 
 
+// `@(rsp)` marks RSP Microcode (asm_tables_rsp.cpp). The collector already read it to
+// set Entity.AsmTemplate.arch; here it only has to be accepted.
+gb_internal DECL_ATTRIBUTE_PROC(asm_template_decl_attribute) {
+	if (name == "rsp") {
+		if (value != nullptr) {
+			error(value, "Expected no value for '%.*s'", LIT(name));
+		}
+		return true;
+	}
+	return proc_decl_attribute(c, elem, name, value, ac);
+}
+
 // NOTE(bill): the signature is everything needed to call an asm template, the rest is checked by `check_asm_template_body`
 gb_internal bool check_asm_template_signature(CheckerContext *ctx, Entity *entity, DeclInfo *d) {
 	GB_ASSERT(entity->kind == Entity_AsmTemplate);
@@ -3507,7 +3660,7 @@ gb_internal bool check_asm_template_signature(CheckerContext *ctx, Entity *entit
 
 	AttributeContext ac = make_attribute_context({}, {});
 	if (d != nullptr) {
-		check_decl_attributes(ctx, d->attributes, proc_decl_attribute, &ac);
+		check_decl_attributes(ctx, d->attributes, asm_template_decl_attribute, &ac);
 	}
 	check_target_feature_attributes(ac, entity, type);
 	return true;
@@ -3525,6 +3678,24 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 	GB_ASSERT(type != nullptr && type->kind == Type_Proc);
 
 	check_asm_specs(asm_ctx, ctx, ate->param_scope, at->specs, &ate->decls);
+
+	if (char const *why = asm_hook_unpinned_parameter_reason(asm_ctx, 0)) {
+		for (auto const &ed : ate->decls) {
+			if (ed.entity == nullptr || ed.pin.len != 0 || ed.tie >= 0) {
+				continue;
+			}
+			bool tied_to = false; // the output of a tie shares its input's register
+			for (auto const &other : ate->decls) {
+				if (other.tied_entity == ed.entity || (other.tie >= 0 && other.tie < ate->decls.count && ate->decls[other.tie].entity == ed.entity)) {
+					tied_to = true;
+				}
+			}
+			if (!tied_to) {
+				error(ed.entity->token, "'asm' parameter '%.*s' is not pinned to a register: %s",
+				      LIT(ed.entity->token.string), why);
+			}
+		}
+	}
 
 	bool is_pure_annotated = false;
 	{ // check clobbers
@@ -3954,7 +4125,7 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 				if (r && asm_hook_pin_reject_reason(asm_ctx, r, 0) != nullptr) {
 					// already reported where the pin was declared
 				} else if (asm_ctx->reg_is_non_allocateable(r)) {
-					if (build_context.metrics.arch == TargetArch_amd64) {
+					if (asm_check_arch() == TargetArch_amd64) {
 						error(ed.entity->token,
 						      "'asm' output '%.*s' is pinned to a register '%%%.*s' which cannot be an output; "
 						      "read it into a general-purpose register in the body instead "
@@ -4115,9 +4286,17 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 	}
 }
 
+// Serialises an @(rsp) template's body check between its queued check and
+// intrinsics.rsp_template_code, so it runs once (check_asm_rsp.cpp).
+gb_global RecursiveMutex rsp_template_body_mutex;
+
 gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, DeclInfo *d) {
 	GB_ASSERT(e->decl_info == d);
 	if (!check_asm_template_signature(c, e, d)) {
+		return;
+	}
+	if (e->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+		check_asm_template_body_later(c, e); // checked for the RSP on every build target
 		return;
 	}
 	switch (build_context.metrics.arch) {
@@ -4128,7 +4307,7 @@ gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, De
 		check_asm_template_body_later(c, e);
 		break;
 	default:
-		error(e->token, "asm templates are not currently supported for this target");
+		error(e->token, "asm templates are currently only supported on -target:*_amd64, *_riscv64, *_arm64 or *_mips32be, or as @(rsp) Microcode");
 		break;
 	}
 }
@@ -4148,6 +4327,19 @@ gb_internal void check_asm_template_body_from_entity(CheckerContext *c, Entity *
 	ctx.scope = d->scope;
 	ctx.decl  = d;
 
+	if (e->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+		// The template's queued check and intrinsics.rsp_template_code may both ask for it.
+		MUTEX_GUARD(&rsp_template_body_mutex);
+		if (e->flags & EntityFlag_ProcBodyChecked) {
+			return;
+		}
+		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
+		check_asm_template_body(&g_asm_rsp, &ctx, e, d);
+		add_deps_from_child_to_parent(d);
+		e->flags |= EntityFlag_ProcBodyChecked;
+		return;
+	}
+
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		check_asm_template_body(&g_asm_amd64, &ctx, e, d);
 	} else if (build_context.metrics.arch == TargetArch_riscv64) {
@@ -4163,3 +4355,5 @@ gb_internal void check_asm_template_body_from_entity(CheckerContext *c, Entity *
 	add_deps_from_child_to_parent(d);
 	e->flags |= EntityFlag_ProcBodyChecked;
 }
+
+#include "check_asm_rsp.cpp"

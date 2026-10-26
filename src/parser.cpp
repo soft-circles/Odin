@@ -3047,15 +3047,8 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 		asm_instructions = slice_from_array(instructions);
 	}
 
-	if (build_context.build_mode == BuildMode_RSP_Assembly ||
-	    build_context.metrics.arch == TargetArch_amd64 ||
-	    build_context.metrics.arch == TargetArch_riscv64 ||
-	    build_context.metrics.arch == TargetArch_arm64 ||
-	    build_context.metrics.arch == TargetArch_mips32be) {
-	    	// okay
-	} else {
-		syntax_error(token, "asm templates are currently only supported on -target:*_amd64 or -target:*_riscv64 or -target:*_arm64 or -target:*_mips32be");
-	}
+	// NOTE: templates parse on every target: an @(rsp) template is checked for the RSP whatever the
+	// build targets, and check_asm_template_from_entity rejects any other on a target without a table.
 
 	Ast *asm_template = alloc_ast_node(f, Ast_AsmTemplate);
 	asm_template->AsmTemplate.token            = token;
