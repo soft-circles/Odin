@@ -110,10 +110,11 @@ edge_forms :: asm(p: ^u32) [p = %s1] {
 	nop
 }
 
-// `#unroll for` over a constant slice, a constant array with its index, register lists
-// (a variable spelled bare and with '%'), a register range, an empty range, and a
-// branch to a label outside the unrolled body.
-UNROLL_OFFSETS :: []i32{-8, 0, 4, 32764}
+// `#unroll for` over constant fixed arrays (one with its index), register lists (a
+// variable spelled bare and with '%'), a register range, an empty range, a negative
+// range, a branch to a label outside the unrolled body, and an integer variable inside
+// casts, compound literals, index and type expressions.
+UNROLL_OFFSETS :: [?]i32{-8, 0, 4, 32764}
 UNROLL_STEPS   :: [3]i32{1, -2, 3}
 
 @(rsp)
@@ -139,6 +140,17 @@ unroll_forms :: asm(p: ^u32, count: i32) [p = %s1, count = %s3] {
 	#unroll for _, i in 2..=3 {
 		bgtz  count, .top
 		addiu count, count, i
+	}
+	#unroll for n in -2..=-1 {
+		addiu %t0, %t0, (cast(i32)n + 1)
+		addiu %t0, %t0, ([2]i32{n, 7}[0])
+		addiu %t0, %t0, (size_of([n+3]u32))
+		addiu %t0, %t0, (UNROLL_STEPS[n+2])
+		addiu %t0, %t0, (-n when n < -1 else 16*n)
+		addiu %t0, %t0, (len("abcd"[n+2:]))
+	}
+	#unroll for top in (max(i64)-1)..=max(i64) { // the top of i64's range: two iterations
+		addiu %t0, %t0, (top - max(i64))
 	}
 }
 
@@ -226,6 +238,18 @@ expected_unroll :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynamic]r
 	for i in i64(0)..<2 {
 		append(&code, rsp.inst_bgtz(rsp.S3, TOP), rsp.inst_addiu(rsp.S3, rsp.S3, i))
 	}
+	for n in i64(-2)..=-1 {
+		steps := [3]i64{1, -2, 3}
+		append(&code,
+			rsp.inst_addiu(rsp.T0, rsp.T0, n + 1),
+			rsp.inst_addiu(rsp.T0, rsp.T0, n),
+			rsp.inst_addiu(rsp.T0, rsp.T0, 4*(n + 3)),
+			rsp.inst_addiu(rsp.T0, rsp.T0, steps[n + 2]),
+			rsp.inst_addiu(rsp.T0, rsp.T0, -n if n < -1 else 16*n),
+			rsp.inst_addiu(rsp.T0, rsp.T0, 4 - (n + 2)),
+		)
+	}
+	append(&code, rsp.inst_addiu(rsp.T0, rsp.T0, -1), rsp.inst_addiu(rsp.T0, rsp.T0, 0))
 	return
 }
 

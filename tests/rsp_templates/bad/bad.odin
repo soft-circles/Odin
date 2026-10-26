@@ -239,7 +239,7 @@ unroll_misuse :: asm(p: ^u32, count: i32) [p = %s1, count = %s3] {
 .again: // ERROR: An asm label can't be declared inside an '#unroll for' body
 		addiu %t0, %t0, i
 	}
-	#unroll for x in global { // ERROR: An '#unroll for' in an @(rsp) template iterates over a constant range, a constant array of integers or a register group
+	#unroll for x in global { // ERROR: An '#unroll for' in an @(rsp) template iterates over a constant range, a constant fixed array of integers or a register group
 		sw    %t0, [p + x]
 	}
 	#unroll for i in 0..<count { // ERROR: 'count' is a parameter of the template, a register at run time
@@ -266,6 +266,65 @@ unroll_misuse :: asm(p: ^u32, count: i32) [p = %s1, count = %s3] {
 		nop
 	}
 	#unroll for r in {%v10, %v11} {
-		addiu %t0, %t0, (r) // ERROR: Undeclared name: r
+		addiu %t0, %t0, (r) // ERROR: 'r' is the register variable of an '#unroll for', named as an operand
+	}
+}
+
+UNROLL_SLICE :: []i32{1, 2}
+
+@(rsp)
+unroll_review :: asm(p: ^u32, count: i32) [p = %s1, count = %s3, word: u32 = %t2] {
+	#unroll for word in 0..<2 { // ERROR: '#unroll for' variable 'word' is a scratch register of the template
+		nop
+	}
+	#unroll for i in u64(0)..<u64(0x8000_0000_0000_0002) { // ERROR: An '#unroll for' range bound must fit in an i64
+		nop
+	}
+	#unroll for i in 0..<((1<<64)+2) { // ERROR: An '#unroll for' range bound must fit in an i64
+		nop
+	}
+	#unroll for i in UNROLL_SLICE { // ERROR: Cannot iterate over 'UNROLL_SLICE' of type '[]i32' in an '#unroll for' statement
+		nop
+	}
+	#unroll for i in 0..<(count + 1) { // ERROR: 'count' is a parameter of the template, a register at run time
+		nop
+	}
+	#unroll for r in {%t0, %t1} {
+		#unroll for j in 0..<r { // ERROR: 'r' is the register variable of an '#unroll for', named as an operand
+			nop
+		}
+	}
+	#unroll for r in {%v14..=%v10} { // ERROR: An '#unroll for' register range steps upward
+		nop
+	}
+	#unroll for r in {%t5..=%t3} { // ERROR: An '#unroll for' register range steps upward
+		nop
+	}
+	#unroll for i, i in 0..<2 { // ERROR: '#unroll for' variable 'i' is declared twice in this '#unroll for'
+		nop
+	}
+	#unroll for i in 0..<1025 { // ERROR: Too many iterations for an '#unroll for' in an @(rsp) template, expected <= 1024
+		nop
+	}
+}
+
+// The template's `#unroll for`s expand to at most 1024 instructions in all, reported at
+// the outermost `#unroll for`
+@(rsp)
+unroll_nested_total :: asm() {
+	#unroll for i in 0..<1024 { // ERROR: '#unroll for' expands past 1024 instructions in this @(rsp) template
+		#unroll for j in 0..<1024 {
+			nop
+		}
+	}
+}
+
+@(rsp)
+unroll_nested_empty :: asm() {
+	#unroll for i in 0..<1024 { // ERROR: '#unroll for' expands past 1024 instructions in this @(rsp) template
+		#unroll for j in 0..<1024 {
+			#unroll for k in 0..<1024 {
+			}
+		}
 	}
 }

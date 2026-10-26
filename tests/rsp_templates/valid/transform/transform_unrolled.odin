@@ -4,11 +4,11 @@ package transform
 
 @(rsp)
 transform_unrolled :: asm(args: ^Args, input: ^Point, output: ^Point, count: i32, scratch: ^[20]u32) [args = %s6, input = %s1, output = %s2, count = %s3, scratch = %s7] {
-	// coefficients: a and c, then b and d (4 bytes further into Args), each splatted
-	// to the four words at 32*half and 32*half + 16
-	#unroll for half in 0..<2 {
-		lh    %t0, [args + (offset_of(Args, a) + 4*half)]
-		lh    %t1, [args + (offset_of(Args, c) + 4*half)]
+	// coefficients: a and c, then b and d, each pair splatted to the four words at
+	// 32*half and 32*half + 16
+	#unroll for first, half in FIRST_OFFSETS {
+		lh    %t0, [args + first]
+		lh    %t1, [args + (SECOND_OFFSETS[half])]
 		sra   %t4, %t0, 8
 		sll   %t4, %t4, 16
 		sra   %t5, %t1, 8
@@ -47,4 +47,6 @@ transform_unrolled :: asm(args: ^Args, input: ^Point, output: ^Point, count: i32
 	addiu output, output, 16
 }
 
-SPLAT_OFFSETS :: []i32{0, 4, 8, 12}
+SPLAT_OFFSETS  :: [?]i32{0, 4, 8, 12}
+FIRST_OFFSETS  :: [2]uintptr{offset_of(Args, a), offset_of(Args, b)}
+SECOND_OFFSETS :: [2]uintptr{offset_of(Args, c), offset_of(Args, d)}

@@ -307,13 +307,31 @@ value: the template's file, the line and column of its name, and its name as
 `#unroll for v[, i] in X { ... }` in an `@(rsp)` body (`AsmUnroll`, parsed by
 `parse_asm_unroll`) is expanded by `rsp_expand_unrolls` before the shared
 check, so the check, the CFG and the encoder see a flat body. `X` is a constant
-range, a constant array or slice of integers, or a register group
-(`{%v10..=%v14}`, `{%t3, %t5}`). Each iteration is a clone of the body with an
-integer variable replaced by a literal (in immediates, memory terms and
-parenthesised expressions) and a register variable (`%r`, `%r.e0` or bare `r`)
-replaced by the iteration's register. Clones keep their tokens, so errors and
+range, a constant fixed array of integers, or a register group
+(`{%v10..=%v14}`, `{%t3, %t5}`). A slice is rejected with upstream's
+`#unroll for` message and a hint to write `[?]T{...}`. Each iteration is a clone
+of the body (always, so no two iterations share nodes) with an integer variable
+replaced by a literal wherever it names a value, and a register variable (`%r`,
+`%r.e0` or bare `r` as an operand) replaced by the iteration's register.
+`rsp_unroll_each_child` lists the children walked: every expression and type
+kind, but not a selector's field, a compound literal's `field =` name,
+`offset_of`'s field, or the inside of struct, union, enum, bit_field and
+procedure types. The walk is an AST rewrite rather than a per-iteration scope
+because the shared operand check resolves names in the template's parameter
+scope and its parent itself (`check_asm_instruction_operand`), so a scope would
+need changes in upstream-owned code. Clones keep their tokens, so errors and
 `Rsp_Code_Line.line` are the body's lines. Labels inside an unrolled body are
-rejected. A CPU template's `#unroll for` is an error in `check_asm_template_body`.
+rejected. A CPU template's `#unroll for` is an error in
+`check_asm_template_body`, and `-build-mode:rsp-asm` rejects it in
+`rsp_collect_instructions`.
+
+The parser change that `{%a, %b}` register groups needed is in upstream-owned
+`src/parser.cpp` (`parse_asm_operand`) and is worth upstreaming: before it,
+`{%a, %b}` dropped `%a`, and `{%a %b}` without a comma is now a syntax error.
+
+Most of the expansion's size is its rejections, each with a test in
+[tests/rsp_templates/bad](tests/rsp_templates/bad), and the child walk;
+the expansion itself is short.
 
 The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
 plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
@@ -340,6 +358,15 @@ Preserve these guarantees:
   form. The instruction after a branch is its delay slot; nothing is inserted.
 - Def-before-use, delay-slot structure and VU effects stay in Odin64's
   generator check.
+- An `#unroll for` iterates over constants that fit in an i64; its count is
+  computed before any iteration, is at most 1024, and the template's
+  `#unroll for`s expand to at most 1024 instructions in all (IMEM's words),
+  reported at the outermost `#unroll for`, with an iteration that expands to no
+  instruction counting as one. A loop variable can't take the name of a
+  parameter, a scratch register (`[word: u32 = %t2]`, compared by name because
+  the specs are declared after the expansion), an RSP register, the other
+  variable of the same `#unroll for` or an enclosing one's. A parameter or a
+  register variable in an `#unroll for`'s bounds is reported as such.
 
 Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
 `memory_disp_scale`, `input_parameters_are_writable`,
