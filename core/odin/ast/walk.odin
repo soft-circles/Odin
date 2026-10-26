@@ -462,18 +462,16 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		if n.segment_override != nil {
 			walk(v, n.segment_override)
 		}
-		walk(v, n.base)
-		if n.index != nil {
-			walk(v, n.index)
-		}
-		if n.scale != nil {
-			walk(v, n.scale)
-		}
-		if n.disp != nil {
-			walk(v, n.disp)
+		for term in n.terms {
+			walk(v, term)
 		}
 		if n.type != nil {
 			walk(v, n.type)
+		}
+	case ^Asm_Memory_Term:
+		walk(v, n.operand)
+		if n.scale != nil {
+			walk(v, n.scale)
 		}
 	case ^Asm_Register_Group:
 		walk_expr_list(v, n.registers)
@@ -482,6 +480,13 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		}
 	case ^Asm_Directive:
 		walk_expr_list(v, n.operands)
+	case ^Asm_Unroll:
+		walk(v, n.val0)
+		if n.val1 != nil {
+			walk(v, n.val1)
+		}
+		walk(v, n.expr)
+		walk_stmt_list(v, n.instructions)
 	case:
 		fmt.panicf("ast.walk: unexpected node type %T", n)
 	}

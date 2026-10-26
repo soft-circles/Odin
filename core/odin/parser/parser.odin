@@ -4072,6 +4072,7 @@ parse_asm_register :: proc(p: ^Parser) -> ^ast.Asm_Register {
 		flag := expect_token_after(p, .Ident, "register name and period for the flag")
 		if flag.kind == .Ident {
 			reg.flag = flag.text
+			reg.end  = end_pos(flag) // `%v01.q0` ends after its accessor
 		}
 	}
 	return reg
@@ -4133,17 +4134,9 @@ parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
 		if allow_memory_operand {
 			open := expect_token(p, .Open_Bracket)
 			segment_override: ^ast.Expr
-			base:  ^ast.Expr
-			index: ^ast.Expr
-			scale: ^ast.Expr
-			disp:  ^ast.Expr
-			type:  ^ast.Expr
+			type: ^ast.Expr
 
-			index_op: tokenizer.Token
-			scale_op: tokenizer.Token
-			disp_op:  tokenizer.Token
-
-			base = parse_asm_operand(p, false)
+			base := parse_asm_operand(p, false)
 
 			if allow_token(p, .Colon) {
 				// [segment: ...]
@@ -4156,21 +4149,41 @@ parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
 				base = parse_asm_operand(p, false)
 			}
 
-			// [base]
-			// [base + index]
-			// [base + index*scale]  // *, <<, >>
-			// [base + index*scale + disp]
-			if allow_token(p, .Add) || allow_token(p, .Sub) {
-				index_op = p.prev_tok
-				index = parse_asm_operand(p, false)
+			// `term { (+|-) term }`, each term `operand [ (*|<<|>>) operand ]`,
+			// as in the compiler's parser (src/parser.cpp)
+			terms: [dynamic]^ast.Asm_Memory_Term
+			op := tokenizer.Token{kind = .Add, text = "+"}
+			for base != nil ||
+			    (p.curr_tok.kind != .EOF &&
+			     p.curr_tok.kind != .Semicolon &&
+			     p.curr_tok.kind != .Close_Bracket) {
+				term_operand: ^ast.Expr
+				if base != nil {
+					term_operand = base
+					base = nil
+				} else {
+					term_operand = parse_asm_operand(p, false)
+				}
+				scale_op: tokenizer.Token
+				scale:    ^ast.Expr
 				if allow_token(p, .Mul) || allow_token(p, .Shl) || allow_token(p, .Shr) {
 					scale_op = p.prev_tok
-					scale = parse_asm_operand(p, false)
+					scale    = parse_asm_operand(p, false)
 				}
+
+				start := op.pos if op.pos.line > 0 else (term_operand.pos if term_operand != nil else p.prev_tok.pos)
+				term := ast.new(ast.Asm_Memory_Term, start, end_pos(p.prev_tok))
+				term.op       = op
+				term.operand  = term_operand
+				term.scale_op = scale_op
+				term.scale    = scale
+				append(&terms, term)
+
 				if allow_token(p, .Add) || allow_token(p, .Sub) {
-					disp_op = p.prev_tok
-					disp = parse_asm_operand(p, false)
+					op = p.prev_tok
+					continue
 				}
+				break
 			}
 
 			close := expect_token(p, .Close_Bracket)
@@ -4184,13 +4197,7 @@ parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
 			mem.kind             = .Default
 			mem.open             = open
 			mem.segment_override = segment_override
-			mem.base             = base
-			mem.index_op         = index_op
-			mem.index            = index
-			mem.scale_op         = scale_op
-			mem.scale            = scale
-			mem.disp_op          = disp_op
-			mem.disp             = disp
+			mem.terms            = terms[:]
 			mem.close            = close
 			mem.type             = type
 			return mem
@@ -4214,12 +4221,15 @@ parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
 				append(&registers, second_reg)
 				allow_token(p, .Comma) // trailing comma
 			case:
-				append(&registers, first_reg)
-				allow_token(p, .Comma) // separator/trailing
-				for p.curr_tok.kind != .Close_Brace && p.curr_tok.kind != .EOF {
+				// `{%a}`, `{%a, %b}`, `{%a, %b,}`; `{%a %b}` is a syntax error, as in the compiler
+				if first_reg != nil {
+					append(&registers, first_reg)
+				}
+				for allow_token(p, .Comma) &&
+				    p.curr_tok.kind != .Close_Brace &&
+				    p.curr_tok.kind != .EOF {
 					reg := parse_asm_operand(p, false)
 					append(&registers, reg)
-					allow_token(p, .Comma) or_break
 				}
 			}
 
@@ -4253,6 +4263,27 @@ parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
 		ie.index = index
 		ie.close = close.pos
 		operand = ie
+	}
+
+	// `%t0 << 2` and `x * 4` as an operand, as in the compiler's parser
+	shiftable := false
+	if operand != nil {
+		#partial switch _ in operand.derived_expr {
+		case ^ast.Asm_Register, ^ast.Ident:
+			shiftable = true
+		}
+	}
+	if allow_memory_operand && shiftable {
+		#partial switch p.curr_tok.kind {
+		case .Mul, .Shl, .Shr:
+			op := advance_token(p)
+			amount := parse_asm_operand(p, false)
+			be := ast.new(ast.Binary_Expr, operand.pos, amount.end if amount != nil else end_pos(op))
+			be.left  = operand
+			be.op    = op
+			be.right = amount
+			operand = be
+		}
 	}
 	return operand
 }
@@ -4323,6 +4354,9 @@ parse_asm_instruction :: proc(p: ^Parser) -> ^ast.Stmt {
 	case .Hash:
 		token := expect_token(p, .Hash)
 		name  := expect_token(p, .Ident)
+		if name.text == "unroll" {
+			return parse_asm_unroll(p, token)
+		}
 		operands := parse_asm_operands(p)
 		dir := ast.new(ast.Asm_Directive, token.pos, end_pos(p.prev_tok))
 		dir.token    = token
@@ -4334,6 +4368,62 @@ parse_asm_instruction :: proc(p: ^Parser) -> ^ast.Stmt {
 	error(p, p.curr_tok.pos, "expected an 'asm' instruction, got '%s'", p.curr_tok.text)
 	advance_token(p)
 	return nil
+}
+
+// `#unroll for v[, i] in <range | constant array | {register group}> { instructions }`
+// in an asm template body, as in the compiler's parser (src/parser.cpp, parse_asm_unroll).
+// The compiler expands it in the checker; only @(rsp) templates accept it.
+parse_asm_unroll :: proc(p: ^Parser, token: tokenizer.Token) -> ^ast.Asm_Unroll {
+	for_tok := expect_token(p, .For)
+
+	val0, val1: ^ast.Expr
+	idents := parse_ident_list(p, false)
+	switch len(idents) {
+	case 1:
+		val0 = idents[0]
+	case 2:
+		val0 = idents[0]
+		val1 = idents[1]
+	case:
+		error(p, for_tok.pos, "expected either 1 or 2 identifiers")
+	}
+	in_tok := expect_token(p, .In)
+
+	expr: ^ast.Expr
+	if p.curr_tok.kind == .Open_Brace {
+		expr = parse_asm_operand(p, true) // a register group
+	} else {
+		prev_allow_range := p.allow_range
+		prev_level       := p.expr_level
+		p.allow_range = true
+		p.expr_level  = -1 // `x in 0..<4 {`: the brace opens the body, not a compound literal
+		expr = parse_expr(p, false)
+		p.expr_level  = prev_level
+		p.allow_range = prev_allow_range
+	}
+
+	open := expect_token(p, .Open_Brace)
+	instrs: [dynamic]^ast.Stmt
+	for p.curr_tok.kind != .Close_Brace &&
+	    p.curr_tok.kind != .EOF {
+		instruction := parse_asm_instruction(p)
+		if instruction != nil {
+			append(&instrs, instruction)
+		}
+	}
+	close := expect_token(p, .Close_Brace)
+
+	unroll := ast.new(ast.Asm_Unroll, token.pos, end_pos(close))
+	unroll.token        = token
+	unroll.for_pos      = for_tok.pos
+	unroll.val0         = val0
+	unroll.val1         = val1
+	unroll.in_pos       = in_tok.pos
+	unroll.expr         = expr
+	unroll.open         = open.pos
+	unroll.instructions = instrs[:]
+	unroll.close        = close.pos
+	return unroll
 }
 
 parse_asm_signature :: proc(p: ^Parser, asm_token: tokenizer.Token) -> ^ast.Proc_Type {

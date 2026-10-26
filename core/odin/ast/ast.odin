@@ -927,18 +927,24 @@ Asm_Memory_Operand_Kind :: enum u8 {
 	Post,
 }
 
+// One term of a memory operand: `op operand [scale_op scale]`.
+// The first term's `op` is a synthesized `+` with no position.
+Asm_Memory_Term :: struct {
+	using node: Expr,
+	op:       tokenizer.Token, // + or -
+	operand:  ^Expr,
+	scale_op: tokenizer.Token, // *, << or >>; .Invalid without a scale
+	scale:    ^Expr,           // possibly nil
+}
+
+// `[segment_override: term { (+|-) term }]:type`, as in the compiler's parser.
+// Term order is free: `[8 + p]` is `[p + 8]`.
 Asm_Memory_Operand :: struct {
 	using node: Expr,
 	kind:             Asm_Memory_Operand_Kind,
 	open:             tokenizer.Token,
 	segment_override: ^Expr,
-	base:             ^Expr,
-	index_op:         tokenizer.Token,
-	index:            ^Expr,
-	scale_op:         tokenizer.Token,
-	scale:            ^Expr,
-	disp_op:          tokenizer.Token,
-	disp:             ^Expr,
+	terms:            []^Asm_Memory_Term,
 	close:            tokenizer.Token,
 	type:             ^Expr,
 }
@@ -957,6 +963,22 @@ Asm_Directive :: struct {
 	token:    tokenizer.Token,
 	name:     string,
 	operands: []^Expr,
+}
+
+// `#unroll for val0[, val1] in expr { instructions }` in an asm template body.
+// `expr` is a range, a constant array, or an `Asm_Register_Group`.
+// The compiler expands it in the checker; only @(rsp) templates accept it.
+Asm_Unroll :: struct {
+	using node: Stmt,
+	token:        tokenizer.Token, // #
+	for_pos:      tokenizer.Pos,
+	val0:         ^Expr,
+	val1:         ^Expr, // possibly nil
+	in_pos:       tokenizer.Pos,
+	expr:         ^Expr,
+	open:         tokenizer.Pos,
+	instructions: []^Stmt,
+	close:        tokenizer.Pos,
 }
 
 
@@ -1056,8 +1078,10 @@ Any_Node :: union {
 	^Asm_Label_Decl,
 	^Asm_Instruction,
 	^Asm_Memory_Operand,
+	^Asm_Memory_Term,
 	^Asm_Register_Group,
 	^Asm_Directive,
+	^Asm_Unroll,
 }
 
 
@@ -1118,6 +1142,7 @@ Any_Expr :: union {
 	^Asm_Register,
 	^Asm_Label,
 	^Asm_Memory_Operand,
+	^Asm_Memory_Term,
 	^Asm_Register_Group,
 }
 
@@ -1154,4 +1179,5 @@ Any_Stmt :: union {
 	^Asm_Instruction,
 	^Asm_Label_Decl,
 	^Asm_Directive,
+	^Asm_Unroll,
 }

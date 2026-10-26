@@ -354,6 +354,16 @@ The parser change that `{%a, %b}` register groups needed is in upstream-owned
 `src/parser.cpp` (`parse_asm_operand`) and is worth upstreaming: before it,
 `{%a, %b}` dropped `%a`, and `{%a %b}` without a comma is now a syntax error.
 
+`core:odin/parser` (upstream-owned) reads template bodies the same way, since
+tools such as Odin64's verify checks parse every source file with it:
+`ast.Asm_Unroll` is `#unroll for`, a memory operand is upstream's flat term
+list (`ast.Asm_Memory_Term`, from odin-lang/Odin 654b3a889, which core:odin had
+not followed), `%t0 << 2` is an operand, a register's end includes its accessor
+(`%v01.q0`), and `{%a %b}` is a syntax error. All but `#unroll for` are worth
+upstreaming. `tests/core/odin/test_asm_templates.odin` parses every file in
+[tests/rsp_templates](tests/rsp_templates) with it; when the compiler's
+template syntax changes, mirror it there.
+
 Most of the expansion's size is its rejections, each with a test in
 [tests/rsp_templates/bad](tests/rsp_templates/bad), and the child walk;
 the expansion itself is short.
