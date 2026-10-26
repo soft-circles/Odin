@@ -132,6 +132,8 @@ Rsp_Code_Line :: struct {
 }
 // The encoded words of the @(rsp) asm template `t`, one per instruction, as a constant
 rsp_template_code :: proc(t: $T) -> []Rsp_Code_Line ---
+// Where the @(rsp) asm template `t` is declared: its file, the line and column of its name, and its name as `procedure`
+rsp_template_location :: proc(t: $T) -> runtime.Source_Code_Location ---
 
 atomic_thread_fence :: proc(order: Atomic_Memory_Order) ---
 atomic_signal_fence :: proc(order: Atomic_Memory_Order) ---

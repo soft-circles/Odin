@@ -166,6 +166,69 @@ class Check(unittest.TestCase):
                                   output)
 
 
+    def test_backward_branch_range_is_checked(self):
+        # a branch back to the first instruction from index n reaches -(n+1) instructions
+        for gap, ok in ((32767, True), (32768, False)):
+            with self.subTest(gap=gap):
+                directory = unique_dir(f"back-{gap}")
+                body = "\n".join([".far:"] + ["\tnop"] * gap + ["\tbgtz  %s1, .far", "\tnop"])
+                (directory / "branch.odin").write_text(
+                    "package branch\n\nimport \"base:intrinsics\"\nimport \"core:fmt\"\n\n"
+                    f"@(rsp)\nfar :: asm() {{\n{body}\n}}\n\n"
+                    "FAR :: intrinsics.rsp_template_code(far)\n\n"
+                    "main :: proc() {\n\tcode := FAR\n\tfmt.printfln(\"%08x\", code[len(code)-2].word)\n}\n")
+                code, output = run_odin("check", directory, f"-target:{host_target()}")
+                if not ok:
+                    self.assertNotEqual(code, 0)
+                    self.assertIn("'bgtz' branches -32769 instructions, beyond the -32768..=32767 a branch reaches",
+                                  output)
+                    continue
+                self.assertEqual(code, 0, output)
+                if target_has_backend(host_target()):
+                    # bgtz $s1 with offset 0x8000: -32768 words
+                    code, output = run_odin("run", directory, f"-out:{unique_dir('back-out') / 'branch'}")
+                    self.assertEqual(code, 0, output)
+                    self.assertEqual(output.strip().splitlines()[-1], "1e208000")
+
+    def test_mutual_reference_is_reported_once(self):
+        # Whichever of a and b is checked first, the other's use of it is the one error,
+        # and nothing repeats it or reports "already pinned".
+        directory = unique_dir("mutual")
+        (directory / "mutual.odin").write_text(
+            "package mutual\n\nimport \"base:intrinsics\"\n\n"
+            "@(rsp)\na :: asm(input: ^u32) [input = %s1] {\n"
+            "\taddiu input, input, (len(intrinsics.rsp_template_code(b)))\n}\n\n"
+            "@(rsp)\nb :: asm(input: ^u32) [input = %s1] {\n"
+            "\taddiu input, input, (len(intrinsics.rsp_template_code(a)))\n}\n\n"
+            "A :: intrinsics.rsp_template_code(a)\n")
+        for target in ("n64", host_target()):
+            with self.subTest(target=target):
+                code, output = check_package(directory, target)
+                self.assertNotEqual(code, 0)
+                found = diagnostics(output)
+                cycle = [d for d in found if "refers to the template being checked" in d[3]]
+                self.assertEqual(len(cycle), 1, output)
+                self.assertIn(cycle[0][1], (7, 12))
+                self.assertIn(cycle[0][3], ("'intrinsics.rsp_template_code(a)' refers to the template being checked; "
+                                            "an @(rsp) template's words cannot depend on its own",
+                                            "'intrinsics.rsp_template_code(b)' refers to the template being checked; "
+                                            "an @(rsp) template's words cannot depend on its own"))
+                self.assertEqual({d[1] for d in found}, {7, 12}, output)  # the uses' own errors: len is not constant
+                self.assertNotIn("pinned", output)
+                self.assertNotIn("Invalid declaration value", output)
+
+    def test_cpu_register_flag_is_reported_once(self):
+        # The @(rsp) accessor check runs only for a flag the table accepted, so an amd64
+        # template's bad flag keeps its one error.
+        directory = unique_dir("flag")
+        (directory / "flag.odin").write_text("package flag\n\nt :: asm() {\n\tsetz %rcx.zf\n}\n")
+        code, output = check_package(directory, "linux_amd64")
+        self.assertNotEqual(code, 0)
+        at_flag = [d[3] for d in diagnostics(output)
+                   if d[1] == 4 and (".zf" in d[3] or "register flag" in d[3].lower())]
+        self.assertEqual(at_flag, ["Register flags can only be called on %flags"], output)
+
+
 class Encode(unittest.TestCase):
     def test_every_form_matches_rexcode(self):
         target = host_target()
@@ -177,14 +240,28 @@ class Encode(unittest.TestCase):
 
         lines = template_instruction_lines(HERE / "golden" / "golden.odin")
         lines.update(template_instruction_lines(HERE / "valid" / "transform" / "transform.odin"))
+        lines.update(template_instruction_lines(HERE / "valid" / "valid.odin"))
         printed = {}
         for row in output.splitlines():
             parts = row.split()
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
-        for name in ("scalar_forms", "vector_forms", "transform"):
+        for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "transform"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
+
+        # intrinsics.rsp_template_location: the declaration's file, line and column
+        locations = {}
+        for row in output.splitlines():
+            parts = row.split(" ", 4)
+            if len(parts) == 5 and parts[0] == "location":
+                locations[parts[1]] = (int(parts[2]), int(parts[3]), Path(parts[4]).resolve())
+        for name, path in (("transform", HERE / "valid" / "transform" / "transform.odin"),
+                           ("fill", HERE / "valid" / "valid.odin")):
+            with self.subTest(location=name):
+                declared = [n for n, text in enumerate(path.read_text().splitlines(), 1)
+                            if text.startswith(f"{name} :: asm")]
+                self.assertEqual(locations.get(name), (declared[0], 1, path.resolve()))
 
     def test_constant_is_in_the_target_byte_order(self):
         # transform's first word is `lh $t0, 0($s6)`, 0x86c80000, from line 17

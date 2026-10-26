@@ -10,6 +10,23 @@ Args :: struct {
 	b: i32,
 }
 
+// A pointer field makes the layout the build target's: `a` is at 8 on a 64-bit host
+// and at 4 on the N64.
+Host_Args :: struct {
+	p: rawptr,
+	a: i16,
+}
+Inner :: struct {
+	n: [2]int,
+}
+Outer :: struct {
+	inner: Inner,
+	a:     i16,
+}
+HOST_A :: offset_of(Host_Args, a)
+
+global: i32
+
 @(rsp)
 ok :: asm(args: ^Args, input: ^u32, count: i32) [args = %s6, input = %s1, count = %s3] {
 	lh    %t0, [args + (offset_of(Args, a))]
@@ -109,12 +126,81 @@ with_value :: asm() {
 	nop
 }
 
+// What only the encoder rejects is still reported by `odin check`, though nothing
+// takes these templates' words. Each is its own template: a template is encoded only
+// when the rest of its check reported nothing.
 @(rsp)
 directive :: asm() {
 	nop
 	#byte 1 // ERROR: Asm directives are not supported in an @(rsp) template
 }
-DIRECTIVE :: intrinsics.rsp_template_code(directive) // ERROR: Invalid declaration value
+
+@(rsp)
+no_base :: asm() {
+	lw    %t0, [8] // ERROR: An @(rsp) memory operand is a base register plus a constant displacement
+}
+
+@(rsp)
+no_base_hex :: asm() {
+	sw    %t0, [0x100] // ERROR: An @(rsp) memory operand is a base register plus a constant displacement
+}
+
+@(rsp)
+no_base_vector :: asm() {
+	lqv   %v01, [16] // ERROR: An @(rsp) memory operand is a base register plus a constant displacement
+}
+
+@(rsp)
+not_constant :: asm() {
+	addiu %t0, %t0, global // ERROR: Only asm parameters or constants are allowed to be used within an 'asm' template
+}
+
+@(rsp)
+no_label :: asm() {
+	bgtz  %t0, .nowhere // ERROR: Undeclared asm label '.nowhere'
+	nop
+}
+
+// Sizes are the RSP's, whatever the host: no type whose size is the build target's.
+@(rsp)
+host_int :: asm(count: int, p: uintptr) [count = %s3, p = %s4] { // ERROR: 'count' has type 'int', whose size is the build target's
+	addiu count, count, -4
+}
+
+@(rsp)
+host_uint :: asm() -> (n: uint) [n = %s3] { // ERROR: 'n' has type 'uint', whose size is the build target's
+	addiu n, %zero, 4
+}
+
+// ... and no layout measure of a type whose layout is the build target's.
+@(rsp)
+host_layout :: asm(args: ^Host_Args) [args = %s6] {
+	lh    %t0, [args + (offset_of(Host_Args, a))] // ERROR: 'offset_of(Host_Args, a)' measures 'Host_Args', whose layout is the build target's because it holds 'rawptr'
+	lh    %t0, [args + HOST_A] // ERROR: 'offset_of(Host_Args, a)' measures 'Host_Args'
+	lh    %t0, [args + (offset_of(Outer, a))] // ERROR: 'offset_of(Outer, a)' measures 'Outer', whose layout is the build target's because it holds 'int'
+	addiu %t0, %t0, (size_of(int)) // ERROR: 'size_of(int)' measures 'int', whose layout is the build target's
+	addiu %t0, %t0, (align_of(uintptr)) // ERROR: 'align_of(uintptr)' measures 'uintptr'
+	addiu %t0, %t0, (size_of(Args) + size_of(i32))
+	lh    %t0, [args + (offset_of(Args, b))]
+}
+
+// A template cannot take its own words.
+@(rsp)
+self_reference :: asm(input: ^u32) [input = %s1] {
+	addiu input, input, (len(intrinsics.rsp_template_code(self_reference))) // ERROR: 'intrinsics.rsp_template_code(self_reference)' refers to the template being checked
+}
+
+// A template with errors still gives an `[]Rsp_Code_Line` (an empty one), so taking
+// its words adds no error, and the encoder repeats none of the check's.
+@(rsp)
+indexed :: asm(input: ^u32) [input = %s1] {
+	lw    %t0, [input + %t1] // ERROR: The target platform does not support memory indexing within memory operands
+}
+INDEXED :: intrinsics.rsp_template_code(indexed)
+
+indexed_words :: proc() -> int {
+	return len(INDEXED)
+}
 
 // An @(rsp) template is Microcode, never a CPU callee.
 group :: asm { ok } // ERROR: An @(rsp) template is RSP Microcode and cannot be in an asm template group
@@ -125,3 +211,7 @@ call_it :: proc() {
 
 not_a_template :: proc() {}
 NOT_A_TEMPLATE :: intrinsics.rsp_template_code(not_a_template) // ERROR: 'rsp_template_code' expects a declared @(rsp) asm template
+
+cpu_template_location :: proc() {
+	_ = intrinsics.rsp_template_location(not_a_template) // ERROR: 'rsp_template_location' expects a declared @(rsp) asm template
+}

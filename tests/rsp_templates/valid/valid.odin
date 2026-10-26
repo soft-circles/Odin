@@ -4,6 +4,7 @@
 package rsp_templates_valid
 
 import "base:intrinsics"
+import "base:runtime"
 
 import "transform"
 
@@ -24,6 +25,12 @@ fill :: asm(output: ^[4]u32, value: u32) -> (end: u32) [output = %s2, value = %a
 @(export)
 fill_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
 	return intrinsics.rsp_template_code(fill)
+}
+
+// Where the template is declared, for the generator's errors
+@(export)
+fill_location :: proc "contextless" () -> runtime.Source_Code_Location {
+	return intrinsics.rsp_template_location(fill)
 }
 
 @(export)

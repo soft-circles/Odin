@@ -9,10 +9,12 @@
 package rsp_templates_golden
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import rsp "core:rexcode/isa/rsp"
 
+import valid "../valid"
 import "../valid/transform"
 
 Args :: struct {
@@ -88,7 +90,29 @@ vector_forms :: asm(input: ^[8]i16, output: ^[8]i16) [input = %s1, output = %s2]
 	sqv   %v31.e7, [%s2 + 1008]
 }
 
+// Bases and branches at their edges: %zero as a base, a displacement of several terms,
+// a branch to itself and to the next instruction, and two labels at one point.
+@(rsp)
+edge_forms :: asm(p: ^u32) [p = %s1] {
+	lw    %t0, [%zero + 8]
+	sw    %t1, [%zero - 4]
+	lw    %t2, [p + 4 - 8]
+	lw    %t3, [p + 16 - 4 + 2 - 2]
+.self:
+	bgtz  %t0, .self
+	bgtz  %t1, .next
+.next:
+	nop
+.first:
+.second:
+	bgtz  %t2, .first
+	bgtz  %t3, .second
+	nop
+}
+
 SCALAR    :: intrinsics.rsp_template_code(scalar_forms)
+EDGE      :: intrinsics.rsp_template_code(edge_forms)
+FILL      :: intrinsics.rsp_template_code(valid.fill)
 TRANSFORM :: intrinsics.rsp_template_code(transform.transform)
 VECTOR :: intrinsics.rsp_template_code(vector_forms)
 
@@ -130,6 +154,37 @@ expected_scalar :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynamic]r
 		rsp.inst_addiu(rsp.S2, rsp.S2, 1),
 		rsp.inst_bgtz(rsp.T1, END),
 		rsp.inst_addiu(rsp.S2, rsp.S2, 2),
+	)
+	return
+}
+
+expected_edge :: proc() -> (code: [dynamic]rsp.Instruction, labels: [dynamic]rsp.Label_Definition) {
+	SELF :: 0; NEXT :: 1; FIRST :: 2; SECOND :: 3
+	append(&labels, rsp.Label_Definition(4), rsp.Label_Definition(6), rsp.Label_Definition(7), rsp.Label_Definition(7))
+	append(&code,
+		rsp.inst_lw(rsp.T0, rsp.mem(rsp.ZERO, 8)),
+		rsp.inst_sw(rsp.T1, rsp.mem(rsp.ZERO, -4)),
+		rsp.inst_lw(rsp.T2, rsp.mem(rsp.S1, -4)),
+		rsp.inst_lw(rsp.T3, rsp.mem(rsp.S1, 12)),
+		rsp.inst_bgtz(rsp.T0, SELF),
+		rsp.inst_bgtz(rsp.T1, NEXT),
+		rsp.inst_nop(),
+		rsp.inst_bgtz(rsp.T2, FIRST),
+		rsp.inst_bgtz(rsp.T3, SECOND),
+		rsp.inst_nop(),
+	)
+	return
+}
+
+// valid.fill: the output pinned as the exit contract, a scratch register by name
+expected_fill :: proc() -> (code: [dynamic]rsp.Instruction) {
+	append(&code,
+		rsp.inst_or(rsp.T2, rsp.A0, rsp.ZERO),
+		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 0)),
+		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 4)),
+		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 8)),
+		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 12)),
+		rsp.inst_addiu(rsp.S3, rsp.S2, 16),
 	)
 	return
 }
@@ -248,6 +303,10 @@ compare :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []rsp.Instr
 main :: proc() {
 	scalar, labels := expected_scalar()
 	compare("scalar_forms", SCALAR, scalar[:], labels[:])
+	edge, edge_labels := expected_edge()
+	compare("edge_forms", EDGE, edge[:], edge_labels[:])
+	fill := expected_fill()
+	compare("fill", FILL, fill[:], nil)
 	vector := expected_vector()
 	compare("vector_forms", VECTOR, vector[:], nil)
 	body, body_labels := expected_transform()
@@ -255,6 +314,12 @@ main :: proc() {
 	if len(TRANSFORM) != 61 {
 		fmt.printfln("transform: %d words, want the builder body's 61", len(TRANSFORM))
 		failures += 1
+	}
+
+	// Where each template is declared, for test_rsp_templates.py to check
+	for loc in ([]runtime.Source_Code_Location{intrinsics.rsp_template_location(transform.transform),
+	                                           intrinsics.rsp_template_location(valid.fill)}) {
+		fmt.printfln("location %s %d %d %s", loc.procedure, loc.line, loc.column, loc.file_path)
 	}
 
 	// The constant is usable at run time like any #load slice.

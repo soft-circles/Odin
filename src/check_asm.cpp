@@ -16,6 +16,8 @@ gb_internal AsmTableRegCode<AsmCtx> asm_register_code(AsmCtx *asm_ctx, Register 
 	return asm_ctx->register_codes[r];
 }
 
+gb_internal bool rsp_is_target_sized_integer(Type *type); // check_asm_rsp.cpp
+
 // Bit-width the operand's Odin type occupies in a register/immediate slot.
 // Integers/floats/bools/pointers -> their size; #simd -> total vector width. 0 if unknown.
 gb_internal i32 check_asm_operand_bit_width(Type *type) {
@@ -27,6 +29,12 @@ gb_internal i32 check_asm_operand_bit_width(Type *type) {
 	}
 	if (is_type_internally_pointer_like(type)) {
 		return asm_check_pointer_bits(); // a DMEM address under @(rsp), whatever the host's pointers are
+	}
+	if (asm_check_target_current.set && rsp_is_target_sized_integer(type)) {
+		// int, uint, uintptr under @(rsp): rejected where the parameter is declared
+		// (check_asm_rsp.cpp), and given the RSP's 32 bits here so that no host's width
+		// adds errors of its own
+		return asm_check_pointer_bits();
 	}
 	i64 sz = type_size_of(base_type(type));
 	if (sz <= 0) {
@@ -2277,11 +2285,14 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 
 		check_operand_constraints(asm_ctx, operands, mnemonic, name);
 
-		// A register's `.flag` (an RSP vector element) must fit the slot it fills.
+		// A register's `.flag` (an RSP vector element) must fit the slot it fills. Only a
+		// flag the table accepted (check_register) is checked here; check_register has
+		// reported every other one.
 		for_array(oi, operands) {
 			Ast *e = operands[oi].expr;
 			if (e == nullptr || e->kind != Ast_AsmRegister || e->AsmRegister.flag.kind != Token_Ident ||
-			    e->AsmRegister.name.string == "flags") {
+			    e->AsmRegister.name.string == "flags" ||
+			    !asm_hook_register_accepts_flag(asm_ctx, asm_ctx->register_lookup(e->AsmRegister.name.string), e->AsmRegister.flag.string, 0)) {
 				continue;
 			}
 			auto slot = operand_slot_type(forms[valid_form_index], cast(int)oi);
@@ -4286,9 +4297,7 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 	}
 }
 
-// Serialises an @(rsp) template's body check between its queued check and
-// intrinsics.rsp_template_code, so it runs once (check_asm_rsp.cpp).
-gb_global RecursiveMutex rsp_template_body_mutex;
+gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInfo *d); // check_asm_rsp.cpp
 
 gb_internal void check_asm_template_from_entity(CheckerContext *c, Entity *e, DeclInfo *d) {
 	GB_ASSERT(e->decl_info == d);
@@ -4328,15 +4337,7 @@ gb_internal void check_asm_template_body_from_entity(CheckerContext *c, Entity *
 	ctx.decl  = d;
 
 	if (e->AsmTemplate.arch == AsmTemplateArch_Rsp) {
-		// The template's queued check and intrinsics.rsp_template_code may both ask for it.
-		MUTEX_GUARD(&rsp_template_body_mutex);
-		if (e->flags & EntityFlag_ProcBodyChecked) {
-			return;
-		}
-		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
-		check_asm_template_body(&g_asm_rsp, &ctx, e, d);
-		add_deps_from_child_to_parent(d);
-		e->flags |= EntityFlag_ProcBodyChecked;
+		check_rsp_template_body(&ctx, e, d); // check_asm_rsp.cpp
 		return;
 	}
 

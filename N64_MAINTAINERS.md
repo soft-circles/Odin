@@ -58,8 +58,9 @@ whatever build compiles it (Odin64's host Microcode generator):
 - [`src/asm_tables_rsp.cpp`](src/asm_tables_rsp.cpp) is the RSP table, laid
   out like the MIPS one. Its header comment is the reference for spelling,
   element accessors, vector offsets and the register model.
-- [`src/check_asm_rsp.cpp`](src/check_asm_rsp.cpp) implements
-  `intrinsics.rsp_template_code`, which encodes a template from the table.
+- [`src/check_asm_rsp.cpp`](src/check_asm_rsp.cpp) holds the RSP-only part of
+  a template's check, the encoder, `intrinsics.rsp_template_code` (the encoded
+  words) and `intrinsics.rsp_template_location` (the declaration).
 
 ## Interfaces
 
@@ -287,10 +288,21 @@ An `@(rsp)` template is RSP Microcode. The collector reads the attribute into
 `check_asm_template_body_from_entity` checks it against `g_asm_rsp` on every
 build target. It is never lowered: calling one, or putting one in an asm group,
 is an error, and `lb_emit_asm_template_call` asserts it never sees one.
-`intrinsics.rsp_template_code(t)` forces the template's check, lays out its
-labels, encodes it from the table and returns a constant
-`[]intrinsics.Rsp_Code_Line{word: u32, line: i32}`, laid out in the build
-target's byte order, like the slice `#load(path, []T)` makes.
+`check_rsp_template_body` runs the shared check, then the RSP-only checks
+(no `int`/`uint`/`uintptr` parameter, no `size_of`/`align_of`/`offset_of` of a
+type whose layout is the build target's), and, when the template's check
+reported nothing on its thread (`thread_error_count`), encodes it: `odin check`
+reports every encoder rejection whether or not anything takes the words. It
+runs once, under `rsp_template_body_mutex`, with an in-progress flag so a
+template whose operands take its own words (directly or through another
+template) gets one error instead of a second check.
+`intrinsics.rsp_template_code(t)` forces that check and returns the words as a
+constant `[]intrinsics.Rsp_Code_Line{word: u32, line: i32}`, laid out in the
+build target's byte order, like the slice `#load(path, []T)` makes; for a
+template with errors it is an empty constant, so nothing cascades.
+`intrinsics.rsp_template_location(t)` is a `runtime.Source_Code_Location`
+value: the template's file, the line and column of its name, and its name as
+`procedure`; `lb_build_builtin_proc` builds it.
 
 The table holds only the mnemonics Odin64's `rsp_jobs/transform` body uses,
 plus `nop`. To add an instruction, add its mnemonic and form row (bits and mask
@@ -306,6 +318,10 @@ Preserve these guarantees:
   dispatch sets both from the template's table, so an arm64 or amd64 host's
   rules (`#pre`/`#post`, `>>` scales, lane syntax, x86 def widths) never apply
   to an `@(rsp)` template, and its pointer parameters are 32 bits wide.
+- Nothing the host decides changes a template's words: target-sized types are
+  rejected (and given 32 bits in `check_asm_operand_bit_width`, so no host adds
+  a width error), and so is measuring a type whose layout is the target's,
+  including through a constant the template names.
 - Every parameter is pinned. Pinned inputs may be written
   (`input_parameters_are_writable`); no write needs a `#clobber`.
 - `gp` and `ra` are never written or pinned and `sp` is not a register name.

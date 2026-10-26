@@ -1,17 +1,25 @@
-// check_asm_rsp.cpp: intrinsics.rsp_template_code
+// check_asm_rsp.cpp: @(rsp) templates' body check, intrinsics.rsp_template_code and
+// intrinsics.rsp_template_location
 //
-//     rsp_template_code :: proc(t: <an @(rsp) asm template>) -> []Rsp_Code_Line
-//     Rsp_Code_Line     :: struct {word: u32, line: i32}
+//     rsp_template_code     :: proc(t: <an @(rsp) asm template>) -> []Rsp_Code_Line
+//     rsp_template_location :: proc(t: <an @(rsp) asm template>) -> runtime.Source_Code_Location
+//     Rsp_Code_Line         :: struct {word: u32, line: i32}
 //
-// Returns the template's encoded RSP words, one per instruction, each with the line
-// of the template instruction it came from, as a constant built like
-// `#load(path, []T)`: the value is the elements' bytes in the target's byte order. It forces the
-// template's check, lays out its labels, encodes every instruction from the table
-// (asm_tables_rsp.cpp) and range-checks branches. Odin64's Microcode generator takes
-// a body's words from it in the host build that runs the generator.
+// An @(rsp) template's check (check_rsp_template_body) is the CPU tables' check against
+// the RSP table (asm_tables_rsp.cpp), plus what only the RSP needs: no type whose size
+// is the build target's, and no layout measure (size_of, align_of, offset_of) of one.
+// When that check reports nothing, it encodes the template, so every @(rsp) template is
+// fully checked by `odin check` whether or not anything takes its words, and keeps the
+// words for the builtin.
+//
+// rsp_template_code returns those words, one per instruction, each with the line of
+// the template instruction it came from, as a constant built like `#load(path, []T)`:
+// the value is the elements' bytes in the target's byte order. Odin64's Microcode
+// generator takes a body's words from it in the host build that runs the generator.
+// rsp_template_location is the template's declaration, for the generator's errors.
 //
 // The template must be a declared `@(rsp)` template: an RSP template is never called,
-// so this is the one place it is used as a value.
+// so these are the places it is used as a value.
 
 gb_internal void check_queued_asm_template_body(Checker *c, Entity *e, UntypedExprInfoMap *untyped);
 
@@ -31,6 +39,265 @@ struct RspCodeLine {
 	u32 word;
 	i32 line;
 };
+
+// What the checker knows of one @(rsp) template, guarded by rsp_template_body_mutex.
+struct RspTemplateState {
+	bool               in_progress; // its body check is running, further up this thread's stack
+	bool               encoded;     // its check reported nothing, and `lines` holds its words
+	Array<RspCodeLine> lines;
+};
+
+// Serialises @(rsp) templates' body checks between their queued checks and the
+// builtins, so each runs once. Recursive: a template's operand may itself take another
+// template's words.
+gb_global RecursiveMutex                         rsp_template_body_mutex;
+gb_global PtrMap<Entity *, RspTemplateState *>   rsp_template_states;
+gb_global bool                                   rsp_template_states_init;
+
+gb_internal RspTemplateState *rsp_template_state(Entity *e) {
+	if (!rsp_template_states_init) {
+		map_init(&rsp_template_states);
+		rsp_template_states_init = true;
+	}
+	RspTemplateState **found = map_get(&rsp_template_states, e);
+	if (found != nullptr) {
+		return *found;
+	}
+	RspTemplateState *st = gb_alloc_item(permanent_allocator(), RspTemplateState);
+	map_set(&rsp_template_states, e, st);
+	return st;
+}
+
+// int, uint and uintptr (and distinct or enum types of them): integers whose size is
+// the build target's. An @(rsp) template's registers are 32 bits on every target.
+gb_internal bool rsp_is_target_sized_integer(Type *type) {
+	Type *bt = base_type(type);
+	if (bt != nullptr && bt->kind == Type_Enum) {
+		bt = base_type(bt->Enum.base_type);
+	}
+	return bt != nullptr && bt->kind == Type_Basic && is_type_integer(bt) && bt->Basic.size < 0;
+}
+
+// The type inside `type` that makes its layout the build target's, or nullptr when its
+// size, alignment and field offsets are the same for every target. That is a type of
+// target size (int, uint, uintptr, pointers, string, any, typeid, slices, maps, procs),
+// or one whose alignment is capped by the target's max_align (128-bit integers, #simd,
+// matrix), found through fields, elements and backing types.
+gb_internal Type *rsp_target_layout_culprit(Type *type) {
+	Type *t = base_type(type);
+	if (t == nullptr) {
+		return nullptr;
+	}
+	switch (t->kind) {
+	case Type_Basic:
+		if (t->Basic.size < 0) {
+			return type;
+		}
+		if (is_type_integer(t) && t->Basic.size > 8) {
+			return type;
+		}
+		return nullptr;
+	case Type_Pointer:
+	case Type_MultiPointer:
+	case Type_SoaPointer:
+	case Type_Proc:
+	case Type_Slice:
+	case Type_DynamicArray:
+	case Type_FixedCapacityDynamicArray:
+	case Type_Map:
+	case Type_SimdVector:
+	case Type_Matrix:
+		return type;
+	case Type_Array:
+		return rsp_target_layout_culprit(t->Array.elem);
+	case Type_EnumeratedArray:
+		return rsp_target_layout_culprit(t->EnumeratedArray.elem);
+	case Type_Enum:
+		return rsp_target_layout_culprit(t->Enum.base_type);
+	case Type_BitSet:
+		return t->BitSet.underlying != nullptr ? rsp_target_layout_culprit(t->BitSet.underlying) : nullptr;
+	case Type_BitField:
+		return rsp_target_layout_culprit(t->BitField.backing_type);
+	case Type_Struct:
+		for (Entity *f : t->Struct.fields) {
+			if (Type *c = rsp_target_layout_culprit(f->type)) {
+				return c;
+			}
+		}
+		return nullptr;
+	case Type_Union:
+		for (Type *v : t->Union.variants) {
+			if (Type *c = rsp_target_layout_culprit(v)) {
+				return c;
+			}
+		}
+		return nullptr;
+	case Type_Tuple:
+		for (Entity *v : t->Tuple.variables) {
+			if (Type *c = rsp_target_layout_culprit(v->type)) {
+				return c;
+			}
+		}
+		return nullptr;
+	}
+	return nullptr;
+}
+
+// Every parameter, output and named scratch is a 32-bit RSP register (or a vector
+// register), so a type whose size is the host's means something else in each build.
+gb_internal void rsp_check_parameter_types(Entity *e) {
+	for (auto const &ed : e->AsmTemplate.decls) {
+		Entity *pe = ed.entity;
+		if (pe == nullptr || pe->type == nullptr || is_type_internally_pointer_like(pe->type) ||
+		    !rsp_is_target_sized_integer(pe->type)) {
+			continue;
+		}
+		gbString s = type_to_string(pe->type);
+		error(pe->token, "'%.*s' has type '%s', whose size is the build target's; an @(rsp) template's registers "
+		                 "are 32 bits whatever the build targets, so use i32 or u32",
+		      LIT(pe->token.string), s);
+		gb_string_free(s);
+	}
+}
+
+// The type a size_of, align_of, offset_of or offset_of_by_string call measures, or
+// nullptr when `call` is none of them.
+gb_internal Type *rsp_measured_type(Ast *call) {
+	ast_node(ce, CallExpr, call);
+	Entity *b = entity_of_node(unparen_expr(ce->proc));
+	if (b == nullptr || b->kind != Entity_Builtin || ce->args.count == 0) {
+		return nullptr;
+	}
+	switch (b->Builtin.id) {
+	case BuiltinProc_size_of:
+	case BuiltinProc_align_of:
+	case BuiltinProc_offset_of_by_string:
+		return type_of_expr(ce->args[0]);
+	case BuiltinProc_offset_of: {
+		if (ce->args.count >= 2) {
+			return type_of_expr(ce->args[0]);
+		}
+		Ast *sel = unparen_expr(ce->args[0]);
+		if (sel != nullptr && sel->kind == Ast_SelectorExpr) {
+			Type *t = type_of_expr(sel->SelectorExpr.expr);
+			if (t != nullptr && is_type_pointer(t)) {
+				t = type_deref(t);
+			}
+			return t;
+		}
+		return type_of_expr(ce->args[0]);
+	}
+	}
+	return nullptr;
+}
+
+// Reports each size_of, align_of or offset_of in `node` (and in the constants it
+// names, through their declarations) that measures a type whose layout is the build
+// target's: the value is the host's in a host build and the N64's in an n64 build, so
+// the template's words would depend on which one encodes them.
+gb_internal void rsp_check_layout_measures(Ast *node, Ast *report_at, PtrSet<Entity *> *visited) {
+	node = unparen_expr(node);
+	if (node == nullptr) {
+		return;
+	}
+	switch (node->kind) {
+	case Ast_Ident:
+	case Ast_SelectorExpr: {
+		if (node->kind == Ast_SelectorExpr) {
+			rsp_check_layout_measures(node->SelectorExpr.expr, report_at, visited);
+		}
+		Entity *ce = entity_of_node(node);
+		if (ce != nullptr && ce->kind == Entity_Constant && ce->decl_info != nullptr &&
+		    ce->decl_info->init_expr != nullptr && !ptr_set_update(visited, ce)) {
+			// a measure in a constant's declaration is reported where the template uses it
+			rsp_check_layout_measures(ce->decl_info->init_expr, report_at != nullptr ? report_at : node, visited);
+		}
+		return;
+	}
+	case Ast_UnaryExpr:
+		rsp_check_layout_measures(node->UnaryExpr.expr, report_at, visited);
+		return;
+	case Ast_BinaryExpr:
+		rsp_check_layout_measures(node->BinaryExpr.left,  report_at, visited);
+		rsp_check_layout_measures(node->BinaryExpr.right, report_at, visited);
+		return;
+	case Ast_TernaryIfExpr:
+		rsp_check_layout_measures(node->TernaryIfExpr.cond, report_at, visited);
+		rsp_check_layout_measures(node->TernaryIfExpr.x,    report_at, visited);
+		rsp_check_layout_measures(node->TernaryIfExpr.y,    report_at, visited);
+		return;
+	case Ast_TernaryWhenExpr:
+		rsp_check_layout_measures(node->TernaryWhenExpr.cond, report_at, visited);
+		rsp_check_layout_measures(node->TernaryWhenExpr.x,    report_at, visited);
+		rsp_check_layout_measures(node->TernaryWhenExpr.y,    report_at, visited);
+		return;
+	case Ast_TypeCast:
+		rsp_check_layout_measures(node->TypeCast.expr, report_at, visited);
+		return;
+	case Ast_AutoCast:
+		rsp_check_layout_measures(node->AutoCast.expr, report_at, visited);
+		return;
+	case Ast_IndexExpr:
+		rsp_check_layout_measures(node->IndexExpr.expr,  report_at, visited);
+		rsp_check_layout_measures(node->IndexExpr.index, report_at, visited);
+		return;
+	case Ast_AsmMemoryOperand:
+		for (Ast *term : node->AsmMemoryOperand.terms) {
+			rsp_check_layout_measures(term, report_at, visited);
+		}
+		return;
+	case Ast_AsmMemoryTerm:
+		rsp_check_layout_measures(node->AsmMemoryTerm.operand, report_at, visited);
+		rsp_check_layout_measures(node->AsmMemoryTerm.scale,   report_at, visited);
+		return;
+	case Ast_CallExpr: {
+		if (Type *measured = rsp_measured_type(node)) {
+			if (Type *culprit = rsp_target_layout_culprit(measured)) {
+				gbString call = expr_to_string(node);
+				gbString m    = type_to_string(measured);
+				gbString c    = type_to_string(culprit);
+				Ast *at = report_at != nullptr ? report_at : node;
+				if (are_types_identical(measured, culprit)) {
+					error(at, "'%s' measures '%s', whose layout is the build target's, so the @(rsp) template's words "
+					          "would differ between a host and an n64 build; measure a type of fixed-size fields "
+					          "(i32 or u32 for a DMEM address)", call, m);
+				} else {
+					error(at, "'%s' measures '%s', whose layout is the build target's because it holds '%s', so the "
+					          "@(rsp) template's words would differ between a host and an n64 build; measure a type of "
+					          "fixed-size fields (i32 or u32 for a DMEM address)", call, m, c);
+				}
+				gb_string_free(c);
+				gb_string_free(m);
+				gb_string_free(call);
+			}
+			return;
+		}
+		rsp_check_layout_measures(node->CallExpr.proc, report_at, visited);
+		for (Ast *arg : node->CallExpr.args) {
+			rsp_check_layout_measures(arg, report_at, visited);
+		}
+		return;
+	}
+	case Ast_FieldValue:
+		rsp_check_layout_measures(node->FieldValue.value, report_at, visited);
+		return;
+	}
+}
+
+gb_internal void rsp_check_template_layout_measures(Entity *e) {
+	ast_node(at, AsmTemplate, e->AsmTemplate.node);
+	PtrSet<Entity *> visited = {};
+	ptr_set_init(&visited);
+	defer (ptr_set_destroy(&visited));
+	for (Ast *instruction : at->instructions) {
+		if (instruction->kind != Ast_AsmInstruction) {
+			continue;
+		}
+		for (Ast *operand : instruction->AsmInstruction.operands) {
+			rsp_check_layout_measures(operand, nullptr, &visited);
+		}
+	}
+}
 
 // The register a GPR operand, memory base or vector operand names: a literal register,
 // or a parameter through its pin. Returns false when there is none, reported.
@@ -232,7 +499,50 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 	return true;
 }
 
-gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+// The check of an @(rsp) template's body, from its queued check or from a builtin
+// that needs its words (check_asm_template_body_from_entity). It runs once.
+gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInfo *d) {
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	if (e->flags & EntityFlag_ProcBodyChecked) {
+		return;
+	}
+	RspTemplateState *st = rsp_template_state(e);
+	if (st->in_progress) {
+		return; // re-entered through a builtin in its own body, which reports it
+	}
+	st->in_progress = true;
+
+	// The check is the template's, not the expression that asked for its words: a
+	// builtin checked in a muted trial (a procedure group's candidates) must not mute it,
+	// because it runs once.
+	i32 mute_depth = global_error_context.mute_depth;
+	global_error_context.mute_depth = 0;
+	i64 errors_before = thread_error_count();
+	{
+		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
+		check_asm_template_body(&g_asm_rsp, ctx, e, d);
+		rsp_check_parameter_types(e);
+		rsp_check_template_layout_measures(e);
+	}
+	// Encode only a template whose check reported nothing (including any template its
+	// operands took words from), so the encoder never repeats one of the check's errors.
+	if (thread_error_count() == errors_before) {
+		array_init(&st->lines, heap_allocator());
+		if (rsp_template_encode(e, &st->lines)) {
+			st->encoded = true;
+		} else if (thread_error_count() == errors_before) {
+			error(e->token, "'%.*s' could not be encoded for the RSP", LIT(e->token.string));
+		}
+	}
+	global_error_context.mute_depth = mute_depth;
+
+	st->in_progress = false;
+	add_deps_from_child_to_parent(d);
+	e->flags |= EntityFlag_ProcBodyChecked;
+}
+
+// The @(rsp) template a builtin's argument names, or nullptr, reported.
+gb_internal Entity *rsp_template_argument(CheckerContext *c, Ast *call, String const &builtin_name) {
 	ast_node(ce, CallExpr, call);
 	Ast *arg = ce->args[0];
 
@@ -242,7 +552,7 @@ gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, As
 	check_expr_or_type(c, &o, arg);
 	c->asm_template_hint = prev_hint;
 	if (o.mode == Addressing_Invalid) {
-		return false;
+		return nullptr;
 	}
 
 	Entity *e = entity_of_node(arg);
@@ -250,31 +560,53 @@ gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, As
 		gbString s = expr_to_string(arg);
 		error(arg, "'%.*s' expects a declared @(rsp) asm template, got '%s'", LIT(builtin_name), s);
 		gb_string_free(s);
-		return false;
+		return nullptr;
 	}
 	if (e->AsmTemplate.arch != AsmTemplateArch_Rsp) {
 		error(arg, "'%.*s' expects an @(rsp) asm template; '%.*s' is a CPU template", LIT(builtin_name), LIT(e->token.string));
-		return false;
+		return nullptr;
 	}
 	if (e->type == nullptr || e->type == t_invalid || e->decl_info == nullptr) {
-		return false;
+		return nullptr;
+	}
+	return e;
+}
+
+gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+	GB_ASSERT(t_rsp_code_line != nullptr);
+	GB_ASSERT(type_size_of(t_rsp_code_line) == gb_size_of(RspCodeLine));
+
+	// Without words (an error has been reported), the value is still an
+	// `[]Rsp_Code_Line` constant, an empty one, so nothing that uses it adds errors.
+	operand->mode  = Addressing_Constant;
+	operand->type  = alloc_type_slice(t_rsp_code_line);
+	operand->value = exact_value_string(make_string(permanent_alloc_array<u8>(1), 0));
+
+	Entity *e = rsp_template_argument(c, call, builtin_name);
+	if (e == nullptr) {
+		return true;
 	}
 
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	RspTemplateState *st = rsp_template_state(e);
+	if (st->in_progress) {
+		gbString s = expr_to_string(call);
+		error(call, "'%s' refers to the template being checked; an @(rsp) template's words cannot depend on its own", s);
+		gb_string_free(s);
+		return true;
+	}
 	if ((e->flags & EntityFlag_ProcBodyChecked) == 0) {
 		UntypedExprInfoMap untyped = {};
 		map_init(&untyped);
 		check_queued_asm_template_body(c->checker, e, &untyped);
 		map_destroy(&untyped);
 	}
-
-	Array<RspCodeLine> lines = {};
-	array_init(&lines, heap_allocator());
-	defer (array_free(&lines));
-	if (!rsp_template_encode(e, &lines)) {
-		return false;
+	if (!st->encoded) {
+		return true; // its check reported why
 	}
 
 	// The elements' bytes in the build target's byte order, as an `[]Rsp_Code_Line` holds them
+	auto const &lines = st->lines;
 	bool big_endian = target_endians[build_context.metrics.arch] == TargetEndian_Big;
 	isize size = lines.count * gb_size_of(RspCodeLine);
 	u8 *bytes = permanent_alloc_array<u8>(gb_max(size, 1));
@@ -287,11 +619,20 @@ gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, As
 			}
 		}
 	}
-
-	GB_ASSERT(t_rsp_code_line != nullptr);
-	GB_ASSERT(type_size_of(t_rsp_code_line) == gb_size_of(RspCodeLine));
-	operand->mode  = Addressing_Constant;
-	operand->type  = alloc_type_slice(t_rsp_code_line);
 	operand->value = exact_value_string(make_string(bytes, size));
+	return true;
+}
+
+// The template's declaration as a runtime.Source_Code_Location: its file, the line and
+// column of its name, and its name as the procedure. A value, like #location; the LLVM
+// backend builds it (lb_build_builtin_proc). It does not need the body checked.
+gb_internal bool check_rsp_template_location(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+	Entity *e = rsp_template_argument(c, call, builtin_name);
+	if (e == nullptr) {
+		return false;
+	}
+	init_core_source_code_location(c->checker);
+	operand->mode = Addressing_Value;
+	operand->type = t_source_code_location;
 	return true;
 }

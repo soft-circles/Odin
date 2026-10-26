@@ -67,6 +67,8 @@ struct ErrorContext {
 	i32 mute_depth;
 	i64 mute_count;
 
+	i64 error_count; // errors this thread reported, see `thread_error_count`
+
 	ErrorInstantiations instantiations;
 	ErrorCaret          caret;
 };
@@ -148,6 +150,12 @@ gb_internal ErrorValue *get_error_value(void) {
 }
 
 
+
+// The errors reported on this thread so far: a check that runs on one thread can tell
+// whether it reported any, which the global count, shared by every thread, cannot.
+gb_internal i64 thread_error_count(void) {
+	return global_error_context.error_count;
+}
 
 gb_internal bool any_errors(void) {
 	return global_error_collector.count.load() != 0;
@@ -759,6 +767,7 @@ gb_internal void error_va(TokenPos const &pos, TokenPos end, char const *fmt, va
 		return;
 	}
 	(global_error_context.hold ? global_error_collector.held_count : global_error_collector.count).fetch_add(1);
+	global_error_context.error_count += 1;
 	mutex_lock(&global_error_collector.mutex);
 	if (global_error_collector.count > MAX_ERROR_COLLECTOR_COUNT()) {
 		print_all_errors();
@@ -844,6 +853,7 @@ gb_internal void error_no_newline_va(TokenPos const &pos, char const *fmt, va_li
 		return;
 	}
 	(global_error_context.hold ? global_error_collector.held_count : global_error_collector.count).fetch_add(1);
+	global_error_context.error_count += 1;
 	mutex_lock(&global_error_collector.mutex);
 	if (global_error_collector.count.load() > MAX_ERROR_COLLECTOR_COUNT()) {
 		print_all_errors();
