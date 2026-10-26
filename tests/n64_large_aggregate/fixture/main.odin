@@ -19,6 +19,7 @@ Spill :: struct {
 foreign {
 	take_big_c   :: proc "c" (big: Big) ---
 	take_spill_c :: proc "c" (spill: Spill, tail: i32) ---
+	fill_big     :: proc "c" (big: ^Big) ---
 }
 
 @(export)
@@ -49,4 +50,24 @@ call_take_big_c :: proc "c" (big: ^Big) {
 @(export)
 call_take_spill_c :: proc "c" (spill: ^Spill) {
 	take_spill_c(spill^, 7)
+}
+
+// Like a local, a field of a `#packed` struct is passed from an aligned temporary in the caller's frame: `big` sits
+// at offset 1.
+Packed_Holder :: struct #packed {
+	tag: u8,
+	big: Big,
+}
+
+// The C callee's copy comes from a local in the caller's frame, not from memory the caller was handed.
+@(export)
+call_take_local_big_c :: proc "c" () {
+	big: Big
+	fill_big(&big)
+	take_big_c(big)
+}
+
+@(export)
+call_take_packed_big_c :: proc "c" (holder: ^Packed_Holder) {
+	take_big_c(holder.big)
 }
