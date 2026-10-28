@@ -22,11 +22,11 @@ LIB_PATH :: (
 )
 
 @(private)
-BUILD_SCRIPT :: "build_n64.sh" when ODIN_OS == .N64 else "build.sh"
+BUILD_SCRIPT :: "build_n64.sh\" with N64_INST set to the libdragon SDK" when ODIN_OS == .N64 else "build.sh\""
 
 when LIB_PATH != "" {
 	when !#exists(LIB_PATH) {
-		#panic("Could not find the compiled Box3D library at \"" + LIB_PATH + "\", it can be compiled by running `\"" + ODIN_ROOT + "vendor/box3d/src/" + BUILD_SCRIPT + "\"`")
+		#panic("Could not find the compiled Box3D library at \"" + LIB_PATH + "\", it can be compiled by running `\"" + ODIN_ROOT + "vendor/box3d/src/" + BUILD_SCRIPT + "`")
 	}
 
 	@(export)

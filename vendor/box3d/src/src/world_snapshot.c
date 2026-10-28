@@ -352,11 +352,11 @@ static void b3DesTree( b3SnapReader* r, b3DynamicTree* tree )
 	b3Free( tree->parents, tree->nodeCapacity * (int)sizeof( int32_t ) );
 	b3Free( tree->proxies, tree->proxyCapacity * (int)sizeof( b3TreeProxy ) );
 	b3Free( tree->swapNodes, tree->nodeCapacity * (int)sizeof( b3TreeNode ) );
-	b3Free( tree->leafIndices, tree->rebuildCapacity * (int)sizeof( int ) );
+	b3Free( tree->leafIndices, tree->rebuildCapacity * (int)sizeof( int32_t ) );
 	b3Free( tree->leafNodes, tree->rebuildCapacity * (int)sizeof( b3TreeNode ) );
 	b3Free( tree->leafBoxes, tree->rebuildCapacity * (int)sizeof( b3AABB ) );
 	b3Free( tree->leafCenters, tree->rebuildCapacity * (int)sizeof( b3Vec3 ) );
-	b3Free( tree->binIndices, tree->rebuildCapacity * (int)sizeof( int ) );
+	b3Free( tree->binIndices, tree->rebuildCapacity * (int)sizeof( int32_t ) );
 	tree->nodes = NULL;
 	tree->parents = NULL;
 	tree->proxies = NULL;
