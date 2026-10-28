@@ -52,6 +52,16 @@ CPU `asm` templates for `TargetArch_mips32be` sit beside that flow:
 
 The user contract is [`MIPS_ASM.md`](MIPS_ASM.md).
 
+RSP Microcode written as `@(rsp)` asm templates sits beside it, checked in
+whatever build compiles it (Odin64's host Microcode generator):
+
+- [`src/asm_tables_rsp.cpp`](src/asm_tables_rsp.cpp) is the RSP table, laid
+  out like the MIPS one. Its header comment is the reference for spelling,
+  element accessors, vector offsets and the register model.
+- [`src/check_asm_rsp.cpp`](src/check_asm_rsp.cpp) holds the RSP-only part of
+  a template's check, the encoder, `intrinsics.rsp_template_code` (the encoded
+  words) and `intrinsics.rsp_template_location` (the declaration).
+
 ## Interfaces
 
 The external interface is deliberately small:
@@ -271,6 +281,130 @@ time; `register_unavailable_reason` explains `%at`; `pinned_integer_operand_min_
 on the generator widens narrow pinned operands to 32 bits, since LLVM's MIPS
 backend asserts on an i8/i16 explicit-register constraint.
 
+## RSP asm templates
+
+An `@(rsp)` template is RSP Microcode. The collector reads the attribute into
+`Entity.AsmTemplate.arch` (`src/checker.cpp`) before any table is chosen, and
+`check_asm_template_body_from_entity` checks it against `g_asm_rsp` on every
+build target. It is never lowered: calling one, or putting one in an asm group,
+is an error, and `lb_emit_asm_template_call` asserts it never sees one.
+`check_rsp_template_body` runs the shared check, then the RSP-only checks
+(no `int`/`uint`/`uintptr` parameter, no `size_of`/`align_of`/`offset_of` of a
+type whose layout is the build target's), and, when the template's check
+reported nothing on its thread (`thread_error_count`), encodes it: `odin check`
+reports every encoder rejection whether or not anything takes the words. It
+runs once, under `rsp_template_body_mutex`, with an in-progress flag so a
+template whose operands take its own words (directly or through another
+template) gets one error instead of a second check.
+`intrinsics.rsp_template_code(t)` forces that check and returns the words as a
+constant `[]intrinsics.Rsp_Code_Line{word: u32, line: i32}`, laid out in the
+build target's byte order, like the slice `#load(path, []T)` makes; for a
+template with errors it is an empty constant, so nothing cascades.
+`intrinsics.rsp_template_location(t)` is a `runtime.Source_Code_Location`
+value: the template's file, the line and column of its name, and its name as
+`procedure`; `lb_build_builtin_proc` builds it.
+
+The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
+(one form each, with its bits and mask) except ten: the nine a Microcode body
+may not use, `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`),
+`mfc0`, `mtc0` and `break`, and `lwv`, which the RSP does not implement (LWC2
+sub-opcode 0x0a does nothing; `swv` is real and in the table). Those fail the
+mnemonic lookup, and `mnemonic_unavailable_reason` says why.
+
+Where rexcode's form is wider than the hardware, the table follows the
+hardware: `ltv`/`stv` take only `%v00`, `%v08`, `%v16` or `%v24` (the RSP uses
+`vt & ~7`), `vsar` is `vsar %vNN, %acc_hi|%acc_md|%acc_lo` (element 8, 9 or 10,
+vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`), and
+`vmov` takes a destination lane like the other single-lane ops, which
+rexcode's `vmov` form has no field for (the golden program adds those bits to
+rexcode's word). The golden program in
+[tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
+through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode
+mnemonic is neither diffed nor in its `REJECTED` set, so a mnemonic rexcode
+adds must be added to one of them.
+
+`#unroll for v[, i] in X { ... }` in an `@(rsp)` body (`AsmUnroll`, parsed by
+`parse_asm_unroll`) is expanded by `rsp_expand_unrolls` before the shared
+check, so the check, the CFG and the encoder see a flat body. `X` is a constant
+range, a constant fixed array of integers, or a register group
+(`{%v10..=%v14}`, `{%t3, %t5}`). A slice is rejected with upstream's
+`#unroll for` message and a hint to write `[?]T{...}`. Each iteration is a clone
+of the body (always, so no two iterations share nodes) with an integer variable
+replaced by a literal wherever it names a value, and a register variable (`%r`,
+`%r.e0` or bare `r` as an operand) replaced by the iteration's register.
+A register group may hold any register the table names, so a body can step
+the `ltv`/`stv` group registers (`{%v00, %v08}`), the COP2 control registers
+(`{%vco, %vcc, %vce}`) or the vector register of a single-lane op or `vsar`
+(`%r.e3`, `vsar %r, %acc_hi`); the table's lane, group and displacement checks
+run on each iteration's instruction (golden `unroll_operand_forms`, bad
+`unrolled_operand_errors`).
+`rsp_unroll_each_child` lists the children walked: every expression and type
+kind, but not a selector's field, a compound literal's `field =` name,
+`offset_of`'s field, or the inside of struct, union, enum, bit_field and
+procedure types. The walk is an AST rewrite rather than a per-iteration scope
+because the shared operand check resolves names in the template's parameter
+scope and its parent itself (`check_asm_instruction_operand`), so a scope would
+need changes in upstream-owned code. Clones keep their tokens, so errors and
+`Rsp_Code_Line.line` are the body's lines. Labels inside an unrolled body are
+rejected. A CPU template's `#unroll for` is an error in
+`check_asm_template_body`, and `-build-mode:rsp-asm` rejects it in
+`rsp_collect_instructions`.
+
+The parser change that `{%a, %b}` register groups needed is in upstream-owned
+`src/parser.cpp` (`parse_asm_operand`) and is worth upstreaming: before it,
+`{%a, %b}` dropped `%a`, and `{%a %b}` without a comma is now a syntax error.
+
+`core:odin/parser` (upstream-owned) reads template bodies the same way, since
+tools such as Odin64's verify checks parse every source file with it:
+`ast.Asm_Unroll` is `#unroll for`, a memory operand is upstream's flat term
+list (`ast.Asm_Memory_Term`, from odin-lang/Odin 654b3a889, which core:odin had
+not followed), `%t0 << 2` is an operand, a register's end includes its accessor
+(`%v01.q0`), and `{%a %b}` is a syntax error. All but `#unroll for` are worth
+upstreaming. `tests/core/odin/test_asm_templates.odin` parses every file in
+[tests/rsp_templates](tests/rsp_templates) with it; when the compiler's
+template syntax changes, mirror it there.
+
+Most of the expansion's size is its rejections, each with a test in
+[tests/rsp_templates/bad](tests/rsp_templates/bad), and the child walk;
+the expansion itself is short.
+
+Preserve these guarantees:
+
+- Shared checker code reads `asm_check_arch()` and `asm_check_pointer_bits()`
+  (`src/check_asm_cfg.cpp`), never `build_context.metrics` directly. The
+  dispatch sets both from the template's table, so an arm64 or amd64 host's
+  rules (`#pre`/`#post`, `>>` scales, lane syntax, x86 def widths) never apply
+  to an `@(rsp)` template, and its pointer parameters are 32 bits wide.
+- Nothing the host decides changes a template's words: target-sized types are
+  rejected (and given 32 bits in `check_asm_operand_bit_width`, so no host adds
+  a width error), and so is measuring a type whose layout is the target's,
+  including through a constant the template names.
+- Every parameter is pinned. Pinned inputs may be written
+  (`input_parameters_are_writable`); no write needs a `#clobber`.
+- `gp` and `ra` are never written or pinned and `sp` is not a register name.
+- Branches take template labels only; the table has no jump, call, CP0 or
+  `break` form. The instruction after a branch is its delay slot; nothing is
+  inserted.
+- Def-before-use, delay-slot structure and VU effects stay in Odin64's
+  generator check.
+- An `#unroll for` iterates over constants that fit in an i64; its count is
+  computed before any iteration, is at most 1024, and the template's
+  `#unroll for`s expand to at most 1024 instructions in all (IMEM's words),
+  reported at the outermost `#unroll for`, with an iteration that expands to no
+  instruction counting as one. A loop variable can't take the name of a
+  parameter, a scratch register (`[word: u32 = %t2]`, compared by name because
+  the specs are declared after the expansion), an RSP register, the other
+  variable of the same `#unroll for` or an enclosing one's. A parameter or a
+  register variable in an `#unroll for`'s bounds is reported as such.
+
+Table hooks only the RSP table has: `table_arch`, `table_pointer_bits`,
+`memory_disp_scale`, `input_parameters_are_writable`,
+`unpinned_parameter_reason`, `register_write_reject_reason`,
+`register_accepts_flag`, `register_flag_reject_reason`,
+`register_missing_flag_reason` (a single-lane operand with no lane, reported by
+the check for every occurrence), `memory_base_reject_reason` (a COP2 register as
+a memory base) and `mnemonic_unavailable_reason`.
+
 ## Setup defaults
 
 [Odin64's toolchain.lock.toml](https://github.com/soft-circles/Odin64/blob/main/toolchain.lock.toml)
@@ -306,7 +440,11 @@ covers the encodings, the branch interpreter, delay slots, labels and the
 `ext` encodings in the target-feature tests. CI builds Odin with stock LLVM, so
 CI does not check encodings; run the suite with a fork build before merging
 template changes. When `N64_INST` or `MIPS_O64_OBJDUMP` is set, or in full
-mode, an ELF64 object fails these tests instead of skipping them. The "asm
+mode, an ELF64 object fails these tests instead of skipping them. The "RSP asm
+templates" stage runs
+[tests/rsp_templates/test_rsp_templates.py](tests/rsp_templates/test_rsp_templates.py):
+checker rejections and acceptance on hosts and the N64, and a golden diff of
+every RSP form against `core:rexcode/isa/rsp`. The "asm
 template ROM probe" stage type-checks [tests/n64_asm/rom](tests/n64_asm/rom).
 No project-local binding is required.
 

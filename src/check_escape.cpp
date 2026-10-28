@@ -3447,7 +3447,7 @@ gb_internal EscapeValue escape_expr(EscapeAnalysis *ea, Ast *expr) {
 
 	AstTypeAndValue const &tav = expr->tav;
 	if (tav.mode == Addressing_Constant) {
-		if (tav.type == nullptr || !is_type_slice(tav.type) || is_load_directive_call(expr)) {
+		if (tav.type == nullptr || !is_type_slice(tav.type) || is_load_directive_call(expr) || is_rsp_template_code_call(expr)) {
 			return escape_value();
 		}
 		if (expr->kind == Ast_CompoundLit && expr->CompoundLit.elems.count == 0) {

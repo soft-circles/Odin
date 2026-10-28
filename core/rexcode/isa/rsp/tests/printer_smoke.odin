@@ -134,6 +134,8 @@ run_rsp_printer_tests :: proc() {
 	// vsar: rsp.inc only takes `vsar vd, element` (vs = vt = 0, element 8-10);
 	// anything else goes through its generic `vectorOp`.
 	check_print(rsp.inst_v_v_v(.VSAR, rsp.VR1, rsp.VR0, rsp.VR0, 8), "vsar $v01, 8", 0x4B00005D)
+	check_print(rsp.inst_vsar_acc(rsp.VR1, .HI), "vsar $v01, 8", 0x4B00005D)
+	check_print(rsp.inst_vsar_acc(rsp.VR31, .LO), "vsar $v31, 10", 0x4B4007DD)
 	check_print(rsp.inst_v_v_v(.VSAR, rsp.VR1, rsp.VR2, rsp.VR3, 9), "vectorOp 0b011101, $v01, $v02, $v03, 9", 0x4B23105D)
 	check_print(rsp.inst_none(.VNOP), "vnop", 0x4A000037)
 

@@ -580,6 +580,15 @@ struct AsmMemClassify {
 		Token        name;     \
 		Slice<Ast *> operands; \
 	}) \
+	AST_KIND(AsmUnroll, "asm #unroll for", struct { \
+		Token        token;        \
+		Token        for_token;    \
+		Ast *        val0;         \
+		Ast *        val1;         \
+		Ast *        expr;         \
+		Slice<Ast *> instructions; \
+		Token        close;        \
+	}) \
 AST_KIND(_ExprBegin,  "",  bool) \
 	AST_KIND(BadExpr,      "bad expression",         struct { Token begin, end; }) \
 	AST_KIND(TagExpr,      "tag expression",         struct { Token token, name; Ast *expr; }) \

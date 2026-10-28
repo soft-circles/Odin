@@ -373,16 +373,21 @@ clone_node :: proc(node: ^Node) -> ^Node {
 			r.operands = clone(r.operands)
 		case ^Asm_Memory_Operand:
 			r.segment_override = clone(r.segment_override)
-			r.base             = clone(r.base)
-			r.index            = clone(r.index)
-			r.scale            = clone(r.scale)
-			r.disp             = clone(r.disp)
+			r.terms            = clone(r.terms)
 			r.type             = clone(r.type)
+		case ^Asm_Memory_Term:
+			r.operand = clone(r.operand)
+			r.scale   = clone(r.scale)
 		case ^Asm_Register_Group:
 			r.registers = clone(r.registers)
 			r.type      = clone(r.type)
 		case ^Asm_Directive:
 			r.operands = clone(r.operands)
+		case ^Asm_Unroll:
+			r.val0         = clone(r.val0)
+			r.val1         = clone(r.val1)
+			r.expr         = clone(r.expr)
+			r.instructions = clone(r.instructions)
 		case:
 			fmt.panicf("Unhandled node kind: %v", r)
 		}

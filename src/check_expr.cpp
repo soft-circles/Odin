@@ -9746,6 +9746,14 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 				c->asm_template_hint = unnested_proc;
 				check_expr_or_type(c, operand, proc);
 				c->asm_template_hint = prev_hint;
+
+				Entity *callee = entity_of_node(operand->expr);
+				if (callee != nullptr && callee->kind == Entity_AsmTemplate && callee->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+					error(proc, "'%.*s' is an @(rsp) template: RSP Microcode, which CPU code cannot call; "
+					            "take its words with 'intrinsics.rsp_template_code(%.*s)'",
+					      LIT(callee->token.string), LIT(callee->token.string));
+					operand->mode = Addressing_Invalid;
+				}
 			}
 		} else {
 			GB_ASSERT(operand->expr != nullptr);
@@ -14913,6 +14921,35 @@ gb_internal gbString write_expr_to_string(gbString str, Ast *node, bool shorthan
 			Ast *operand = instr->operands[j];
 			str = write_expr_to_string(str, operand, shorthand);
 		}
+	case_end;
+
+	case_ast_node(dir, AsmDirective, node);
+		str = gb_string_appendc(str, "#");
+		str = gb_string_append_length(str, dir->name.string.text, dir->name.string.len);
+		for_array(j, dir->operands) {
+			str = gb_string_appendc(str, j == 0 ? " " : ", ");
+			str = write_expr_to_string(str, dir->operands[j], shorthand);
+		}
+	case_end;
+
+	case_ast_node(u, AsmUnroll, node);
+		str = gb_string_appendc(str, "#unroll for ");
+		str = write_expr_to_string(str, u->val0, shorthand);
+		if (u->val1 != nullptr) {
+			str = gb_string_appendc(str, ", ");
+			str = write_expr_to_string(str, u->val1, shorthand);
+		}
+		str = gb_string_appendc(str, " in ");
+		str = write_expr_to_string(str, u->expr, shorthand);
+		str = gb_string_appendc(str, " {");
+		for_array(j, u->instructions) {
+			str = gb_string_appendc(str, j == 0 ? " " : "; ");
+			str = write_expr_to_string(str, u->instructions[j], shorthand);
+			if (u->instructions[j]->kind == Ast_AsmLabelDecl) {
+				str = gb_string_appendc(str, ":");
+			}
+		}
+		str = gb_string_appendc(str, " }");
 	case_end;
 
 	case_ast_node(term, AsmMemoryTerm, node);
