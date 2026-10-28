@@ -38,11 +38,12 @@ NULL_INDEX :: -1
 // Prototype for user allocation function.
 //	@param size the allocation size in bytes
 //	@param alignment the required alignment, guaranteed to be a power of 2
-AllocFcn :: proc "c" (size, alignment: i32) -> rawptr
+AllocFcn :: proc "c" (size: c.size_t, alignment: i32) -> rawptr
 
 // Prototype for user free function.
 //	@param mem the memory previously allocated through `AllocFcn`
-FreeFcn :: proc "c" (mem: rawptr)
+//	@param size the size of the allocation in bytes.
+FreeFcn :: proc "c" (mem: rawptr, size: c.size_t)
 
 // Prototype for the user assert callback. Return 0 to skip the debugger break.
 AssertFcn :: proc "c" (condition: cstring, fileName: cstring, lineNumber: c.int) -> c.int
@@ -60,7 +61,7 @@ foreign lib {
 	SetAllocator :: proc(allocFcn: AllocFcn, freeFcn: FreeFcn) ---
 
 	// Total bytes allocated by Box3D
-	GetByteCount :: proc() -> c.int ---
+	GetByteCount :: proc() -> i64 ---
 
 	// Override the default assert callback.
 	//	@param assertFcn a non-null assert callback
@@ -95,6 +96,13 @@ foreign lib {
 
 	// @return true if the library was built with BOX3D_DOUBLE_PRECISION (large world mode)
 	IsDoublePrecision :: proc() -> bool ---
+
+	// @return the value of B3_MAX_MANIFOLD_POINTS the library was compiled with. Useful for
+	// an ABI test.
+	GetMaxManifoldPoints :: proc() -> c.int ---
+
+	// @return true if the current CPU has the AVX2 instruction set.
+	IsAVX2Available :: proc() -> bool ---
 
 	// Get the absolute number of system ticks. The value is platform specific.
 	GetTicks :: proc() -> u64 ---
@@ -219,6 +227,8 @@ foreign lib {
 	World_IsValid :: proc(id: WorldId) -> bool ---
 
 	// Simulate a world for one time step. This performs collision detection, integration, and constraint solution.
+	// A time step of zero runs the broad-phase and collision, but skips the solver. So you can still
+	// get contact and sensor events.
 	// @param worldId The world to simulate
 	// @param timeStep The amount of time to simulate, this should be a fixed number. Usually 1/60.
 	// @param subStepCount The number of sub-steps, increasing the sub-step count can increase accuracy. Usually 4.
@@ -252,6 +262,7 @@ foreign lib {
 
 	// Cast a ray into the world to collect shapes in the path of the ray.
 	// Your callback function controls whether you get the closest point, any point, or n-points.
+	// Ignores back-side collision on meshes and height-fields.
 	// @note The callback function may receive shapes in any order
 	// @param worldId The world to cast the ray against
 	// @param origin The start point of the ray
@@ -264,17 +275,18 @@ foreign lib {
 
 	// Cast a ray into the world to collect the closest hit. This is a convenience function. Ignores initial overlap.
 	// This is less general than World_CastRay() and does not allow for custom filtering.
+	// Ignores back-side collision on meshes and height-fields.
 	World_CastRayClosest :: proc(worldId: WorldId, origin: Pos, translation: Vec3, filter: QueryFilter) -> RayResult ---
 
 	// Cast a shape through the world. Similar to a cast ray except that a shape is cast instead of a point.
 	// The proxy points are relative to the origin and the hit points come back as world positions, so the
-	// cast stays precise far from the world origin.
+	// cast stays precise far from the world origin. Ignores back-side collision on meshes and height-fields.
 	//	@see World_CastRay
 	World_CastShape :: proc(worldId: WorldId, origin: Pos, #by_ptr proxy: ShapeProxy, translation: Vec3, filter: QueryFilter, fcn: CastResultFcn, ctx: rawptr) -> TreeStats ---
 
 	// Cast a capsule mover through the world. This is a special shape cast that handles sliding along other shapes while reducing
 	// clipping. This is not a good source of information about what the mover is touching. Instead use the planes returned by
-	// World_CollideMover.
+	// World_CollideMover. Ignores back-side collision on meshes and height-fields.
 	// @param worldId World to cast the mover against
 	// @param origin World position the mover capsule is relative to
 	// @param mover Capsule mover, relative to the origin
@@ -287,6 +299,7 @@ foreign lib {
 
 	// Collide a capsule mover with the world, gathering collision planes that can be fed to SolvePlanes. Useful for
 	// kinematic character movement. The mover and the returned planes are relative to the origin.
+	// Ignores back-side collision on meshes and height-fields.
 	World_CollideMover :: proc(worldId: WorldId, origin: Pos, #by_ptr mover: Capsule, filter: QueryFilter, fcn: PlaneResultFcn, ctx: rawptr) ---
 
 	// Enable/disable sleep. If your application does not need sleeping, you can gain some performance
@@ -313,6 +326,19 @@ foreign lib {
 
 	// Get the restitution speed threshold. Usually in meters per second.
 	World_GetRestitutionThreshold :: proc(worldId: WorldId) -> f32 ---
+
+	// Set the number of iterations used by the restitution solver.
+	// @see MAX_RESTITUTION_ITERATIONS
+	World_SetRestitutionIterations :: proc(worldId: WorldId, iterations: c.int) ---
+
+	// Get the number of iterations used by the restitution solver.
+	World_GetRestitutionIterations :: proc(worldId: WorldId) -> c.int ---
+
+	// Enable restitution propagation.
+	World_EnableRestitutionPropagation :: proc(worldId: WorldId, flag: bool) ---
+
+	// Is restitution propagation enabled?
+	World_IsRestitutionPropagationEnabled :: proc(worldId: WorldId) -> bool ---
 
 	// Adjust the hit event threshold. This controls the collision speed needed to generate a ContactHitEvent.
 	// Usually in meters per second.
@@ -362,12 +388,23 @@ foreign lib {
 	// Get the maximum linear speed. Usually in m/s.
 	World_GetMaximumLinearSpeed :: proc(worldId: WorldId) -> f32 ---
 
+	// Set the tolerance for gyroscopic torque. [0, 1]
+	// @note modifying this only affects new bodies or bodies that get their mass updated.
+	World_SetIsotropicInertiaTolerance :: proc(worldId: WorldId, tolerance: f32) ---
+
+	// Get the tolerance for gyroscopic torque. [0, 1]
+	World_GetIsotropicInertiaTolerance :: proc(worldId: WorldId) -> f32 ---
+
 	// Enable/disable constraint warm starting. Advanced feature for testing. Disabling
 	// warm starting greatly reduces stability and provides no performance gain.
 	World_EnableWarmStarting :: proc(worldId: WorldId, flag: bool) ---
 
 	// Is constraint warm starting enabled?
 	World_IsWarmStartingEnabled :: proc(worldId: WorldId) -> bool ---
+
+	// Enable the SSE2 fallback even when AVX2 is present. This is for testing.
+	// Normally you should use the CMake build settings to disable AVX2.
+	World_EnableSSE2Fallback :: proc(worldId: WorldId, flag: bool) ---
 
 	// Get the number of awake bodies
 	World_GetAwakeBodyCount :: proc(worldId: WorldId) -> c.int ---
@@ -406,9 +443,6 @@ foreign lib {
 	World_DumpShapeBounds :: proc(worldId: WorldId, type: BodyType) ---
 
 	// This is for internal testing
-	World_RebuildStaticTree :: proc(worldId: WorldId) ---
-
-	// This is for internal testing
 	World_EnableSpeculative :: proc(worldId: WorldId, flag: bool) ---
 
 	// Dump world to a text file. Saves only awake bodies and associated static bodies.
@@ -427,7 +461,7 @@ foreign lib {
 	// Create a recording buffer with an optional initial byte capacity.
 	// Pass 0 to use the default (64 KiB). The buffer grows on demand.
 	// @return a new recording, owned by the caller
-	 CreateRecording :: proc(byteCapacity: c.int) -> Recording ---
+	CreateRecording :: proc(byteCapacity: c.int) -> ^Recording ---
 
 	// Destroy a recording and free its buffer.
 	// @param recording may be NULL
@@ -480,10 +514,10 @@ foreign lib {
 	// Replaying at a different count re-partitions the constraint graph, so the StateHash check
 	// becomes a cross-thread determinism test. Adjustable later with RecPlayer_SetWorkerCount.
 	// @return a new player, or NULL on bad header or deserialization failure
-	RecPlayer_Create :: proc(data: rawptr, size: c.int, workerCount: c.int) -> RecPlayer ---
+	CreatePlayer :: proc(data: rawptr, size: c.int, workerCount: c.int) -> ^RecPlayer ---
 
 	// Destroy the player and free all memory. Restores the previous global length scale.
-	RecPlayer_Destroy :: proc(player: ^RecPlayer) ---
+	DestroyPlayer :: proc(player: ^RecPlayer) ---
 
 	// Advance one frame: dispatch ops until the next Step completes.
 	// @return true when a frame was stepped, false at end-of-recording
@@ -564,7 +598,7 @@ foreign lib {
 	// Wire host debug-shape callbacks into the player's replay world so a renderer can build
 	// per-shape draw resources (the 3D sample needs this or the replay world draws nothing).
 	// Rebuilds the current world under the new callbacks and rewinds to frame 0, so call it
-	// once right after RecPlayer_Create and re-read the world id afterward. The callbacks
+	// once right after CreatePlayer and re-read the world id afterward. The callbacks
 	// persist across Restart and backward seeks, which recreate the world internally.
 	// @param player the player to configure
 	// @param createDebugShape called when a replayed shape is added; returns a user draw handle
@@ -811,6 +845,13 @@ foreign lib {
 	// Get the sleep threshold, usually in meters per second.
 	Body_GetSleepThreshold :: proc(bodyId: BodyId) -> f32 ---
 
+	// Set the continuous collision safety factor. Smaller is safer but can lead to hitching.
+	// Recommended range [0.01, 0.5]. Non-dimensional.
+	Body_SetSafetyFactor :: proc(bodyId: BodyId, safetyFactor: f32) ---
+
+	// Get the continuous collision safety factor. Non-dimensional.
+	Body_GetSafetyFactor :: proc(bodyId: BodyId) -> f32 ---
+
 	// Returns true if this body is enabled
 	Body_IsEnabled :: proc(bodyId: BodyId) -> bool ---
 
@@ -882,20 +923,37 @@ foreign lib {
 	// If there are no shapes attached then the returned AABB is empty and centered on the body origin.
 	Body_ComputeAABB :: proc(bodyId: BodyId) -> AABB ---
 
+	// The minimum distance from any shape to the shape centroid.
+	Body_GetMinExtent :: proc(bodyId: BodyId) -> f32 ---
+
+	// The maximum extent vector from any point on the body shapes to the center of mass.
+	Body_GetMaxExtent :: proc(bodyId: BodyId) -> Vec3 ---
+
+	// The maximum extent vector from any point on the body shapes to the body origin. Conservative.
+	Body_GetMaxExtentOrigin :: proc(bodyId: BodyId) -> Vec3 ---
+
 	// Get the closest point on a body to a world target.
 	Body_GetClosestPoint :: proc(bodyId: BodyId, result: ^Vec3, target: Vec3) -> f32 ---
 
 	// Cast a ray at a specific body using a specified body transform.
+	// Ignores back-side collision on meshes and height-fields.
 	Body_CastRay :: proc(bodyId: BodyId, origin: Pos, translation: Vec3, filter: QueryFilter, maxFraction: f32, bodyTransform: WorldTransform) -> BodyCastResult ---
 
 	// Cast a shape at a specific body using a specified body transform.
-	Body_CastShape :: proc(bodyId: BodyId, origin: Pos, #by_ptr proxy: ShapeProxy, translation: Vec3, filter: QueryFilter, maxFraction: f32, canEncroach: b32, bodyTransform: WorldTransform) -> BodyCastResult ---
+	// Ignores back-side collision on meshes and height-fields.
+	Body_CastShape :: proc(bodyId: BodyId, origin: Pos, #by_ptr proxy: ShapeProxy, translation: Vec3, filter: QueryFilter, maxFraction: f32, canEncroach: bool, bodyTransform: WorldTransform) -> BodyCastResult ---
 
 	// Overlap a shape with a specific body using a specified body transform.
 	Body_OverlapShape :: proc(bodyId: BodyId, origin: Pos, #by_ptr proxy: ShapeProxy, filter: QueryFilter, bodyTransform: WorldTransform) -> bool ---
 
 	// Collide a character mover with a specific body using a specified body transform.
+	// Only considers convex shapes on the body.
 	Body_CollideMover :: proc(bodyId: BodyId, bodyPlanes: [^]BodyPlaneResult, planeCapacity: c.int, origin: Pos, #by_ptr mover: Capsule, filter: QueryFilter, bodyTransform: WorldTransform) -> c.int ---
+
+	// Perform a time of impact between a character mover and a body using specified sweep transforms.
+	// Initial overlap of any shape on the body is ignored. A non-overlapped shape can still be hit.
+	// Only considers convex shapes on the body.
+	Body_TimeOfImpactMover :: proc(bodyId: BodyId, origin: Pos, #by_ptr mover: Capsule, moverTranslation: Vec3, filter: QueryFilter, bodyTransform1: WorldTransform, bodyTransform2: WorldTransform) -> BodyTOIResult ---
 
 	/** @} */ // body
 
@@ -1076,6 +1134,9 @@ foreign lib {
 	// Get the shape's height field. Asserts the type is correct.
 	Shape_GetHeightField :: proc(shapeId: ShapeId) -> ^HeightFieldData ---
 
+	// Get the shape's compound. Asserts the type is correct.
+	Shape_GetCompound :: proc(shapeId: ShapeId) -> ^CompoundData ---
+
 	// Allows you to change a shape to be a sphere or update the current sphere.
 	// This does not modify the mass properties.
 	// @see Body_ApplyMassFromShapes
@@ -1192,6 +1253,9 @@ foreign lib {
 
 	// Wake the bodies connect to this joint
 	Joint_WakeBodies :: proc(jointId: JointId) ---
+
+	// Is the joint awake? If true then an attached body is awake.
+	Joint_IsAwake :: proc(jointId: JointId) -> bool ---
 
 	// Get the current constraint force for this joint
 	Joint_GetConstraintForce :: proc(jointId: JointId) -> Vec3 ---
@@ -1417,6 +1481,95 @@ foreign lib {
 	MotorJoint_GetMaxSpringTorque :: proc(jointId: JointId) -> f32 ---
 
 	/**@}*/ // motor_joint
+
+	/**
+	 * @defgroup mover_joint Mover Joint
+	 * @brief Functions for the mover joint.
+	 *
+	 * The mover joint is designed for a dynamic character mover.
+	 *
+	 * @warning Experimental. The mover joint may change in future versions.
+	 * @{
+	 */
+
+	// Create a mover joint.
+	// @see MoverJointDef for details
+	CreateMoverJoint :: proc(worldId: WorldId, #by_ptr def: MoverJointDef) -> JointId ---
+
+	// Set the desired relative linear velocity, usually in meters per second.
+	MoverJoint_SetLinearVelocity :: proc(jointId: JointId, velocity: Vec3) ---
+
+	// Get the desired relative linear velocity, usually in meters per second.
+	MoverJoint_GetLinearVelocity :: proc(jointId: JointId) -> Vec3 ---
+
+	// Set the joint maximum force, usually in newtons.
+	MoverJoint_SetMaxVelocityForce :: proc(jointId: JointId, maxForce: f32) ---
+
+	// Get the joint maximum force, usually in newtons.
+	MoverJoint_GetMaxVelocityForce :: proc(jointId: JointId) -> f32 ---
+
+	/**@}*/ // mover_joint
+
+	/**
+	 * @defgroup pogo_joint Pogo Joint
+	 * @brief Functions for the pogo joint. Used for dynamic character movers.
+	 *
+	 * @warning Experimental. The pogo joint may change in future versions.
+	 * @{
+	 */
+
+	// Create a pogo joint
+	// @see PogoJointDef for details
+	CreatePogoJoint :: proc(worldId: WorldId, #by_ptr def: PogoJointDef) -> JointId ---
+
+	// Set the rest length of a pogo joint
+	// @param jointId The id for a pogo joint
+	// @param length The new pogo joint length
+	PogoJoint_SetRestLength :: proc(jointId: JointId, length: f32) ---
+
+	// Get the rest length of a pogo joint
+	PogoJoint_GetRestLength :: proc(jointId: JointId) -> f32 ---
+
+	// Set the spring stiffness in Hertz
+	PogoJoint_SetSpringHertz :: proc(jointId: JointId, hertz: f32) ---
+
+	// Get the spring Hertz
+	PogoJoint_GetSpringHertz :: proc(jointId: JointId) -> f32 ---
+
+	// Set the spring damping ratio, non-dimensional
+	PogoJoint_SetSpringDampingRatio :: proc(jointId: JointId, dampingRatio: f32) ---
+
+	// Get the spring damping ratio
+	PogoJoint_GetSpringDampingRatio :: proc(jointId: JointId) -> f32 ---
+
+	// Set the max tension force, usually in Newtons.
+	PogoJoint_SetMaxTensionForce :: proc(jointId: JointId, force: f32) ---
+
+	// Get the max tension force, usually in Newtons.
+	PogoJoint_GetMaxTensionForce :: proc(jointId: JointId) -> f32 ---
+
+	// Set the max compression force, usually in Newtons.
+	PogoJoint_SetMaxCompressionForce :: proc(jointId: JointId, force: f32) ---
+
+	// Get the max compression force, usually in Newtons.
+	PogoJoint_GetMaxCompressionForce :: proc(jointId: JointId) -> f32 ---
+
+	// Set the unit ground normal.
+	PogoJoint_SetNormal :: proc(jointId: JointId, normal: Vec3) ---
+
+	// Get the unit ground normal.
+	PogoJoint_GetNormal :: proc(jointId: JointId) -> Vec3 ---
+
+	// Get the current length of the pogo.
+	PogoJoint_GetCurrentLength :: proc(jointId: JointId) -> f32 ---
+
+	// Get the internal pogo velocity.
+	PogoJoint_GetCurrentSpeed :: proc(jointId: JointId) -> f32 ---
+
+	// Get the internal pogo impulse.
+	PogoJoint_GetImpulse :: proc(jointId: JointId) -> f32 ---
+
+	/**@}*/ // pogo_joint
 
 	/**
 	 * @defgroup filter_joint Filter Joint
@@ -1669,7 +1822,9 @@ foreign lib {
 	// Is the spherical joint motor enabled?
 	SphericalJoint_IsMotorEnabled :: proc(jointId: JointId) -> bool ---
 
-	// Set the spherical joint motor velocity in radians per second
+	// Set the spherical joint motor velocity in radians per second. This is the relative angular
+	// velocity between the two bodies in world space.
+	// motorVelocity = angularVelocityB - angularVelocityA
 	SphericalJoint_SetMotorVelocity :: proc(jointId: JointId, motorVelocity: Vec3) ---
 
 	// Get the spherical joint motor velocity in radians per second

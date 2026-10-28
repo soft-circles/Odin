@@ -108,6 +108,9 @@ foreign lib {
 	// Compute the closest points on two line segments.
 	SegmentDistance :: proc(p1, q1: Vec3, p2, q2: Vec3) -> SegmentDistanceResult ---
 
+	// Is this a valid number? Not NaN or infinity.
+	IsValidFloat :: proc(a: f32) -> bool ---
+
 	// Is this a valid vector? Not NaN or infinity.
 	IsValidVec3 :: proc(a: Vec3) -> bool ---
 
@@ -186,6 +189,7 @@ DistanceSquared :: #force_inline proc "c" (a, b: Vec3) -> f32 {
 }
 
 FLT_EPSILON :: 1.1920928955078125e-07 /* 0x0.000002p0 */
+FLT_MIN     :: 1.17549435082228750797e-38 /* smallest positive normal f32 */
 
 
 // Normalize a vector. Returns a zero vector if the input vector is very small.
@@ -193,7 +197,7 @@ FLT_EPSILON :: 1.1920928955078125e-07 /* 0x0.000002p0 */
 Normalize :: proc "c" (a: Vec3) -> Vec3 {
 	lengthSquared := a.x * a.x + a.y * a.y + a.z * a.z
 
-	if lengthSquared > 1000.0 * min(f32) {
+	if lengthSquared > 1000.0 * FLT_MIN {
 		s := 1.0 / math.sqrt(lengthSquared)
 		return Vec3{ s * a.x, s * a.y, s * a.z }
 	}
@@ -205,14 +209,15 @@ Normalize :: proc "c" (a: Vec3) -> Vec3 {
 // if the input is very small.
 @(require_results)
 GetLengthAndNormalize :: proc "c" (a: Vec3) -> (length: f32, n: Vec3) {
-	length = Length(a)
-	if length < FLT_EPSILON {
+	lengthSquared := a.x * a.x + a.y * a.y + a.z * a.z
+	if lengthSquared > 1000.0 * FLT_MIN {
+		length = math.sqrt(lengthSquared)
+		s := 1.0 / length
+		n = {s * a.x, s * a.y, s * a.z}
 		return
 	}
 
-	invLength := 1.0 / length
-	n = {invLength * a.x, invLength * a.y, invLength * a.z}
-	return
+	return 0.0, Vec3{0.0, 0.0, 0.0}
 }
 
 // Get a unit vector that is perpendicular to the supplied vector.
@@ -340,7 +345,7 @@ NegateQuat :: proc "c" (q: Quat) -> Quat {
 @(require_results)
 NormalizeQuat :: proc "c" (q: Quat) -> Quat {
 	lengthSq := DotQuat(q, q)
-	if lengthSq > 1000.0 * min(f32) {
+	if lengthSq > 1000.0 * FLT_MIN {
 		s := 1.0 / math.sqrt(lengthSq)
 		return Quat(s) * q
 	}
@@ -580,7 +585,7 @@ Transpose :: linalg.transpose
 @(require_results)
 InvertMatrix :: proc "c" (m: Matrix3) -> Matrix3 {
 	det := Det(m)
-	if AbsFloat(det) > 1000.0 * min(f32) {
+	if AbsFloat(det) > 1000.0 * FLT_MIN {
 		invDet := 1.0 / det
 		out: Matrix3
 		out[0] = invDet * Cross(m[1], m[2])
@@ -602,7 +607,7 @@ Solve3 :: proc "c" (m: Matrix3, a: Vec3) -> Vec3 {
 @(require_results)
 InvertT :: proc "c" (m: Matrix3) -> Matrix3 {
 	det := Det(m)
-	if AbsFloat(det) > 1000.0 * min(f32) {
+	if AbsFloat(det) > 1000.0 * FLT_MIN {
 		invDet := 1.0 / det
 		out: Matrix3
 		out[0] = invDet * Cross(m[1], m[2])
@@ -740,4 +745,16 @@ AABB_Transform :: proc "c" (transform: Transform, a: AABB) -> AABB {
 @(require_results)
 ClosestPointToAABB :: proc "c" (point: Vec3, a: AABB) -> Vec3 {
 	return Clamp(point, a.lowerBound, a.upperBound)
+}
+
+// One-dimensional mass-spring-damper simulation. Returns the new velocity given the position and
+// time step. You can then compute the new position using:
+// position += timeStep * newVelocity
+// This drives towards a zero position. By using implicit integration we get a stable solution that
+// doesn't require transcendental functions.
+@(require_results)
+SpringDamper :: proc "c" (hertz, dampingRatio, position, velocity, timeStep: f32) -> f32 {
+	omega := 2.0 * PI * hertz
+	omegaH := omega * timeStep
+	return (velocity - omega * omegaH * position) / (1.0 + 2.0 * dampingRatio * omegaH + omegaH * omegaH)
 }

@@ -44,8 +44,8 @@ foreign lib {
 	// Query an AABB for the closest object. The callback function is called for each proxy that might be closest to the supplied point.
 	// @param tree the dynamic tree to query
 	// @param point the query point
-	// @param maskBits nodes are skipped if the bit-wise AND with the node category bits is zero
-	// @param requireAllBits nodes are skipped if the bit-wise AND with the node category bits does not equal the maskBits
+	// @param maskBits proxies are skipped if the bit-wise AND with the proxy category bits is zero
+	// @param requireAllBits proxies are skipped if the bit-wise AND with the proxy category bits does not equal the maskBits
 	// @param callback a user provided instance of TreeQueryClosestCallbackFcn
 	// @param context a user context object that is provided to the callback
 	// @param minDistanceSqr the initial and final minimum squared distance. Provide a small initial to restrict the search and
@@ -63,8 +63,8 @@ foreign lib {
 	//	However, this filtering may be approximate, so the user should still apply filtering to results.
 	// @param tree the dynamic tree to ray cast
 	// @param input the ray cast input data. The ray extends from p1 to p1 + maxFraction * (p2 - p1)
-	// @param maskBits bit mask test: `bool accept = (maskBits & node->categoryBits) != 0;`
-	// @param requireAllBits modifies bit mask test: `bool accept = (maskBits & node->categoryBits) == maskBits;`
+	// @param maskBits bit mask test: `bool accept = (maskBits & proxy->categoryBits) != 0;`
+	// @param requireAllBits modifies bit mask test: `bool accept = (maskBits & proxy->categoryBits) == maskBits;`
 	// @param callback a callback function that is called for each proxy that is hit by the ray
 	// @param context user context that is passed to the callback
 	//	@return performance data
@@ -96,8 +96,8 @@ foreign lib {
 	// Get the number of bytes used by this tree
 	DynamicTree_GetByteCount :: proc(#by_ptr tree: DynamicTree) -> c.int ---
 
-	// Validate this tree has no enlarged AABBs. For testing.
-	DynamicTree_ValidateNoEnlarged :: proc(#by_ptr tree: DynamicTree) ---
+	// Validate this tree has no moved nodes. For testing.
+	DynamicTree_ValidateNoMoved :: proc(#by_ptr tree: DynamicTree) ---
 
 	// Save this tree to a file for debugging
 	DynamicTree_Save :: proc(#by_ptr tree: DynamicTree, fileName: cstring) ---
@@ -122,7 +122,11 @@ foreign lib {
 	// Create a rock shaped hull.
 	CreateRock :: proc(radius: f32) -> ^HullData ---
 
-	// Create a generic convex hull.
+	// Hull of 32 pseudo random points on a sphere. From the convex pile hull in PEEL.
+	CreateComplexHull :: proc(radius: f32) -> ^HullData ---
+
+	// Create a generic convex hull. This can fail if B3_MAX_HULL_VERTICES, B3_MAX_HULL_FACES,
+	// or B3_MAX_HULL_EDGES is exceeded.
 	CreateHull :: proc(points: [^]Vec3, pointCount: c.int, maxVertexCount: c.int) -> ^HullData ---
 
 	// Deep clone a hull.
@@ -265,13 +269,8 @@ foreign lib {
 	// Destroy a compound shape.
 	DestroyCompound :: proc(compound: ^CompoundData) ---
 
-	// Cast the provided compound data to bytes, setting the internal pointers to null.
-	// Use this before serializing the compound bytes.
-	ConvertCompoundToBytes :: proc(compound: ^CompoundData) -> [^]u8 ---
-
-	// Cast the provided bytes to compound data, setting up internal pointers.
-	// Use this after de-serializing the compound bytes.
-	ConvertBytesToCompound :: proc(bytes: [^]u8, byteCount: c.int) -> ^CompoundData ---
+	// Cast serialized bytes into a compound and validate. Returns null if invalid.
+	ValidateCompound :: proc(bytes: [^]u8, byteCount: c.int) -> ^CompoundData ---
 
 	/**@}*/ // compound
 
@@ -448,6 +447,12 @@ foreign lib {
 	// Collide a triangle and sphere. Normal points from triangle to sphere.
 	CollideTriangleAndSphere :: proc(manifold: ^LocalManifold, capacity: c.int, #by_ptr triangleA: [3]Vec3, #by_ptr sphereB: Sphere) ---
 
+	// Compute a 2D hull. Used internally for contact manifold simplification. Here for testing.
+	Hull2D :: proc(pts: [^]Point2D, count: c.int, hull: [^]Point2D) -> c.int ---
+
+	// Simplify a 2D hull. Used internally for contact manifold simplification. Here for testing.
+	SimplifyHull2D :: proc(hull: [^]Point2D, count: c.int, target: c.int) -> c.int ---
+
 
 	/**@}*/ // collision
 
@@ -472,13 +477,13 @@ foreign lib {
 // Get proxy user data
 @(require_results)
 DynamicTree_GetUserData :: proc "c" (#by_ptr tree: DynamicTree, proxyId: c.int) -> u64 {
-	return tree.nodes[proxyId].userData
+	return tree.proxies[proxyId].userData
 }
 
 // Get the AABB of a proxy
 @(require_results)
 DynamicTree_GetAABB :: proc "c" (#by_ptr tree: DynamicTree, proxyId: c.int) -> AABB {
-	return tree.nodes[proxyId].aabb
+	return tree.nodes[tree.proxies[proxyId].node].aabb
 }
 
 
@@ -534,7 +539,7 @@ GetHullFaces :: proc "c" (hull: ^HullData) -> Maybe(^HullFace) {
 
 // Get read only SOA vertices. This is an array of vertices with all x values,
 // y values, and z values as separate arrays. The array lengths are padded to
-// a multiple of 4. The padded values are repeats of the first value.
+// a multiple of 8. The padded values are repeats of the first value.
 @(require_results)
 GetHullSoaVertices :: proc "c" (hull: ^HullData) -> Maybe([^]f32) {
 	if hull.soaVertexOffset == 0 {
@@ -546,13 +551,23 @@ GetHullSoaVertices :: proc "c" (hull: ^HullData) -> Maybe([^]f32) {
 
 // Get read only SOA unit normal vectors. This is an array of normals with all x values,
 // y values, and z values as separate arrays. The array lengths are padded to
-// a multiple of 4. The padded values are repeats of the first value.
+// a multiple of 8. The padded values are 0.
 @(require_results)
 GetHullSoaNormals :: proc "c" (hull: ^HullData) -> Maybe([^]f32) {
 	if hull.soaNormalOffset == 0 {
 		return nil
 	}
 	return ([^]f32)(uintptr(hull) + uintptr(hull.soaNormalOffset))
+}
+
+// Get the dot products of the two adjacent face normals for each full edge.
+@(require_results)
+GetHullEdgeCosines :: proc "c" (hull: ^HullData) -> Maybe([^]f32) {
+	if hull.edgeCosineOffset == 0 {
+		return nil
+	}
+
+	return ([^]f32)(uintptr(hull) + uintptr(hull.edgeCosineOffset))
 }
 
 // Get read only mesh BVH nodes.
