@@ -17,12 +17,16 @@ LIB_PATH :: (
 	else "lib/darwin/libbox3d.a"      when ODIN_OS == .Darwin && (ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64) && !BOX3D_SHARED
 	else "lib/box3ddll.lib"           when ODIN_OS == .Windows && BOX3D_SHARED
 	else "lib/box3d.lib"              when ODIN_OS == .Windows
+	else "lib/n64/libbox3d.a"         when ODIN_OS == .N64
 	else ""
 )
 
+@(private)
+BUILD_SCRIPT :: "build_n64.sh\" with N64_INST set to the libdragon SDK" when ODIN_OS == .N64 else "build.sh\""
+
 when LIB_PATH != "" {
 	when !#exists(LIB_PATH) {
-		#panic("Could not find the compiled Box3D library at \"" + LIB_PATH + "\", it can be compiled by running `\"" + ODIN_ROOT + "vendor/box3d/src/build.sh\"`")
+		#panic("Could not find the compiled Box3D library at \"" + LIB_PATH + "\", it can be compiled by running `\"" + ODIN_ROOT + "vendor/box3d/src/" + BUILD_SCRIPT + "`")
 	}
 
 	@(export)

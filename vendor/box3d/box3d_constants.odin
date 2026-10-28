@@ -69,7 +69,7 @@ OVERLAP_SLOP :: #force_inline proc "c" () -> f32 {
 }
 
 // Maximum number of simultaneous worlds that can be allocated
-MAX_WORLDS :: 128
+MAX_WORLDS :: #config(BOX3D_MAX_WORLDS, 1 when ODIN_OS == .N64 else 128)
 
 // The maximum rotation of a body per time step. This limit is very large and is used
 // to prevent numerical problems. You shouldn't need to adjust this.
