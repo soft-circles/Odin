@@ -140,6 +140,8 @@ void b3AddContactToGraph( b3World* world, b3Contact* contact )
 			break;
 		}
 	}
+#else
+	B3_UNUSED( typeA, typeB );
 #endif
 
 	bool isScalar = ( contact->flags & b3_simMeshContact ) || colorIndex == B3_OVERFLOW_INDEX;
