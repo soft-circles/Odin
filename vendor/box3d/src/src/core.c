@@ -68,7 +68,6 @@ void b3SetAssertFcn( b3AssertFcn* assertFcn )
 	b3AssertHandler = assertFcn;
 }
 
-#if !defined( NDEBUG ) || defined( B3_ENABLE_ASSERT )
 int b3InternalAssert( const char* condition, const char* fileName, int lineNumber )
 {
 	int result = b3AssertHandler( condition, fileName, lineNumber );
@@ -78,7 +77,6 @@ int b3InternalAssert( const char* condition, const char* fileName, int lineNumbe
 	}
 	return result;
 }
-#endif
 
 static void b3DefaultLogFcn( const char* message )
 {
