@@ -37,6 +37,12 @@
 #define B3_ARENA_CAPACITY ( 128 * 1024 )
 #endif
 
+// Initial capacity of the world's step stack. A step that needs more falls back to the heap, and the stack then grows
+// to one and a half times its peak.
+#ifndef B3_STACK_CAPACITY
+#define B3_STACK_CAPACITY 2048
+#endif
+
 _Static_assert( B3_MAX_WORLDS > 0, "must be 1 or more" );
 _Static_assert( B3_MAX_WORLDS < UINT16_MAX, "B3_MAX_WORLDS limit exceeded" );
 b3World b3_worlds[B3_MAX_WORLDS];
@@ -257,18 +263,18 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->generation = revision;
 	world->inUse = true;
 
-	world->stack = b3CreateStack( 2048 );
+	world->stack = b3CreateStack( B3_STACK_CAPACITY );
 
-	b3Array_Reserve( world->manifoldAllocators, 16 );
+	b3Array_Reserve( world->manifoldAllocators, B3_MIN_CAPACITY );
 	world->manifoldAllocatorMutex = b3CreateMutex();
 
 	b3CreateBroadPhase( &world->broadPhase, &def->capacity );
-	b3CreateGraph( &world->constraintGraph, 16 );
+	b3CreateGraph( &world->constraintGraph, B3_MIN_CAPACITY );
 
 	// pools
 	world->bodyIdPool = b3CreateIdPool();
 
-	int bodyCapacity = b3MaxInt( 16, def->capacity.staticBodyCount + def->capacity.dynamicBodyCount );
+	int bodyCapacity = b3MaxInt( B3_MIN_CAPACITY, def->capacity.staticBodyCount + def->capacity.dynamicBodyCount );
 	b3Array_Reserve( world->bodies, bodyCapacity );
 	b3Array_Reserve( world->solverSets, 8 );
 
@@ -279,7 +285,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	// static set
 	set.setIndex = b3AllocId( &world->solverSetIdPool );
 	b3Array_Push( world->solverSets, set );
-	b3Array_Reserve( world->solverSets.data[b3_staticSet].bodySims, b3MaxInt( 16, def->capacity.staticBodyCount ) );
+	b3Array_Reserve( world->solverSets.data[b3_staticSet].bodySims, b3MaxInt( B3_MIN_CAPACITY, def->capacity.staticBodyCount ) );
 	B3_ASSERT( world->solverSets.data[b3_staticSet].setIndex == b3_staticSet );
 
 	// disabled set
@@ -290,14 +296,14 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	// awake set
 	set.setIndex = b3AllocId( &world->solverSetIdPool );
 	b3Array_Push( world->solverSets, set );
-	b3Array_Reserve( world->solverSets.data[b3_awakeSet].bodySims, b3MaxInt( 16, def->capacity.dynamicBodyCount ) );
-	b3Array_Reserve( world->solverSets.data[b3_awakeSet].bodyStates, b3MaxInt( 16, def->capacity.dynamicBodyCount ) );
-	b3Array_Reserve( world->solverSets.data[b3_awakeSet].contactIndices, b3MaxInt( 16, def->capacity.contactCount ) );
+	b3Array_Reserve( world->solverSets.data[b3_awakeSet].bodySims, b3MaxInt( B3_MIN_CAPACITY, def->capacity.dynamicBodyCount ) );
+	b3Array_Reserve( world->solverSets.data[b3_awakeSet].bodyStates, b3MaxInt( B3_MIN_CAPACITY, def->capacity.dynamicBodyCount ) );
+	b3Array_Reserve( world->solverSets.data[b3_awakeSet].contactIndices, b3MaxInt( B3_MIN_CAPACITY, def->capacity.contactCount ) );
 	B3_ASSERT( world->solverSets.data[b3_awakeSet].setIndex == b3_awakeSet );
 
 	world->shapeIdPool = b3CreateIdPool();
 
-	int shapeCapacity = b3MaxInt( 16, def->capacity.staticShapeCount + def->capacity.dynamicShapeCount );
+	int shapeCapacity = b3MaxInt( B3_MIN_CAPACITY, def->capacity.staticShapeCount + def->capacity.dynamicShapeCount );
 	b3Array_Reserve( world->shapes, shapeCapacity );
 	b3Array_Reserve( world->fatAABBs, shapeCapacity );
 
@@ -307,20 +313,26 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->names = b3CreateNameCache();
 
 	world->contactIdPool = b3CreateIdPool();
-	b3Array_Reserve( world->contacts, b3MaxInt( 16, def->capacity.contactCount ) );
+	b3Array_Reserve( world->contacts, b3MaxInt( B3_MIN_CAPACITY, def->capacity.contactCount ) );
 
 	world->jointIdPool = b3CreateIdPool();
-	b3Array_Reserve( world->joints, 16 );
+	b3Array_Reserve( world->joints, B3_MIN_CAPACITY );
 
 	world->islandIdPool = b3CreateIdPool();
-	b3Array_Reserve( world->islands, b3MaxInt( 16, def->capacity.dynamicBodyCount ) );
+	b3Array_Reserve( world->islands, b3MaxInt( B3_MIN_CAPACITY, def->capacity.dynamicBodyCount ) );
 
-	b3Array_Reserve( world->sensors, 4 );
+	if ( B3_ENABLE_SENSORS )
+	{
+		b3Array_Reserve( world->sensors, 4 );
+	}
 
 	b3Array_Reserve( world->bodyMoveEvents, 4 );
-	b3Array_Reserve( world->sensorBeginEvents, 4 );
-	b3Array_Reserve( world->sensorEndEvents[0], 4 );
-	b3Array_Reserve( world->sensorEndEvents[1], 4 );
+	if ( B3_ENABLE_SENSORS )
+	{
+		b3Array_Reserve( world->sensorBeginEvents, 4 );
+		b3Array_Reserve( world->sensorEndEvents[0], 4 );
+		b3Array_Reserve( world->sensorEndEvents[1], 4 );
+	}
 	b3Array_Reserve( world->contactBeginEvents, 4 );
 	b3Array_Reserve( world->contactEndEvents[0], 4 );
 	b3Array_Reserve( world->contactEndEvents[1], 4 );
@@ -1169,7 +1181,10 @@ void b3World_Step( b3WorldId worldId, float timeStep, int subStepCount )
 	// Update sensors
 	{
 		uint64_t sensorTicks = b3GetTicks();
-		b3OverlapSensors( world );
+		if ( B3_ENABLE_SENSORS )
+		{
+			b3OverlapSensors( world );
+		}
 		world->profile.sensors = b3GetMilliseconds( sensorTicks );
 	}
 
@@ -1399,7 +1414,7 @@ void b3World_Draw( b3WorldId worldId, b3DebugDraw* draw, uint64_t maskBits )
 	b3HexColor impulseColor = b3_colorMagenta;
 	b3HexColor frictionColor = b3_colorYellow;
 
-	b3HexColor graphColors[B3_GRAPH_COLOR_COUNT] = {
+	b3HexColor graphColors[24] = {
 		b3_colorRed,	b3_colorOrange, b3_colorYellow,	   b3_colorGreen,	  b3_colorCyan,		b3_colorBlue,
 		b3_colorViolet, b3_colorPink,	b3_colorChocolate, b3_colorGoldenRod, b3_colorCoral,	b3_colorRosyBrown,
 		b3_colorAqua,	b3_colorPeru,	b3_colorLime,	   b3_colorGold,	  b3_colorPlum,		b3_colorSnow,
@@ -2658,7 +2673,7 @@ b3Counters b3World_GetCounters( b3WorldId worldId )
 	s.byteCount = (int64_t)b3GetWorldByteCount( world, false );
 	s.taskCount = world->taskCount;
 
-	_Static_assert( B3_GRAPH_COLOR_COUNT == sizeof( s.colorCounts ) / sizeof( s.colorCounts[0] ), "colorCounts size mismatch" );
+	_Static_assert( B3_GRAPH_COLOR_COUNT <= sizeof( s.colorCounts ) / sizeof( s.colorCounts[0] ), "colorCounts size mismatch" );
 
 	s.awakeContactCount = 0;
 	for ( int i = 0; i < B3_GRAPH_COLOR_COUNT; ++i )

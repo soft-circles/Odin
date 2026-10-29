@@ -404,7 +404,7 @@ void b3DestroyBody( b3BodyId bodyId )
 			world->compoundShapeCount -= 1;
 		}
 
-		if ( shape->sensorIndex != B3_NULL_INDEX )
+		if ( B3_ENABLE_SENSORS && shape->sensorIndex != B3_NULL_INDEX )
 		{
 			b3DestroySensor( world, shape );
 		}

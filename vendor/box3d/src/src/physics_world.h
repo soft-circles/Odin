@@ -13,8 +13,13 @@
 
 #include "box3d/types.h"
 
+// Debug points and lines each worker can record during a step for b3World_Draw. Targets that never draw lower them.
+#ifndef B3_DEBUG_POINT_CAPACITY
 #define B3_DEBUG_POINT_CAPACITY 64
+#endif
+#ifndef B3_DEBUG_LINE_CAPACITY
 #define B3_DEBUG_LINE_CAPACITY 64
+#endif
 
 typedef struct b3Body b3Body;
 typedef struct b3Recording b3Recording;
@@ -28,6 +33,11 @@ typedef struct b3Shape b3Shape;
 typedef struct b3SolverSet b3SolverSet;
 
 b3DeclareArray( b3BlockAllocator );
+
+// Manifold arrays each pool of a given manifold count preallocates when a contact first needs that count.
+#ifndef B3_MANIFOLD_POOL_INITIAL_COUNT
+#define B3_MANIFOLD_POOL_INITIAL_COUNT ( 2 * B3_BLOCK_SIZE )
+#endif
 b3DeclareArray( b3Body );
 b3DeclareArray( b3SolverSet );
 b3DeclareArray( b3Joint );
@@ -336,7 +346,7 @@ static inline b3Manifold* b3AllocateManifolds( b3World* world, int count )
 	int currentCount = world->manifoldAllocators.count;
 	for ( int i = currentCount; i < count; ++i )
 	{
-		b3BlockAllocator allocator = b3CreateBlockAllocator( ( i + 1 ) * sizeof( b3Manifold ), 2 * B3_BLOCK_SIZE );
+		b3BlockAllocator allocator = b3CreateBlockAllocator( ( i + 1 ) * sizeof( b3Manifold ), B3_MANIFOLD_POOL_INITIAL_COUNT );
 		b3Array_Push( world->manifoldAllocators, allocator );
 	}
 

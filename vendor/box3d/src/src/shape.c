@@ -186,7 +186,7 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 	shape->nameId = b3AddName( &world->names, def->name );
 	shape->generation += 1;
 
-	if ( shape->type == b3_compoundShape )
+	if ( B3_IS_SHAPE( shape->type, b3_compoundShape ) )
 	{
 		world->compoundShapeCount += 1;
 
@@ -265,6 +265,13 @@ static b3ShapeId b3CreateShape( b3BodyId bodyId, const b3ShapeDef* def, const vo
 	}
 
 	if ( world->shapes.count == B3_MAX_SHAPES && world->shapeIdPool.freeArray.count == 0 )
+	{
+		B3_ASSERT( false );
+		return b3_nullShapeId;
+	}
+
+	bool typeLeftOut = B3_SHAPE_TYPES != 0xffffffffu && B3_HAS_SHAPE( shapeType ) == 0;
+	if ( typeLeftOut || ( B3_ENABLE_SENSORS == 0 && def->isSensor ) )
 	{
 		B3_ASSERT( false );
 		return b3_nullShapeId;
@@ -609,10 +616,10 @@ b3AABB b3ComputeShapeAABB( const b3Shape* shape, b3Transform transform )
 			return b3ComputeCapsuleAABB( &shape->capsule, transform );
 
 		case b3_compoundShape:
-			return b3ComputeCompoundAABB( shape->compound, transform );
+			return B3_HAS_SHAPE( b3_compoundShape ) ? b3ComputeCompoundAABB( shape->compound, transform ) : (b3AABB){ transform.p, transform.p };
 
 		case b3_heightShape:
-			return b3ComputeHeightFieldAABB( shape->heightField, transform );
+			return B3_HAS_SHAPE( b3_heightShape ) ? b3ComputeHeightFieldAABB( shape->heightField, transform ) : (b3AABB){ transform.p, transform.p };
 
 		case b3_hullShape:
 			return b3ComputeHullAABB( shape->hull, transform );
@@ -683,6 +690,10 @@ b3Vec3 b3GetShapeCentroid( const b3Shape* shape )
 			return b3Lerp( shape->capsule.center1, shape->capsule.center2, 0.5f );
 		case b3_compoundShape:
 		{
+			if ( B3_HAS_SHAPE( b3_compoundShape ) == 0 )
+			{
+				return b3Vec3_zero;
+			}
 			b3AABB aabb = b3ComputeCompoundAABB( shape->compound, b3Transform_identity );
 			return b3AABB_Center( aabb );
 		}
@@ -697,6 +708,10 @@ b3Vec3 b3GetShapeCentroid( const b3Shape* shape )
 		}
 		case b3_heightShape:
 		{
+			if ( B3_HAS_SHAPE( b3_heightShape ) == 0 )
+			{
+				return b3Vec3_zero;
+			}
 			b3AABB aabb = b3ComputeHeightFieldAABB( shape->heightField, b3Transform_identity );
 			return b3AABB_Center( aabb );
 		}
@@ -788,6 +803,10 @@ b3ShapeExtent b3ComputeShapeExtent( const b3Shape* shape, b3Vec3 localCenter )
 
 		case b3_compoundShape:
 		{
+			if ( B3_HAS_SHAPE( b3_compoundShape ) == 0 )
+			{
+				break;
+			}
 			// This is shouldn't be needed but here for completeness
 			b3AABB aabb = b3ComputeCompoundAABB( shape->compound, b3Transform_identity );
 			float r1 = b3Length( b3Sub( aabb.lowerBound, localCenter ) );
@@ -862,7 +881,10 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			output = b3RayCastCapsule( &shape->capsule, &localInput );
 			break;
 		case b3_compoundShape:
-			output = b3RayCastCompound( shape->compound, &localInput );
+			if ( B3_HAS_SHAPE( b3_compoundShape ) )
+			{
+				output = b3RayCastCompound( shape->compound, &localInput );
+			}
 			break;
 		case b3_sphereShape:
 			output = b3RayCastSphere( &shape->sphere, &localInput );
@@ -874,7 +896,10 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 			output = b3RayCastMesh( &shape->mesh, &localInput );
 			break;
 		case b3_heightShape:
-			output = b3RayCastHeightField( shape->heightField, &localInput );
+			if ( B3_HAS_SHAPE( b3_heightShape ) )
+			{
+				output = b3RayCastHeightField( shape->heightField, &localInput );
+			}
 			break;
 		default:
 			return output;
@@ -907,11 +932,17 @@ b3CastOutput b3ShapeCastShape( const b3Shape* shape, b3Transform transform, cons
 			break;
 
 		case b3_compoundShape:
-			output = b3ShapeCastCompound( shape->compound, &localInput );
+			if ( B3_HAS_SHAPE( b3_compoundShape ) )
+			{
+				output = b3ShapeCastCompound( shape->compound, &localInput );
+			}
 			break;
 
 		case b3_heightShape:
-			output = b3ShapeCastHeightField( shape->heightField, &localInput );
+			if ( B3_HAS_SHAPE( b3_heightShape ) )
+			{
+				output = b3ShapeCastHeightField( shape->heightField, &localInput );
+			}
 			break;
 
 		case b3_hullShape:
@@ -943,10 +974,10 @@ bool b3OverlapShape( const b3Shape* shape, b3Transform transform, const b3ShapeP
 			return b3OverlapCapsule( &shape->capsule, transform, proxy );
 
 		case b3_compoundShape:
-			return b3OverlapCompound( shape->compound, transform, proxy );
+			return B3_HAS_SHAPE( b3_compoundShape ) ? b3OverlapCompound( shape->compound, transform, proxy ) : false;
 
 		case b3_heightShape:
-			return b3OverlapHeightField( shape->heightField, transform, proxy );
+			return B3_HAS_SHAPE( b3_heightShape ) ? b3OverlapHeightField( shape->heightField, transform, proxy ) : false;
 
 		case b3_hullShape:
 			return b3OverlapHull( shape->hull, transform, proxy );
@@ -984,7 +1015,10 @@ int b3CollideMover( b3PlaneResult* planes, int planeCapacity, const b3Shape* sha
 			break;
 
 		case b3_compoundShape:
-			planeCount = b3CollideMoverAndCompound( planes, planeCapacity, shape->compound, &localMover );
+			if ( B3_HAS_SHAPE( b3_compoundShape ) )
+			{
+				planeCount = b3CollideMoverAndCompound( planes, planeCapacity, shape->compound, &localMover );
+			}
 			break;
 
 		case b3_sphereShape:
@@ -1000,7 +1034,10 @@ int b3CollideMover( b3PlaneResult* planes, int planeCapacity, const b3Shape* sha
 			break;
 
 		case b3_heightShape:
-			planeCount = b3CollideMoverAndHeightField( planes, planeCapacity, shape->heightField, &localMover );
+			if ( B3_HAS_SHAPE( b3_heightShape ) )
+			{
+				planeCount = b3CollideMoverAndHeightField( planes, planeCapacity, shape->heightField, &localMover );
+			}
 			break;
 
 		default:
@@ -2276,7 +2313,7 @@ b3TOIOutput b3ShapeTimeOfImpact( b3Shape* shapeA, b3Shape* shapeB, b3Sweep* swee
 	bool isSensor = shapeA->sensorIndex != B3_NULL_INDEX;
 
 	b3ShapeType typeA = shapeA->type;
-	if ( typeA == b3_compoundShape )
+	if ( B3_IS_SHAPE( typeA, b3_compoundShape ) )
 	{
 		// todo implement b3CompoundTimeOfImpact
 		b3CompoundImpactContext context = { 0 };
@@ -2356,7 +2393,7 @@ b3TOIOutput b3ShapeTimeOfImpact( b3Shape* shapeA, b3Shape* shapeB, b3Sweep* swee
 		{
 			b3QueryMesh( &shapeA->mesh, localBounds, b3MeshTimeOfImpactFcn, &context );
 		}
-		else if ( typeA == b3_heightShape )
+		else if ( B3_IS_SHAPE( typeA, b3_heightShape ) )
 		{
 			b3QueryHeightField( shapeA->heightField, localBounds, b3MeshTimeOfImpactFcn, &context );
 		}
@@ -2416,11 +2453,11 @@ uint64_t b3GetShapeUserMaterialId( const b3Shape* shape, int childIndex, int tri
 			materialIndex = indices[triangleIndex];
 		}
 	}
-	else if ( shape->type == b3_heightShape )
+	else if ( B3_IS_SHAPE( shape->type, b3_heightShape ) )
 	{
 		materialIndex = b3GetHeightFieldMaterial( shape->heightField, triangleIndex );
 	}
-	else if ( shape->type == b3_compoundShape )
+	else if ( B3_IS_SHAPE( shape->type, b3_compoundShape ) )
 	{
 		b3ChildShape child = b3GetCompoundChild( shape->compound, childIndex );
 		if ( child.type == b3_meshShape )

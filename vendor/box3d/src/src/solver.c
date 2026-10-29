@@ -703,7 +703,7 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 	B3_ASSERT( endIndex <= world->bodyMoveEvents.count );
 
 	bool enableSleep = world->enableSleep;
-	bool enableContinuous = world->enableContinuous;
+	bool enableContinuous = B3_ENABLE_CONTINUOUS && world->enableContinuous;
 	float timeStep = stepContext->dt;
 	float invTimeStep = stepContext->inv_dt;
 	uint16_t worldId = world->worldId;
@@ -2178,7 +2178,7 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 	}
 
 	int bulletBodyCount = b3AtomicLoadInt( &stepContext->bulletBodyCount );
-	if ( bulletBodyCount > 0 )
+	if ( B3_ENABLE_CONTINUOUS && bulletBodyCount > 0 )
 	{
 		b3TracyCZoneNC( bullets, "Bullets", b3_colorDarkGoldenRod, true );
 		uint64_t bulletTicks = b3GetTicks();

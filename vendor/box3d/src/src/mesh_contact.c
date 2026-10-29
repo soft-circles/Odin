@@ -110,7 +110,7 @@ static void b3RefreshCache( b3Contact* contact, const b3Shape* shapeA, b3WorldTr
 	b3Transform meshTransform = b3ToRelativeTransform( xfA, b3Pos_zero );
 	b3AABB localBounds = b3AABB_Transform( b3InvertTransform( meshTransform ), meshContact->queryBounds );
 	int triangleCount;
-	if ( shapeA->type == b3_meshShape )
+	if ( B3_HAS_SHAPE( b3_heightShape ) == 0 || shapeA->type == b3_meshShape )
 	{
 		triangleCount = b3QueryMeshTriangles( triangleIndices, triangleCapacity, &shapeA->mesh, localBounds );
 	}
@@ -630,7 +630,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 			int index = baseIndex + b3MinInt( lane, laneCount - 1 );
 			int triangleIndex = triangleCaches[index].triangleIndex;
 
-			if ( meshVertices != NULL )
+			if ( B3_HAS_SHAPE( b3_heightShape ) == 0 || meshVertices != NULL )
 			{
 				b3MeshTriangle meshTriangle = meshTriangles[triangleIndex];
 				lanes[0][lane] = b3Mul( meshScale, meshVertices[meshTriangle.index1] );
@@ -719,7 +719,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		const b3Vec3* vertices = survivorVertices + 3 * survivorIndex;
 
 		b3Triangle triangle;
-		if ( shapeA->type == b3_meshShape )
+		if ( B3_HAS_SHAPE( b3_heightShape ) == 0 || shapeA->type == b3_meshShape )
 		{
 			triangle = b3GetMeshTriangle( &shapeA->mesh, triangleIndex );
 		}
@@ -1229,7 +1229,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 		float sampleCount = 0.0f;
 
 		const uint8_t* materialIndices;
-		if ( shapeA->type == b3_meshShape )
+		if ( B3_HAS_SHAPE( b3_heightShape ) == 0 || shapeA->type == b3_meshShape )
 		{
 			materialIndices = b3GetMeshMaterialIndices( shapeA->mesh.data );
 		}
