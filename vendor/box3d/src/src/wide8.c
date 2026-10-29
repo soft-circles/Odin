@@ -15,7 +15,9 @@
 
 B3_AVX2_BEGIN
 
+#if B3_FORCE_OVERFLOW == 0
 #include "contact_solver_wide.inl"
+#endif
 #include "convex_manifold_wide.inl"
 
 B3_AVX2_END

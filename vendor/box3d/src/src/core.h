@@ -144,6 +144,12 @@ typedef struct b3AtomicI64
 // Used to prevent the compiler from warning about unused variables
 #define B3_UNUSED( ... ) (void)sizeof( ( __VA_ARGS__, 0 ) )
 
+// Assigns all constraints to overflow, so the scalar solver solves every contact and the wide contact solver is
+// compiled out. Used for debugging and on targets without SIMD, where the wide solver emulates each lane in scalar code.
+#ifndef B3_FORCE_OVERFLOW
+#define B3_FORCE_OVERFLOW 0
+#endif
+
 // Use to validate definitions. Do not take my cookie.
 #define B3_SECRET_COOKIE 1152023
 

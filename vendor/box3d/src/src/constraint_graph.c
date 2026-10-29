@@ -20,9 +20,6 @@
 // scatter would write to the same kinematic body from multiple threads. Even if these writes don't modify the body, they will
 // cause horrible cache stalls. To make this feasible I would need a way to block these writes.
 
-// This is used for debugging by making all constraints be assigned to overflow.
-#define B3_FORCE_OVERFLOW 0
-
 static const b3HexColor b3_graphColors[B3_GRAPH_COLOR_COUNT] = {
 	b3_colorRed,	   b3_colorOrange,		b3_colorYellow,			b3_colorLimeGreen,		 b3_colorSpringGreen,
 	b3_colorAqua,	   b3_colorDodgerBlue,	b3_colorBlueViolet,		b3_colorMagenta,		 b3_colorDeepPink,
