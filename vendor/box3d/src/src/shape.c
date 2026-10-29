@@ -362,7 +362,7 @@ b3ShapeId b3CreateHullShape( b3BodyId bodyId, const b3ShapeDef* def, const b3Hul
 	if ( shapeId.index1 != 0 )
 	{
 		b3World* world = b3GetUnlockedWorld( bodyId.world0 );
-		if ( world != NULL && world->recording != NULL )
+		if ( world != NULL && b3IsRecording( world ) )
 		{
 			uint32_t geometryId = b3RecInternHull( world->recording, hull );
 			b3RecArgs_CreateHullShape createArgs = { bodyId, *def, geometryId };
@@ -388,7 +388,7 @@ b3ShapeId b3CreateTransformedHullShape( b3BodyId bodyId, const b3ShapeDef* def, 
 	if ( shapeId.index1 != 0 )
 	{
 		b3World* world = b3GetUnlockedWorld( bodyId.world0 );
-		if ( world != NULL && world->recording != NULL )
+		if ( world != NULL && b3IsRecording( world ) )
 		{
 			// The transform and scale are baked into fresh hull data at create time. Record the baked hull
 			// as a plain hull shape so replay rebuilds identical geometry with no rebake, and the keyframe
@@ -417,7 +417,7 @@ b3ShapeId b3CreateMeshShape( b3BodyId bodyId, const b3ShapeDef* def, const b3Mes
 	if ( shapeId.index1 != 0 )
 	{
 		b3World* world = b3GetUnlockedWorld( bodyId.world0 );
-		if ( world != NULL && world->recording != NULL )
+		if ( world != NULL && b3IsRecording( world ) )
 		{
 			uint32_t geometryId = b3RecInternMesh( world->recording, mesh );
 			b3RecArgs_CreateMeshShape createArgs = { bodyId, *def, geometryId, scale };
@@ -441,7 +441,7 @@ b3ShapeId b3CreateHeightFieldShape( b3BodyId bodyId, const b3ShapeDef* def, cons
 	if ( shapeId.index1 != 0 )
 	{
 		b3World* world = b3GetUnlockedWorld( bodyId.world0 );
-		if ( world != NULL && world->recording != NULL )
+		if ( world != NULL && b3IsRecording( world ) )
 		{
 			uint32_t geometryId = b3RecInternHeightField( world->recording, heightField );
 			b3RecArgs_CreateHeightFieldShape createArgs = { bodyId, *def, geometryId };
@@ -464,7 +464,7 @@ b3ShapeId b3CreateBakedCompoundShape( b3BodyId bodyId, b3ShapeDef* def, const b3
 	if ( shapeId.index1 != 0 )
 	{
 		b3World* world = b3GetUnlockedWorld( bodyId.world0 );
-		if ( world != NULL && world->recording != NULL )
+		if ( world != NULL && b3IsRecording( world ) )
 		{
 			uint32_t geometryId = b3RecInternCompound( world->recording, compound );
 			b3RecArgs_CreateCompoundShape createArgs = { bodyId, *def, geometryId };
@@ -1658,7 +1658,7 @@ void b3Shape_SetHull( b3ShapeId shapeId, const b3HullData* hull )
 		return;
 	}
 
-	if ( world->recording != NULL )
+	if ( b3IsRecording( world ) )
 	{
 		// Intern the shared hull.
 		uint32_t geometryId = b3RecInternHull( world->recording, data );
@@ -1693,7 +1693,7 @@ void b3Shape_SetMesh( b3ShapeId shapeId, const b3MeshData* meshData, b3Vec3 scal
 
 	world->locked = true;
 
-	if ( world->recording != NULL )
+	if ( b3IsRecording( world ) )
 	{
 		uint32_t geometryId = b3RecInternMesh( world->recording, meshData );
 		b3RecArgs_ShapeSetMesh setArgs = { shapeId, geometryId, scale };

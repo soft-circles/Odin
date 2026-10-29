@@ -577,6 +577,30 @@ void b3JoinThread( b3Thread* t )
 
 #else
 
+#if defined( N64 )
+
+#include <n64sys.h>
+
+uint64_t b3GetTicks( void )
+{
+	return get_ticks();
+}
+
+float b3GetMilliseconds( uint64_t ticks )
+{
+	return (float)( get_ticks() - ticks ) * ( 1000.0f / TICKS_PER_SECOND );
+}
+
+float b3GetMillisecondsAndReset( uint64_t* ticks )
+{
+	uint64_t ticksNow = get_ticks();
+	float ms = (float)( ticksNow - *ticks ) * ( 1000.0f / TICKS_PER_SECOND );
+	*ticks = ticksNow;
+	return ms;
+}
+
+#else
+
 uint64_t b3GetTicks( void )
 {
 	return 0;
@@ -593,6 +617,8 @@ float b3GetMillisecondsAndReset( uint64_t* ticks )
 	( (void)( ticks ) );
 	return 0.0f;
 }
+
+#endif
 
 void b3Yield( void )
 {

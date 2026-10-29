@@ -1033,6 +1033,8 @@ void b3StoreImpulses_Overflow( b3StepContext* context )
 	b3StoreImpulses_Mesh( block, context, 0 );
 }
 
+#if B3_FORCE_OVERFLOW == 0
+
 void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 {
 #if defined( B3_SIMD_HAS_WIDTH_8 )
@@ -1230,3 +1232,87 @@ int b3GetWideMeshManifoldByteCount( int simdWidth )
 
 	return b3GetWideMeshManifoldByteCountW4();
 }
+
+#else
+
+// All contacts are in the overflow color, so no solver blocks reference wide constraints.
+
+void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3WarmStartContacts_Convex( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3PushContacts_Convex( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3ApplyRestitution_Convex( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3StoreImpulses_Convex( b3SolverBlock block, b3StepContext* context, int workerIndex )
+{
+	B3_UNUSED( block, context, workerIndex );
+}
+
+int b3GetWideContactConstraintByteCount( int simdWidth )
+{
+	B3_UNUSED( simdWidth );
+	return 0;
+}
+
+void b3PrepareContacts_MeshWide( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3WarmStartContacts_MeshWide( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3PushContacts_MeshWide( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3SolveContacts_MeshWide( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3ApplyRestitution_MeshWide( b3SolverBlock block, b3StepContext* context )
+{
+	B3_UNUSED( block, context );
+}
+
+void b3StoreImpulses_MeshWide( b3SolverBlock block, b3StepContext* context, int workerIndex )
+{
+	B3_UNUSED( block, context, workerIndex );
+}
+
+int b3GetWideMeshConstraintByteCount( int simdWidth )
+{
+	B3_UNUSED( simdWidth );
+	return 0;
+}
+
+int b3GetWideMeshManifoldByteCount( int simdWidth )
+{
+	B3_UNUSED( simdWidth );
+	return 0;
+}
+
+#endif
