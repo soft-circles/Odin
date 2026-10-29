@@ -296,10 +296,18 @@ void b3RecEndRecord( b3Recording* rec );
 #undef B3_REC_RETDECL_RET_JOINTID
 
 // Record a void op. The branch is free when recording is off.
+// B3_DISABLE_RECORDING compiles recording out where its code size matters more than the feature, and
+// b3World_StartRecording then does nothing.
+#if defined( B3_DISABLE_RECORDING )
+#define b3IsRecording( world ) ( (void)( world ), false )
+#else
+#define b3IsRecording( world ) ( ( world )->recording != NULL )
+#endif
+
 #define B3_REC( world, Name, ... )                                                                                               \
 	do                                                                                                                           \
 	{                                                                                                                            \
-		if ( ( world )->recording != NULL )                                                                                      \
+		if ( b3IsRecording( world ) )                                                                                            \
 		{                                                                                                                        \
 			b3RecArgs_##Name recArgs = { __VA_ARGS__ };                                                                          \
 			b3RecWrite_##Name( ( world )->recording, &recArgs );                                                                 \
@@ -311,7 +319,7 @@ void b3RecEndRecord( b3Recording* rec );
 #define B3_REC_CREATE( world, Name, id, ... )                                                                                    \
 	do                                                                                                                           \
 	{                                                                                                                            \
-		if ( ( world )->recording != NULL )                                                                                      \
+		if ( b3IsRecording( world ) )                                                                                            \
 		{                                                                                                                        \
 			b3RecArgs_##Name recCreateArgs = { __VA_ARGS__ };                                                                    \
 			b3RecWriteRet_##Name( ( world )->recording, &recCreateArgs, id );                                                    \
