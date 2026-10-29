@@ -32,9 +32,15 @@
 #include <stdio.h>
 #include <string.h>
 
+// Initial capacity of each worker's arena. A step that needs more falls back to the heap, and the arena then grows to fit.
+#ifndef B3_ARENA_CAPACITY
+#define B3_ARENA_CAPACITY ( 128 * 1024 )
+#endif
+
 _Static_assert( B3_MAX_WORLDS > 0, "must be 1 or more" );
 _Static_assert( B3_MAX_WORLDS < UINT16_MAX, "B3_MAX_WORLDS limit exceeded" );
 b3World b3_worlds[B3_MAX_WORLDS];
+
 b3AtomicInt b3_worldCount;
 int b3_maxWorldCount;
 
@@ -174,7 +180,7 @@ static void b3CreateWorkerContexts( b3World* world )
 
 	for ( int i = 0; i < world->workerCount; ++i )
 	{
-		world->taskContexts.data[i].arena = b3CreateArena( 128 * 1024 );
+		world->taskContexts.data[i].arena = b3CreateArena( B3_ARENA_CAPACITY );
 		b3Array_Reserve( world->taskContexts.data[i].sensorHits, 8 );
 		b3Array_Reserve( world->taskContexts.data[i].pairKeys, 64 );
 		world->taskContexts.data[i].contactStateBitSet = b3CreateBitSet( 1024 );
