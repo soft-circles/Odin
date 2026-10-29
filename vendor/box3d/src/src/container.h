@@ -150,7 +150,7 @@ B3_INLINE void* b3EmplaceHelper( void** data, int* count, int* capacity, int ele
 	{
 		int oldCapacity = *capacity;
 		int oldSize = oldCapacity * elem_size;
-		int newCapacity = ( oldCapacity == 0 ? 16 : 2 * oldCapacity );
+		int newCapacity = ( oldCapacity == 0 ? B3_MIN_CAPACITY : 2 * oldCapacity );
 		int newSize = newCapacity * elem_size;
 		*data = b3GrowAlloc( *data, oldSize, newSize );
 		*capacity = newCapacity;

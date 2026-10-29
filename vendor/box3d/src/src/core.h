@@ -150,6 +150,44 @@ typedef struct b3AtomicI64
 #define B3_FORCE_OVERFLOW 0
 #endif
 
+// Bit masks of the b3JointType and b3ShapeType values a build supports, so a target that is short on code space can
+// leave out the solvers and collision routines it never uses. Dispatch to a left out joint type, compound shape or
+// height shape compiles out; the other shape types only refuse creation. Creating a left out shape type fails and a
+// left out joint type is never solved. Every type by default.
+#ifndef B3_JOINT_TYPES
+#define B3_JOINT_TYPES 0xffffffffu
+#endif
+
+#ifndef B3_SHAPE_TYPES
+#define B3_SHAPE_TYPES 0xffffffffu
+#endif
+
+#define B3_HAS_JOINT( type ) ( ( ( B3_JOINT_TYPES ) >> ( type ) ) & 1u )
+#define B3_HAS_SHAPE( type ) ( ( ( B3_SHAPE_TYPES ) >> ( type ) ) & 1u )
+#define B3_IS_SHAPE( value, type ) ( B3_HAS_SHAPE( type ) && ( value ) == ( type ) )
+
+// B3_ENABLE_CONTINUOUS 0 compiles out continuous collision, so fast bodies can tunnel whatever
+// b3WorldDef::enableContinuous and b3BodyDef::isBullet say. B3_ENABLE_SENSORS 0 compiles out sensors and creating a
+// sensor shape fails. B3_ENABLE_NAMES 0 compiles out body and shape names, which then read back as "".
+#ifndef B3_ENABLE_CONTINUOUS
+#define B3_ENABLE_CONTINUOUS 1
+#endif
+
+#ifndef B3_ENABLE_SENSORS
+#define B3_ENABLE_SENSORS 1
+#endif
+
+#ifndef B3_ENABLE_NAMES
+#define B3_ENABLE_NAMES 1
+#endif
+
+// Smallest capacity a world reserves for its bodies, shapes, contacts, joints, islands and broad-phase trees when
+// b3WorldDef.capacity asks for less, and the first capacity of an array that grows by emplacing. A small world on a
+// target with little RAM lowers it so it reserves only what it uses.
+#ifndef B3_MIN_CAPACITY
+#define B3_MIN_CAPACITY 16
+#endif
+
 // Use to validate definitions. Do not take my cookie.
 #define B3_SECRET_COOKIE 1152023
 

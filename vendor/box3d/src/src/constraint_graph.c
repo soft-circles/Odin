@@ -20,7 +20,7 @@
 // scatter would write to the same kinematic body from multiple threads. Even if these writes don't modify the body, they will
 // cause horrible cache stalls. To make this feasible I would need a way to block these writes.
 
-static const b3HexColor b3_graphColors[B3_GRAPH_COLOR_COUNT] = {
+static const b3HexColor b3_graphColors[24] = {
 	b3_colorRed,	   b3_colorOrange,		b3_colorYellow,			b3_colorLimeGreen,		 b3_colorSpringGreen,
 	b3_colorAqua,	   b3_colorDodgerBlue,	b3_colorBlueViolet,		b3_colorMagenta,		 b3_colorDeepPink,
 	b3_colorCrimson,   b3_colorCoral,		b3_colorGold,			b3_colorGreenYellow,	 b3_colorMediumSeaGreen,
@@ -38,14 +38,15 @@ void b3CreateGraph( b3ConstraintGraph* graph, int bodyCapacity )
 {
 	_Static_assert( B3_GRAPH_COLOR_COUNT >= 2, "must have at least two constraint graph colors" );
 	_Static_assert( B3_OVERFLOW_INDEX == B3_GRAPH_COLOR_COUNT - 1, "bad over flow index" );
+	_Static_assert( B3_GRAPH_COLOR_COUNT <= 24, "colorCounts holds 24 colors" );
 
 	*graph = (b3ConstraintGraph){ 0 };
 
 	bodyCapacity = b3MaxInt( bodyCapacity, 8 );
 
 	// Initialize graph color bit set.
-	// No bitset for overflow color.
-	for ( int i = 0; i < B3_OVERFLOW_INDEX; ++i )
+	// No bitset for overflow color, nor for any color when every constraint goes to overflow.
+	for ( int i = 0; i < ( B3_FORCE_OVERFLOW ? 0 : B3_OVERFLOW_INDEX ); ++i )
 	{
 		b3GraphColor* color = graph->colors + i;
 		color->bodySet = b3CreateBitSet( bodyCapacity );
@@ -139,6 +140,8 @@ void b3AddContactToGraph( b3World* world, b3Contact* contact )
 			break;
 		}
 	}
+#else
+	B3_UNUSED( typeA, typeB );
 #endif
 
 	bool isScalar = ( contact->flags & b3_simMeshContact ) || colorIndex == B3_OVERFLOW_INDEX;

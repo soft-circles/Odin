@@ -130,9 +130,11 @@ B3_API void b3SetAssertFcn( b3AssertFcn* assertFcn );
 #define B3_BREAKPOINT assert( 0 )
 #endif
 
-#if !defined( NDEBUG ) || defined( B3_ENABLE_ASSERT )
-/// Internal assertion handler. Allows for host intervention.
+/// Internal assertion handler. Allows for host intervention. Defined in every build, because bindings such as Odin's
+/// assert through it even when Box3D itself is built with NDEBUG.
 B3_API int b3InternalAssert( const char* condition, const char* fileName, int lineNumber );
+
+#if !defined( NDEBUG ) || defined( B3_ENABLE_ASSERT )
 /// Assert that a condition is true.
 #define B3_ASSERT( condition )                                                                                                   \
 	( (void)( ( !!( condition ) ) || ( b3InternalAssert( #condition, __FILE__, (int)( __LINE__ ) ), 0 ) ) )

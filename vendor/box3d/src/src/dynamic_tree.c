@@ -66,7 +66,7 @@ static void b3FreePair( b3DynamicTree* tree, int pair )
 
 b3DynamicTree b3DynamicTree_Create( int proxyCapacity )
 {
-	int capacity = b3MaxInt( proxyCapacity, 16 );
+	int capacity = b3MaxInt( proxyCapacity, B3_MIN_CAPACITY );
 
 	// Intentionally _not_ initialized with brace initialization, which can leave
 	// uninitialized gaps.

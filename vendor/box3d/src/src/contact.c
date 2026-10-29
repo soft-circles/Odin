@@ -216,7 +216,7 @@ void b3CreateContact( b3World* world, b3Shape* shapeA, b3Shape* shapeB, int chil
 	{
 		contact->flags |= b3_simMeshContact;
 	}
-	else if ( shapeA->type == b3_compoundShape )
+	else if ( B3_IS_SHAPE( shapeA->type, b3_compoundShape ) )
 	{
 		b3ChildShape child = b3GetCompoundChild( shapeA->compound, childIndex );
 		if ( child.type == b3_meshShape )
@@ -741,7 +741,7 @@ bool b3UpdateContact( b3World* world, int workerIndex, b3Contact* contact, b3Sha
 
 	B3_ASSERT( shapeB->type != b3_compoundShape );
 
-	if ( shapeA->type == b3_compoundShape )
+	if ( B3_IS_SHAPE( shapeA->type, b3_compoundShape ) )
 	{
 		int childIndex = contact->childIndex;
 		b3ChildShape child = b3GetCompoundChild( shapeA->compound, childIndex );

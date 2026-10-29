@@ -7,7 +7,11 @@
 
 #include "box3d/base.h"
 
+// Elements per block, as a power of two. The block allocator only pools contact manifolds, one pool per manifold count,
+// and each pool holds at least one block, so targets with little RAM lower it.
+#ifndef B3_BLOCK_EXPONENT
 #define B3_BLOCK_EXPONENT 8
+#endif
 #define B3_BLOCK_SIZE ( 1 << B3_BLOCK_EXPONENT )
 #define B3_BLOCK_ALIGNMENT 16
 

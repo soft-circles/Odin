@@ -47,6 +47,11 @@ uint32_t b3Hash32( const void* data, size_t length )
 b3NameCache b3CreateNameCache( void )
 {
 	b3NameCache cache = { 0 };
+	if ( B3_ENABLE_NAMES == 0 )
+	{
+		return cache;
+	}
+
 	b3Array_Create( cache.entries );
 
 	b3NameMap* map = b3Alloc( sizeof( b3NameMap ) );
@@ -57,6 +62,11 @@ b3NameCache b3CreateNameCache( void )
 
 void b3DestroyNameCache( b3NameCache* cache )
 {
+	if ( B3_ENABLE_NAMES == 0 )
+	{
+		return;
+	}
+
 	int count = cache->entries.count;
 	for ( int i = 0; i < count; ++i )
 	{
@@ -71,7 +81,7 @@ void b3DestroyNameCache( b3NameCache* cache )
 
 uint32_t b3AddName( b3NameCache* cache, const char* name )
 {
-	if ( name == NULL || name[0] == 0 )
+	if ( B3_ENABLE_NAMES == 0 || name == NULL || name[0] == 0 )
 	{
 		return B3_NULL_NAME;
 	}
@@ -110,6 +120,11 @@ uint32_t b3AddName( b3NameCache* cache, const char* name )
 
 const char* b3FindName( const b3NameCache* cache, uint32_t id )
 {
+	if ( B3_ENABLE_NAMES == 0 )
+	{
+		return NULL;
+	}
+
 	b3NameMap* map = cache->map;
 	b3NameMap_itr itr = b3NameMap_get( map, id );
 	if ( b3NameMap_is_end( itr ) == false )
@@ -129,7 +144,7 @@ void b3LoadName( b3NameCache* cache, uint32_t id, char* name, int length )
 		return;
 	}
 
-	if ( name[0] == 0 || id == B3_NULL_NAME )
+	if ( B3_ENABLE_NAMES == 0 || name[0] == 0 || id == B3_NULL_NAME )
 	{
 		b3Free( name, length + 1 );
 		return;

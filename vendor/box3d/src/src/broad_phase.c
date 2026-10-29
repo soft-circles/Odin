@@ -26,13 +26,13 @@ void b3CreateBroadPhase( b3BroadPhase* bp, const b3Capacity* capacity )
 
 	bp->pairSet = b3CreateSet( b3MaxInt( 32, 2 * capacity->contactCount ) );
 
-	int staticCapacity = b3MaxInt( 16, capacity->staticShapeCount );
+	int staticCapacity = b3MaxInt( B3_MIN_CAPACITY, capacity->staticShapeCount );
 	bp->trees[b3_staticBody] = b3DynamicTree_Create( staticCapacity );
 
-	int kinematicCapacity = 16;
+	int kinematicCapacity = B3_MIN_CAPACITY;
 	bp->trees[b3_kinematicBody] = b3DynamicTree_Create( kinematicCapacity );
 
-	int dynamicCapacity = b3MaxInt( 16, capacity->dynamicShapeCount );
+	int dynamicCapacity = b3MaxInt( B3_MIN_CAPACITY, capacity->dynamicShapeCount );
 	bp->trees[b3_dynamicBody] = b3DynamicTree_Create( dynamicCapacity );
 
 	bp->movedSiblings = NULL;
@@ -264,7 +264,7 @@ static void b3FlushCandidatePairs( b3PairContext* context )
 	b3CandidatePair plain[B3_CANDIDATE_BATCH];
 	int plainCount = 0;
 
-	if ( context->checkCompounds )
+	if ( B3_HAS_SHAPE( b3_compoundShape ) && context->checkCompounds )
 	{
 		// A compound expands into one pair per child, so its key is not known yet and it cannot
 		// ride the batched cull below.
