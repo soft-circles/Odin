@@ -151,8 +151,9 @@ typedef struct b3AtomicI64
 #endif
 
 // Bit masks of the b3JointType and b3ShapeType values a build supports, so a target that is short on code space can
-// leave out the solvers and collision routines it never uses. Dispatch to a left out type compiles out, creating a
-// left out shape type fails and a left out joint type is never solved. Every type by default.
+// leave out the solvers and collision routines it never uses. Dispatch to a left out joint type, compound shape or
+// height shape compiles out; the other shape types only refuse creation. Creating a left out shape type fails and a
+// left out joint type is never solved. Every type by default.
 #ifndef B3_JOINT_TYPES
 #define B3_JOINT_TYPES 0xffffffffu
 #endif

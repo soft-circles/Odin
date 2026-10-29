@@ -16,8 +16,10 @@
 # BOX3D_STACK_CAPACITY and BOX3D_MAX_MESH_CONTACT_TRIANGLES, when set, size the step stack and cap the triangles one
 # mesh contact gathers.
 # Features: BOX3D_JOINTS and BOX3D_SHAPES name the joint and shape types to keep, all of them by default, for example
-# BOX3D_JOINTS="mover pogo" BOX3D_SHAPES="capsule hull mesh sphere"; the rest compile out of the dispatch so
-# --gc-sections drops their code. Creating a left out shape type returns a null id and a left out joint is never solved.
+# BOX3D_JOINTS="mover pogo" BOX3D_SHAPES="capsule hull mesh". A left out joint type is never solved and its solver
+# compiles out of the dispatch, as do the compound and height shapes' routines; capsule, hull, mesh and sphere code
+# stays. Creating a left out shape type returns a null id. Keeping capsule keeps sphere, which a capsule shorter than
+# B3_LINEAR_SLOP becomes.
 # BOX3D_CONTINUOUS=0, BOX3D_SENSORS=0 and BOX3D_NAMES=0 compile out continuous collision, sensors and names.
 # Code generation: -O2 with functions aligned to BOX3D_ALIGN_FUNCTIONS (8) bytes, and BOX3D_CFLAGS appended to every
 # compile. BOX3D_LTO=1 builds fat LTO objects and indexes the archive with gcc-ar; a ROM link that passes -flto
@@ -45,13 +47,20 @@ shape_names="capsule compound height hull mesh sphere"
 
 type_mask() {
 	mask=0
-	bit=1
-	for name in $1; do
-		case " $2 " in *" $name "*) mask=$((mask | bit)) ;; esac
-		bit=$((bit * 2))
-	done
 	for name in $2; do
-		case " $1 " in *" $name "*) ;; *) echo "build_n64.sh: unknown type $name" >&2 && exit 1 ;; esac
+		bit=1
+		found=0
+		for known in $1; do
+			if [ "$known" = "$name" ]; then
+				mask=$((mask | bit))
+				found=1
+			fi
+			bit=$((bit * 2))
+		done
+		if [ "$found" = 0 ]; then
+			echo "build_n64.sh: unknown type $name" >&2
+			exit 1
+		fi
 	done
 	echo "$mask"
 }
@@ -60,7 +69,9 @@ if [ -n "${BOX3D_JOINTS:-}" ]; then
 	type_flags="$type_flags -DB3_JOINT_TYPES=$(type_mask "$joint_names" "$BOX3D_JOINTS")u"
 fi
 if [ -n "${BOX3D_SHAPES:-}" ]; then
-	type_flags="$type_flags -DB3_SHAPE_TYPES=$(type_mask "$shape_names" "$BOX3D_SHAPES")u"
+	shapes=$BOX3D_SHAPES
+	case " $(echo $shapes) " in *" capsule "*) shapes="$shapes sphere" ;; esac
+	type_flags="$type_flags -DB3_SHAPE_TYPES=$(type_mask "$shape_names" "$shapes")u"
 fi
 align_functions=${BOX3D_ALIGN_FUNCTIONS:-8}
 extra_cflags=${BOX3D_CFLAGS:-}
