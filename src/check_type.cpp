@@ -370,8 +370,8 @@ gb_internal void add_polymorphic_record_entity(CheckerContext *ctx, Ast *node, T
 	}
 
 	auto *found_gen_types = ensure_polymorphic_record_entity_has_gen_types(ctx, original_type);
-	mutex_lock(&found_gen_types->mutex);
-	defer (mutex_unlock(&found_gen_types->mutex));
+	gen_types_lock(found_gen_types);
+	defer (gen_types_unlock(found_gen_types));
 
 	for (Entity *prev : found_gen_types->types) {
 		if (prev == e) {
@@ -773,7 +773,7 @@ gb_internal void check_struct_type(CheckerContext *ctx, Type *struct_type, Ast *
 		// Release before field checking to avoid a cross-record ABBA; finders wait on
 		// fields_wait_signal (set at the end).
 		if (poly_gen_types_to_unlock != nullptr) {
-			mutex_unlock(&poly_gen_types_to_unlock->mutex);
+			gen_types_unlock(poly_gen_types_to_unlock);
 		}
 	}
 
@@ -873,7 +873,7 @@ gb_internal void check_union_type(CheckerContext *ctx, Type *union_type, Ast *no
 		// Release before variant checking to avoid a cross-record ABBA; finders wait on
 		// variants_wait_signal (set at the end). Mirrors check_struct_type.
 		if (poly_gen_types_to_unlock != nullptr) {
-			mutex_unlock(&poly_gen_types_to_unlock->mutex);
+			gen_types_unlock(poly_gen_types_to_unlock);
 		}
 	}
 
@@ -2575,10 +2575,11 @@ gb_internal Type *subst_apply(CheckerContext *c, Type *pattern, Type *source, Po
 		}
 
 		GenTypesData *gt = ensure_polymorphic_record_entity_has_gen_types(c, orig);
-		mutex_lock(&gt->mutex);
+		gen_types_lock(gt);
 		Entity *found = find_polymorphic_record_by_subst(gt, p_tuple, subst);
-		mutex_unlock(&gt->mutex);
+		gen_types_unlock(gt);
 		GB_ASSERT_MSG(found != nullptr, "subst_apply: no instantiation found for '%s'", type_to_string(pattern));
+		wait_for_record_members(found->type);
 		return found->type;
 	}
 	}

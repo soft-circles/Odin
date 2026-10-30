@@ -181,6 +181,9 @@ fi
 
 $ODIN check ../test_issue_escape_store_through_union $COMMON_CHECK
 $ODIN check ../test_issue_poly_struct_field_count_race -no-entry-point $COMMON_CHECK
+$ODIN check ../test_issue_poly_union_variant_count_race -no-entry-point $COMMON_CHECK
+$ODIN check ../test_issue_poly_union_variants_through_field -no-entry-point $COMMON_CHECK
+$ODIN check ../test_issue_poly_record_param_default_deadlock -no-entry-point $COMMON_CHECK
 
 # Objective-C tests target darwin, which can be checked and built for from any host
 if [[ $($ODIN check ../test_issue_objc_import_missing_selector -no-entry-point -target:darwin_arm64 $COMMON_CHECK 2>&1 >/dev/null | grep -c "is required for imported Objective-C methods") -eq 1 ]]; then

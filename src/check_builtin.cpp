@@ -115,7 +115,7 @@ gb_internal void check_or_else_expr_no_value_error(CheckerContext *c, String con
 		gbString th = nullptr;
 		if (type_hint != nullptr) {
 			GB_ASSERT(bsrc->kind == Type_Union);
-			for (Type *vt : bsrc->Union.variants) {
+			for (Type *vt : type_union_variants(bsrc)) {
 				if (are_types_identical(vt, type_hint)) {
 					th = type_to_string(type_hint);
 					break;
@@ -3441,7 +3441,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				error(field_arg, "Cannot use '%.*s' on an unspecialized polymorphic struct type, got '%s'", LIT(builtin_name), t);
 				gb_string_free(t);
 				return false;
-			} else if (bt->Struct.fields.count == 0 && bt->Struct.node == nullptr) {
+			} else if (type_struct_fields(bt).count == 0 && bt->Struct.node == nullptr) {
 				gbString t = type_to_string(type);
 				error(field_arg, "Cannot use '%.*s' on incomplete struct declaration, got '%s'", LIT(builtin_name), t);
 				gb_string_free(t);
@@ -3459,7 +3459,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 			Type *bt = base_type(type);
 			if (bt->kind == Type_Struct) {
-				check_did_you_mean_type(field_name.string(), bt->Struct.fields);
+				check_did_you_mean_type(field_name.string(), type_struct_fields(bt));
 			}
 			return false;
 		}
@@ -3534,7 +3534,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 			Type *bt = base_type(type);
 			if (bt->kind == Type_Struct) {
-				check_did_you_mean_type(field_name.string(), bt->Struct.fields);
+				check_did_you_mean_type(field_name.string(), type_struct_fields(bt));
 			}
 			return false;
 		}
@@ -4230,11 +4230,11 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		Type *tuple = alloc_type_tuple();
 
 		if (is_type_struct(type)) {
-			wait_for_struct_fields(type);
-			isize variable_count = type->Struct.fields.count;
+			Slice<Entity *> fields = type_struct_fields(type);
+			isize variable_count = fields.count;
 			tuple->Tuple.variables = permanent_slice_make<Entity *>(variable_count);
 			// NOTE(bill): don't copy the entities, this should be good enough
-			gb_memmove_array(tuple->Tuple.variables.data, type->Struct.fields.data, variable_count);
+			gb_memmove_array(tuple->Tuple.variables.data, fields.data, variable_count);
 		} else if (is_type_array(type)) {
 			isize variable_count = cast(isize)type->Array.count;
 			tuple->Tuple.variables = permanent_slice_make<Entity *>(variable_count);
@@ -4287,8 +4287,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (type_hint != nullptr) {
 			Type *th = base_type(type_hint);
 			if (th->kind == Type_Struct) {
-				wait_for_struct_fields(th);
-				if (value_count == th->Struct.fields.count) {
+				Slice<Entity *> fields = type_struct_fields(th);
+				if (value_count == fields.count) {
 					isize index = 0;
 					for_array(i, ce->args) {
 						Operand *op = &ops[i];
@@ -4297,13 +4297,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 								Operand x = {};
 								x.mode = Addressing_Value;
 								x.type = v->type;
-								check_assignment(c, &x, th->Struct.fields[index++]->type, builtin_name);
+								check_assignment(c, &x, fields[index++]->type, builtin_name);
 								if (x.mode == Addressing_Invalid) {
 									return false;
 								}
 							}
 						} else {
-							check_assignment(c, op, th->Struct.fields[index++]->type, builtin_name);
+							check_assignment(c, op, fields[index++]->type, builtin_name);
 							if (op->mode == Addressing_Invalid) {
 								return false;
 							}
@@ -5093,8 +5093,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				goto soa_zip_end;
 			}
 
-			wait_for_struct_fields(et);
-			if (et->Struct.fields.count != fields.count) {
+			Slice<Entity *> et_fields = type_struct_fields(et);
+			if (et_fields.count != fields.count) {
 				goto soa_zip_end;
 			}
 			if (!fail && first_is_field_value) {
@@ -5111,8 +5111,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 					}
 				}
  			} else {
- 				for_array(i, et->Struct.fields) {
- 					if (!are_types_identical(et->Struct.fields[i]->type, types[i])) {
+ 				for_array(i, et_fields) {
+ 					if (!are_types_identical(et_fields[i]->type, types[i])) {
  						goto soa_zip_end;
  					}
  				}
@@ -5159,9 +5159,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			gb_string_free(s);
 			return false;
 		}
-		auto types = permanent_slice_make<Type *>(t->Struct.fields.count-1);
+		Slice<Entity *> fields = type_struct_fields(t);
+		auto types = permanent_slice_make<Type *>(fields.count-1);
 		for_array(i, types) {
-			Entity *f = t->Struct.fields[i];
+			Entity *f = fields[i];
 			GB_ASSERT(f->type->kind == Type_MultiPointer);
 			types[i] = alloc_type_slice(f->type->MultiPointer.elem);
 		}
@@ -5577,10 +5578,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			GB_ASSERT(is_type_struct(elem));
 
 			Type *old_struct = base_type(elem);
-			wait_for_struct_fields(old_struct);
+			Slice<Entity *> old_fields = type_struct_fields(old_struct);
 			soa_struct = alloc_type_struct();
-			soa_struct->Struct.fields = permanent_slice_make<Entity *>(old_struct->Struct.fields.count);
-			soa_struct->Struct.tags = permanent_alloc_array<String>(old_struct->Struct.fields.count);
+			soa_struct->Struct.fields = permanent_slice_make<Entity *>(old_fields.count);
+			soa_struct->Struct.tags = permanent_alloc_array<String>(old_fields.count);
 			soa_struct->Struct.node = operand->expr;
 			soa_struct->Struct.soa_kind = StructSoa_Fixed;
 			soa_struct->Struct.soa_elem = elem;
@@ -5593,8 +5594,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			scope = create_scope(c->info, old_struct->Struct.scope->parent);
 			soa_struct->Struct.scope = scope;
 
-			for_array(i, old_struct->Struct.fields) {
-				Entity *old_field = old_struct->Struct.fields[i];
+			for_array(i, old_fields) {
+				Entity *old_field = old_fields[i];
 				if (old_field->kind == Entity_Variable) {
 					Type *array_type = alloc_type_array(old_field->type, count);
 					Entity *new_field = alloc_entity_field(scope, old_field->token, array_type, false, old_field->Variable.field_index);
@@ -7370,9 +7371,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 
 			Type *new_type = alloc_type_union();
-			auto variants = permanent_slice_make<Type *>(bt->Union.variants.count);
-			for_array(i, bt->Union.variants) {
-				variants[i] = alloc_type_pointer(bt->Union.variants[i]);
+			Slice<Type *> bt_variants = type_union_variants(bt);
+			auto variants = permanent_slice_make<Type *>(bt_variants.count);
+			for_array(i, bt_variants) {
+				variants[i] = alloc_type_pointer(bt_variants[i]);
 			}
 			new_type->Union.variants = variants;
 			wait_signal_set(&new_type->Union.variants_wait_signal); // built directly, not via check_union_type
@@ -7535,13 +7537,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			merged_union->Union.kind = ux->Union.kind;
 			merged_union->Union.custom_align = custom_align;
 
-			auto variants = array_make<Type *>(permanent_allocator(), 0, ux->Union.variants.count+uy->Union.variants.count);
-			for (Type *t : ux->Union.variants) {
+			auto variants = array_make<Type *>(permanent_allocator(), 0, type_union_variants(ux).count+type_union_variants(uy).count);
+			for (Type *t : type_union_variants(ux)) {
 				array_add(&variants, t);
 			}
-			for (Type *t : uy->Union.variants) {
+			for (Type *t : type_union_variants(uy)) {
 				bool ok = true;
-				for (Type *other_t : ux->Union.variants) {
+				for (Type *other_t : type_union_variants(ux)) {
 					if (are_types_identical(other_t, t)) {
 						ok = false;
 						break;
@@ -7712,14 +7714,11 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return false;
 			}
 
-			wait_for_struct_fields(ut);
-			wait_for_struct_fields(vt);
-
 			bool is_shared = true;
 
-			for (Entity *v_field : vt->Struct.fields) {
+			for (Entity *v_field : type_struct_fields(vt)) {
 				bool found = false;
-				for (Entity *u_field : ut->Struct.fields) {
+				for (Entity *u_field : type_struct_fields(ut)) {
 					if (v_field->token.string == u_field->token.string &&
 					    are_types_identical(v_field->type, u_field->type)) {
 						found = true;
@@ -7903,7 +7902,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 			bool is_variant = false;
 
-			for (Type *vt : u->Union.variants) {
+			for (Type *vt : type_union_variants(u)) {
 				if (are_types_identical(v, vt)) {
 					is_variant = true;
 					break;
@@ -8080,7 +8079,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			
 			operand->mode = Addressing_Constant;
 			operand->type = t_untyped_integer;
-			operand->value = exact_value_i64(u->Union.variants.count);
+			operand->value = exact_value_i64(type_union_variants(u).count);
 		} break;
 
 	case BuiltinProc_type_variant_type_of:
@@ -8119,7 +8118,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return false;
 			}
 			i64 index = big_int_to_i64(&x.value.value_integer);
-			if (index < 0 || index >= u->Union.variants.count) {
+			if (index < 0 || index >= type_union_variants(u).count) {
 				error(call, "Variant tag out of bounds index for '%.*s", LIT(builtin_name));
 				operand->mode = Addressing_Type;
 				operand->type = t_invalid;
@@ -8127,7 +8126,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 
 			operand->mode = Addressing_Type;
-			operand->type = u->Union.variants[index];
+			operand->type = type_union_variants(u)[index];
 		}
 		break;
 	
@@ -8154,8 +8153,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			GB_ASSERT(u->kind == Type_Union);
 
 			i64 index = -1;			
-			for_array(i, u->Union.variants) {
-				Type *vt = u->Union.variants[i];
+			Slice<Type *> variants = type_union_variants(u);
+			for_array(i, variants) {
+				Type *vt = variants[i];
 				if (union_variant_index_types_equal(v, vt)) {
 					index = i64(i);
 					break;
@@ -8183,8 +8183,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			error(operand->expr, "Expected a struct type for '%.*s'", LIT(builtin_name));
 		} else {
 			Type *bt = base_type(operand->type);
-			wait_for_struct_fields(bt);
-			operand->value = exact_value_i64(bt->Struct.fields.count);
+			operand->value = exact_value_i64(type_struct_fields(bt).count);
 		}
 		operand->mode = Addressing_Constant;
 		operand->type = t_untyped_integer;
@@ -8197,13 +8196,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			error(operand->expr, "Expected a struct type for '%.*s'", LIT(builtin_name));
 		} else {
 			Type *bt = base_type(operand->type);
-			wait_for_struct_fields(bt);
+			Slice<Entity *> fields = type_struct_fields(bt);
 			if (bt->Struct.is_packed) {
 				operand->value = exact_value_bool(false);
-			} else if (bt->Struct.fields.count != 0) {
+			} else if (fields.count != 0) {
 				i64 size = type_size_of(bt);
 				Type *field_type = nullptr;
-				i64 last_offset = type_offset_of(bt, bt->Struct.fields.count-1, &field_type);
+				i64 last_offset = type_offset_of(bt, fields.count-1, &field_type);
 				if (last_offset+type_size_of(field_type) < size) {
 					operand->value = exact_value_bool(true);
 				} else {
@@ -8589,7 +8588,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return true;
 
 			} else if (super->kind == Type_Union) {
-				if (sub->Union.variants.count > super->Union.variants.count) {
+				Slice<Type *> sub_variants   = type_union_variants(sub);
+				Slice<Type *> super_variants = type_union_variants(super);
+				if (sub_variants.count > super_variants.count) {
 					operand->value = exact_value_bool(false);
 					return true;
 				}
@@ -8598,9 +8599,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 					return true;
 				}
 
-				for_array(i, sub->Union.variants) {
-					Type *t_sub   = sub->Union.variants[i];
-					Type *t_super = super->Union.variants[i];
+				for_array(i, sub_variants) {
+					Type *t_sub   = sub_variants[i];
+					Type *t_super = super_variants[i];
 					if (!are_types_identical(t_sub, t_super)) {
 						operand->value = exact_value_bool(false);
 						return true;
@@ -8648,7 +8649,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				gb_string_free(type_str);
 
 				if (bt->kind == Type_Struct) {
-					check_did_you_mean_type(field_name.string(), bt->Struct.fields);
+					check_did_you_mean_type(field_name.string(), type_struct_fields(bt));
 				}
 				return false;
 			}
