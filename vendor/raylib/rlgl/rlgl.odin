@@ -158,7 +158,7 @@ when ODIN_OS == .Windows {
 		"system:Cocoa.framework",
 		"system:OpenGL.framework",
 		"system:IOKit.framework",
-		"system:QuartzCore.framework",
+		"system:QuartzCore.framework", // CAMetalLayer, used by raylib 6.2's GLFW
 	}
 } else when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32 {
 	foreign import lib {

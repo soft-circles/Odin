@@ -479,11 +479,11 @@ foreign lib {
 	// Valid until the recording buffer is modified or destroyed.
 	// @param recording the recording handle
 	// @return pointer to the byte buffer, or NULL if no bytes have been written
-	Recording_GetData :: proc(#by_ptr recording: Recording) -> [^]u8 ---
+	Recording_GetData :: proc(recording: ^Recording) -> [^]u8 ---
 
 	// Get the number of bytes currently in the recording buffer.
 	// @param recording the recording handle
-	Recording_GetSize :: proc(#by_ptr recording: Recording) -> c.int ---
+	Recording_GetSize :: proc(recording: ^Recording) -> c.int ---
 
 	// Begin recording world mutations into the provided buffer.
 	// The buffer is reset on each call so a single Recording can be reused for multiple sessions.
@@ -499,12 +499,12 @@ foreign lib {
 	// Save the recording buffer to a file. Returns true on success.
 	// @param recording the recording to save
 	// @param path file path to write
-	SaveRecordingToFile :: proc(#by_ptr recording: Recording, path: cstring) -> bool ---
+	SaveRecordingToFile :: proc(recording: ^Recording, path: cstring) -> bool ---
 
 	// Load a recording from a file. Returns NULL on failure (file not found, wrong magic).
 	// The caller owns the returned recording and must destroy it with DestroyRecording.
 	// @param path file path to read
-	 LoadRecordingFromFile :: proc(path: cstring) -> Recording ---
+	LoadRecordingFromFile :: proc(path: cstring) -> ^Recording ---
 
 	// Replay a recording from memory and verify it reproduces the same world-state hashes.
 	// Stands up a fresh world, restores the seed snapshot, replays every op, and checks each embedded
@@ -545,28 +545,28 @@ foreign lib {
 	RecPlayer_SeekFrame :: proc(player: ^RecPlayer, targetFrame: c.int) ---
 
 	// @return the world currently driven by this player
-	RecPlayer_GetWorldId :: proc(#by_ptr player: RecPlayer) -> WorldId ---
+	RecPlayer_GetWorldId :: proc(player: ^RecPlayer) -> WorldId ---
 
 	// @return the last fully-stepped frame index (0 before any step)
-	RecPlayer_GetFrame :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetFrame :: proc(player: ^RecPlayer) -> c.int ---
 
 	// @return total number of recorded frames
-	RecPlayer_GetFrameCount :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetFrameCount :: proc(player: ^RecPlayer) -> c.int ---
 
 	// @return true when the op stream is exhausted
-	RecPlayer_IsAtEnd :: proc(#by_ptr player: RecPlayer) -> bool ---
+	RecPlayer_IsAtEnd :: proc(player: ^RecPlayer) -> bool ---
 
 	// @return true when the op stream is paused between body creation and world step.
-	RecPlayer_IsAtPreStep :: proc(#by_ptr player: RecPlayer) -> bool ---
+	RecPlayer_IsAtPreStep :: proc(player: ^RecPlayer) -> bool ---
 
 	// @return true when any StateHash mismatch has been detected
-	RecPlayer_HasDiverged :: proc(#by_ptr player: RecPlayer) -> bool ---
+	RecPlayer_HasDiverged :: proc(player: ^RecPlayer) -> bool ---
 
 	// @return a summary of the recording read at open: frame count, recorded tuning, and bounds
-	RecPlayer_GetInfo :: proc(#by_ptr player: RecPlayer) -> RecPlayerInfo ---
+	RecPlayer_GetInfo :: proc(player: ^RecPlayer) -> RecPlayerInfo ---
 
 	// @return the first frame at which replay diverged, or -1 if it has not diverged
-	RecPlayer_GetDivergeFrame :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetDivergeFrame :: proc(player: ^RecPlayer) -> c.int ---
 
 	// Set the worker count of the replay world. Clamped to [1, B3_MAX_WORKERS]. Applied to the live
 	// world at once and reused whenever the player rebuilds its world on Restart or a backward seek.
@@ -584,24 +584,24 @@ foreign lib {
 	RecPlayer_SetKeyframePolicy :: proc(player: ^RecPlayer, budgetBytes: uint, minIntervalFrames: c.int) ---
 
 	// @return the keyframe memory budget in bytes
-	RecPlayer_GetKeyframeBudget :: proc(#by_ptr player: RecPlayer) -> uint ---
+	RecPlayer_GetKeyframeBudget :: proc(player: ^RecPlayer) -> uint ---
 
 	// @return the finest keyframe spacing in frames
-	RecPlayer_GetKeyframeMinInterval :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetKeyframeMinInterval :: proc(player: ^RecPlayer) -> c.int ---
 
 	// @return the current keyframe spacing in frames; starts at the min interval and doubles as the
 	// ring evicts to stay under budget, so it reflects the effective backward-seek granularity now
-	RecPlayer_GetKeyframeInterval :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetKeyframeInterval :: proc(player: ^RecPlayer) -> c.int ---
 
 	// @return the memory currently held by keyframe snapshots, in bytes
-	RecPlayer_GetKeyframeBytes :: proc(#by_ptr player: RecPlayer) -> uint ---
+	RecPlayer_GetKeyframeBytes :: proc(player: ^RecPlayer) -> uint ---
 
 	// @return the number of bodies tracked in creation order (including holes for destroyed bodies)
-	RecPlayer_GetBodyCount :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetBodyCount :: proc(player: ^RecPlayer) -> c.int ---
 
 	// Resolve a creation ordinal to the live body id at the current frame.
 	// @return the body id, or a null id if that ordinal is out of range or its body is destroyed
-	RecPlayer_GetBodyId :: proc(#by_ptr player: RecPlayer, index: c.int) -> BodyId ---
+	RecPlayer_GetBodyId :: proc(player: ^RecPlayer, index: c.int) -> BodyId ---
 
 	// Wire host debug-shape callbacks into the player's replay world so a renderer can build
 	// per-shape draw resources (the 3D sample needs this or the replay world draws nothing).
@@ -624,13 +624,13 @@ foreign lib {
 
 
 	// @return the number of spatial queries recorded for the most recently replayed frame
-	RecPlayer_GetFrameQueryCount :: proc(#by_ptr player: RecPlayer) -> c.int ---
+	RecPlayer_GetFrameQueryCount :: proc(player: ^RecPlayer) -> c.int ---
 
 	// Get a recorded query from the most recently replayed frame by index.
-	RecPlayer_GetFrameQuery :: proc(#by_ptr player: RecPlayer, index: c.int) -> RecQueryInfo ---
+	RecPlayer_GetFrameQuery :: proc(player: ^RecPlayer, index: c.int) -> RecQueryInfo ---
 
 	// Get one result of a recorded query from the most recently replayed frame.
-	RecPlayer_GetFrameQueryHit :: proc(#by_ptr player: RecPlayer, queryIndex: c.int, hitIndex: c.int) -> RecQueryHit ---
+	RecPlayer_GetFrameQueryHit :: proc(player: ^RecPlayer, queryIndex: c.int, hitIndex: c.int) -> RecQueryHit ---
 
 	/**@}*/ // recording
 

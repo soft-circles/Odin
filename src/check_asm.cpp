@@ -2204,6 +2204,41 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 	bool  matched          = false;
 	isize valid_form_index = -1;
 
+	// Some instructions have no explicit operands but encode an implicit register
+	// (exp. in/out use AL, AX, or EAX with DX). The template exposes this
+	// register as a pinned parameter, whose width determines the encoding.
+	//
+	// Without this check, all zero-operand forms score equally, and the first
+	// matching table entry wins.
+	auto implicit_operands_match_pins = [&](typename AsmCtx::Encoding const &form) {
+		GB_ASSERT(tmpl_entity->kind == Entity_AsmTemplate);
+		auto const &decls = tmpl_entity->AsmTemplate.decls;
+
+		for (auto slot : form.ops) {
+			if (slot == asm_ctx->OP_NONE || !asm_ctx->operand_type_is_implicit(slot)) {
+				continue;
+			}
+
+			u16 implicit_bit = asm_ctx->clobber_bit_for_reg_name(asm_ctx->implicit_reg_name(slot));
+			i32 implicit_width = asm_ctx->operand_type_bit_width(slot);
+			if (implicit_bit == 0 || implicit_width == 0) {
+				continue;
+			}
+
+			for (auto const &decl : decls) {
+				if (decl.pin.len == 0 || asm_ctx->clobber_bit_for_reg_name(decl.pin) != implicit_bit) {
+					continue;
+				}
+				// A pin names a physical register family: %eax and %al share
+				// RAX clobber bit -> its type supplies the sub-register width
+				if (decl.entity != nullptr && check_asm_operand_bit_width(decl.entity->type) != implicit_width) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+
 	isize best_form  = -1;
 	int   best_score = -1;
 	int   best_dist  = I32_MAX; // secondary: prefer smaller width distance
@@ -2221,6 +2256,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				continue;
 			}
 		} else if (operands.count != cast(int)form.explicit_count()) {
+			continue;
+		}
+		if (!implicit_operands_match_pins(form)) {
 			continue;
 		}
 
@@ -2471,8 +2509,13 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		}
 
 		u16 pinned_mask = 0;
+		u16 output_pinned_mask = 0;
 		for_array(i, ate->decls) {
-			pinned_mask |= asm_decl_resolve_pin_bit(asm_ctx, ate->decls, cast(i32)i);
+			u16 bit = asm_decl_resolve_pin_bit(asm_ctx, ate->decls, cast(i32)i);
+			pinned_mask |= bit;
+			if (ate->decls[i].param_group == AsmTemplateEntityDeclParamGroup_Output) {
+				output_pinned_mask |= bit;
+			}
 		}
 
 		u16 produced = cast(u16)clobber.implicit_wr & asm_ctx->CLOBBER_REGS_NAMED;
@@ -2752,7 +2795,9 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			facts->is_conditional = conditional;
 			facts->is_terminal = halt || (control && !conditional);
 		}
-		asm_ctx->clobber_implicit_regs(&ate->clobber_registers_set, produced);
+		// NOTE(bill): an output's register is already declared as written.
+		// Clobbering it as well lets LLVM drop the moves into it of an input tied to that output.
+		asm_ctx->clobber_implicit_regs(&ate->clobber_registers_set, produced & ~output_pinned_mask);
 
 		// Purity inference
 		if (cfg->can_be_pure) {
@@ -3938,6 +3983,22 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 		}
 	}
 
+	// NOTE(bill): LLVM does not allow a clobber of a register that is also an output
+	for (auto const &ed : ate->decls) {
+		if (ed.param_group != AsmTemplateEntityDeclParamGroup_Output || ed.pin.len == 0) {
+			continue;
+		}
+		u16 bit = asm_ctx->clobber_bit_for_reg_name(ed.pin);
+		if (bit == 0) {
+			continue;
+		}
+		String rname = make_string_c(asm_ctx->clobber_reg_bit_name(bit));
+		if (string_set_exists(&ate->clobber_registers_set, rname)) {
+			error(ed.entity->token,
+			      "'asm' output '%.*s' is pinned to %%%.*s, which '#clobber' also names; an output's register is already written, so remove the '#clobber'",
+			      LIT(ed.entity->token.string), LIT(ed.pin));
+		}
+	}
 
 	// collect label decls
 	for (Ast *instruction_ : at->instructions) {
@@ -4363,6 +4424,34 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 			Token tok = node ? ast_token(node): entity->token;
 			error(tok, "'asm' template is marked #pure but it is not pure: %s", why);
 		}
+	}
+
+	// NOTE(bill): LLVM does not allow the asm to write an input's register unless that input is tied to an output.
+	// A pinned input whose register is written is tied to a discarded output in that register instead of being clobbered.
+	for (auto &ed : ate->decls) {
+		if (ed.param_group != AsmTemplateEntityDeclParamGroup_Input ||
+		    ed.kind        != AsmTemplateEntityDecl_Register        ||
+		    ed.tie         >= 0                                     ||
+		    ed.view_of     >= 0                                     ||
+		    ed.pin.len     == 0) {
+			continue;
+		}
+		u16 bit = asm_ctx->clobber_bit_for_reg_name(ed.pin);
+		if (bit == 0) {
+			continue;
+		}
+
+		TEMPORARY_ALLOCATOR_GUARD();
+		auto names = array_make<String>(temporary_allocator());
+		for (String const &reg : ate->clobber_registers_set) {
+			if (asm_ctx->clobber_bit_for_reg_name(reg) == bit) {
+				array_add(&names, reg);
+			}
+		}
+		for (String const &reg : names) {
+			string_set_remove(&ate->clobber_registers_set, reg);
+		}
+		ed.pin_overwritten = names.count != 0;
 	}
 }
 

@@ -241,11 +241,13 @@ struct lbAsmGenerate {
 		auto ret_types   = array_make<LLVMTypeRef> (temporary_allocator(), 0, ops->count);
 
 		// Per-operand bookkeeping, indexed the same as `ops` (via total_index).
-		auto op_number = slice_make<i32>(temporary_allocator(), ops->count); // $N, or -1 for clobbers/views
-		auto ret_slot  = slice_make<i32>(temporary_allocator(), ops->count); // return-struct index, or -1
+		auto op_number = slice_make<i32>(temporary_allocator(), ops->count);
+		auto ret_slot  = slice_make<i32>(temporary_allocator(), ops->count);
+		auto tie_op    = slice_make<i32>(temporary_allocator(), ops->count);
 		for_array(i, *ops) {
 			op_number[i] = -1;
 			ret_slot [i] = -1;
+			tie_op   [i] = -1;
 		}
 
 		i32 next_op = 0; // running $N counter (outputs first, then inputs)
@@ -283,7 +285,8 @@ struct lbAsmGenerate {
 			bool is_output        = e.param_group == AsmTemplateEntityDeclParamGroup_Output;
 			bool is_alloc_scratch = e.param_group == AsmTemplateEntityDeclParamGroup_Scratch
 			                     && e.kind == AsmTemplateEntityDecl_Register;
-			if (!is_output && !is_alloc_scratch) {
+			bool is_overwritten   = e.param_group == AsmTemplateEntityDeclParamGroup_Input && e.pin_overwritten;
+			if (!is_output && !is_alloc_scratch && !is_overwritten) {
 				continue;
 			}
 
@@ -293,7 +296,7 @@ struct lbAsmGenerate {
 			// the rest read through), so it must be read-write '+' and cannot be
 			// early-clobber. Everything else is a normal '=' (early-clobber when a
 			// later instruction could read past it).
-			bool lane_rw = ptr_set_exists(&this->lane_written, e.entity);
+			bool lane_rw = !is_overwritten && ptr_set_exists(&this->lane_written, e.entity);
 
 			// Register output: '=' ['&'] ( '{pin}' | class-letter )
 			if (lane_rw) {
@@ -306,7 +309,7 @@ struct lbAsmGenerate {
 					raw("&");
 				}
 			}
-			Type *odin_ty  = is_alloc_scratch ? e.entity->type : this->result_type_of(e);
+			Type *odin_ty  = (is_alloc_scratch || is_overwritten) ? e.entity->type : this->result_type_of(e);
 			if (char const *letter = this->pinned_operand_moved_in_body(e, odin_ty)) {
 				raw(letter);
 			} else if (e.pin.len != 0) {
@@ -315,7 +318,7 @@ struct lbAsmGenerate {
 				raw(this->class_letter(e.reg_class));
 			}
 
-			LLVMTypeRef ty = is_alloc_scratch ? lb_type(m, e.entity->type) : this->output_llvm_type(m, e);
+			LLVMTypeRef ty = (is_alloc_scratch || is_overwritten) ? lb_type(m, e.entity->type) : this->output_llvm_type(m, e);
 			if (unsigned bits = this->operand_boundary_bits(e, odin_ty)) {
 				ty = LLVMIntTypeInContext(ctx, bits); // truncated back after the call
 			}
@@ -329,7 +332,11 @@ struct lbAsmGenerate {
 				LLVMValueRef undef = LLVMGetUndef(ty);
 				add_input_value(&param_types, &call_args, undef);
 			}
-			op_number[i] = next_op++;
+			if (is_overwritten) {
+				tie_op[i] = next_op++; // the input keeps its own $N from Pass 2
+			} else {
+				op_number[i] = next_op++;
+			}
 		}
 
 		// Pass 2: inputs
@@ -363,6 +370,11 @@ struct lbAsmGenerate {
 				GB_ASSERT(ret_slot[e.tie] >= 0);
 				LLVMValueRef in = widened ? this->tied_input_value(p, v, ret_types[ret_slot[e.tie]]) : v.value;
 				add_input_value(&param_types, &call_args, in);
+			} else if (e.pin_overwritten) {
+				GB_ASSERT(tie_op[i] >= 0);
+				constraints = gb_string_append_fmt(constraints, "%d", tie_op[i]);
+				GB_ASSERT(ret_slot[i] >= 0);
+				add_input_value(&param_types, &call_args, this->tied_input_value(p, v, ret_types[ret_slot[i]]));
 			} else {
 				switch (e.kind) {
 				case AsmTemplateEntityDecl_Register:
