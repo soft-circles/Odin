@@ -1481,7 +1481,10 @@ gb_internal void init_universal(void) {
 	{
 		int minimum_os_version = 0;
 		if (build_context.minimum_os_version_string != "") {
-			int major, minor, revision = 0;
+			int major    = 0;
+			int minor    = 0;
+			int revision = 0;
+
 		#if defined(GB_SYSTEM_WINDOWS)
 			sscanf_s(cast(const char *)(build_context.minimum_os_version_string.text), "%d.%d.%d", &major, &minor, &revision);
 		#else
@@ -1789,6 +1792,7 @@ gb_internal void init_checker_info(CheckerInfo *i) {
 	per_thread_array_init(&i->definition_queue, global_thread_pool.threads.count);
 	per_thread_array_init(&i->semantic_ident_queue, global_thread_pool.threads.count);
 	per_thread_array_init(&i->semantic_when_queue,  global_thread_pool.threads.count);
+	per_thread_array_init(&i->semantic_attributes_queue, global_thread_pool.threads.count);
 	per_thread_array_init(&i->checked_bodies_queue, global_thread_pool.threads.count);
 	per_thread_array_init(&i->checked_calls_queue,  global_thread_pool.threads.count);
 	per_thread_array_init(&i->checked_atomics_queue,   global_thread_pool.threads.count);
@@ -1829,6 +1833,7 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	per_thread_array_destroy(&i->definition_queue);
 	per_thread_array_destroy(&i->semantic_ident_queue);
 	per_thread_array_destroy(&i->semantic_when_queue);
+	per_thread_array_destroy(&i->semantic_attributes_queue);
 	per_thread_array_destroy(&i->checked_bodies_queue);
 	per_thread_array_destroy(&i->checked_calls_queue);
 	per_thread_array_destroy(&i->checked_atomics_queue);
@@ -2226,6 +2231,12 @@ gb_internal void add_semantic_ident(CheckerInfo *i, Token const &token, Entity *
 
 gb_internal void add_semantic_ident(CheckerInfo *i, Ast *identifier, Entity *entity, bool definition) {
 	add_semantic_ident(i, identifier->Ident.token, entity, definition);
+}
+
+gb_internal void add_semantic_attributes(CheckerInfo *i, Entity *entity, Array<Ast *> const &attributes) {
+	if (build_context.export_semantics_format != SemanticsFormat_Invalid && attributes.count > 0) {
+		per_thread_array_add(&i->semantic_attributes_queue, SemanticAttributes{entity, &attributes});
+	}
 }
 
 gb_internal void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *entity) {
@@ -4161,6 +4172,8 @@ gb_internal bool is_foreign_name_valid(String const &name) {
 			case '.':
 			case '_':
 			case ':':
+			case '?':
+			case '@':
 				break;
 			default:
 				if (!gb_char_is_alpha(cast(char)rune))
@@ -4265,6 +4278,9 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_group_attribute) {
 			error(elem, "Expected a string value for '%.*s'", LIT(name));
 		}
 		return true;
+	} else if (name == "private") {
+		// NOTE(bill): Handled elsewhere `check_collect_value_decl`
+		return true;
 	} else if (name == "objc_name") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind == ExactValue_String) {
@@ -4318,6 +4334,9 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		if (ev.kind != ExactValue_String) {
 			error(elem, "Expected a string value for '%.*s'", LIT(name));
 		}
+		return true;
+	} else if (name == "private") {
+		// NOTE(bill): Handled elsewhere `check_collect_value_decl`
 		return true;
 	} else if (name == "test") {
 		if (value != nullptr) {
@@ -4813,6 +4832,9 @@ gb_internal DECL_ATTRIBUTE_PROC(var_decl_attribute) {
 		if (ev.kind != ExactValue_String) {
 			error(elem, "Expected a string value for '%.*s'", LIT(name));
 		}
+		return true;
+	} else if (name == "private") {
+		// NOTE(bill): Handled elsewhere `check_collect_value_decl`
 		return true;
 	} else if (name == "static") {
 		if (value != nullptr) {
@@ -5409,9 +5431,8 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 	for_array(i, vd->attributes) {
 		Ast *attr = vd->attributes[i];
 		if (attr->kind != Ast_Attribute) continue;
-		auto *elems = &attr->Attribute.elems;
-		for (isize j = 0; j < elems->count; j++) {
-			Ast *elem = (*elems)[j];
+		// 'private' stays in the attributes for `-export-semantics`. The attribute procedures skip it.
+		for (Ast *elem : attr->Attribute.elems) {
 			String name = {};
 			Ast *value = nullptr;
 			switch (elem->kind) {
@@ -5460,8 +5481,6 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 				} else {
 					entity_visibility_kind = kind;
 				}
-				slice_unordered_remove(elems, j);
-				j -= 1;
 			} else if (name == "test") {
 				is_test = true;
 			} else if (name == "init") {
@@ -6257,6 +6276,7 @@ gb_internal void check_add_import_decl(CheckerContext *ctx, Ast *decl) {
 
 		add_entity(ctx, parent_scope, nullptr, e);
 		add_semantic_ident(ctx->info, id->import_name, e, true);
+		add_semantic_attributes(ctx->info, e, id->attributes);
 		if (force_use) {
 			add_entity_use(ctx, nullptr, e);
 		}
@@ -6483,6 +6503,7 @@ gb_internal void check_add_foreign_import_decl(CheckerContext *ctx, Ast *decl) {
 	add_entity_flags_from_file(ctx, e, parent_scope);
 	add_entity(ctx, scope, nullptr, e);
 	add_semantic_ident(ctx->info, fl->library_name, e, true);
+	add_semantic_attributes(ctx->info, e, fl->attributes);
 
 	mpsc_enqueue(&ctx->info->foreign_imports_to_check_fullpaths, e);
 
@@ -8472,16 +8493,24 @@ gb_internal void check_parsed_files(Checker *c) {
 	TIME_SECTION("sort init and fini procedures");
 	check_sort_init_and_fini_procedures(c);
 
+	bool entry_point_called_outside_runtime = false;
 	if (c->info.intrinsics_entry_point_usage.count > 0) {
 		TIME_SECTION("check intrinsics.__entry_point usage");
 		Ast *node = nullptr;
 		while (mpsc_dequeue(&c->info.intrinsics_entry_point_usage, &node)) {
-			if (c->info.entry_point == nullptr && node != nullptr) {
-				if (node->file()->pkg->kind != Package_Runtime) {
-					error(node, "usage of intrinsics.__entry_point will be a no-op");
+			if (node != nullptr && node->file()->pkg->kind != Package_Runtime) {
+				entry_point_called_outside_runtime = true;
+				if (c->info.entry_point == nullptr && !build_context.no_entry_point) {
+					error(node, "usage of intrinsics.__entry_point will be a no-op: the program does not define 'main'");
 				}
 			}
 		}
+	}
+
+	// NOTE(bill): The runtime does not call `main` when an Android library is loaded. Only a package calling
+	// `intrinsics.__entry_point` does, such as `core:sys/android/native_app_glue` once its activity is created.
+	if (selected_subtarget == Subtarget_Android && c->info.entry_point != nullptr && !entry_point_called_outside_runtime) {
+		error(c->info.entry_point->token, "Nothing calls 'main' on Android: import \"core:sys/android/native_app_glue\" to run it, or remove it");
 	}
 
 	TIME_SECTION("collate type info stuff");

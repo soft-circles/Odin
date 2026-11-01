@@ -2465,6 +2465,14 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 
 	lb_apply_thread_local_model(g.value, e->Variable.thread_local_model);
 
+	u32 alignment = cast(u32)gb_max(type_align_of(e->type), e->Variable.custom_align);
+
+	#ifdef __BIONIC__
+	if (e->Variable.thread_local_model != "") {
+		alignment = gb_max(alignment, 64);
+	}
+	#endif
+
 	if (is_foreign) {
 		LLVMSetLinkage(g.value, LLVMExternalLinkage);
 		if (build_context.metrics.os == TargetOs_windows) {
@@ -2482,7 +2490,7 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 		LLVM_SET_INTERNAL_WEAK_LINKAGE(g.value);
 	}
 	lb_set_linkage_from_entity_flags(m, g.value, e->flags);
-	LLVMSetAlignment(g.value, cast(u32)gb_max(type_align_of(e->type), e->Variable.custom_align));
+	LLVMSetAlignment(g.value, alignment);
 
 	if (e->Variable.link_section.len > 0) {
 		LLVMSetSection(g.value, alloc_cstring(permanent_allocator(), e->Variable.link_section));
@@ -2750,6 +2758,9 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 
 		if (e->kind == Entity_Procedure) {
 			if (e->Procedure.is_foreign && e->Procedure.is_objc_impl_or_import) {
+				// Track usage of Objective-C frameworks when an imported Objective-C method is used.
+				lb_add_foreign_library_path(m, e->Procedure.foreign_library);
+
 				// Do not generate declarations for foreign Objective-C methods. These are called indirectly through the Objective-C runtime.
 				continue;
 			}
@@ -3370,7 +3381,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 	Type *params  = alloc_type_tuple();
 	Type *results = alloc_type_tuple();
 
-	Type *t_ptr_cstring = alloc_type_pointer(t_cstring);
+	Type *t_argv = alloc_type_pointer(t_cstring);
 
 	bool call_cleanup = true;
 
@@ -3387,21 +3398,21 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 		call_cleanup = false;
 	} else if (build_context.metrics.os == TargetOs_windows && build_context.no_crt) {
 		name = str_lit("mainCRTStartup");
-	} else if (build_context.metrics.os == TargetOs_windows && build_context.metrics.arch == TargetArch_i386 && !build_context.no_crt) {
-		// Windows i386 with CRT: libcmt expects _main (main with underscore prefix)
-		name = str_lit("main");
+	} else if (build_context.metrics.os == TargetOs_windows) {
+		name = str_lit("wmain");
+		t_argv = alloc_type_pointer(t_cstring16);
 		has_args = true;
 		slice_init(&params->Tuple.variables, permanent_allocator(), 2);
-		params->Tuple.variables[0] = alloc_entity_param(nullptr, make_token_ident("argc"), t_i32, false, true);
-		params->Tuple.variables[1] = alloc_entity_param(nullptr, make_token_ident("argv"), t_ptr_cstring, false, true);
+		params->Tuple.variables[0] = alloc_entity_param(nullptr, make_token_ident("argc"), t_i32,  false, true);
+		params->Tuple.variables[1] = alloc_entity_param(nullptr, make_token_ident("argv"), t_argv, false, true);
 	} else if (is_arch_wasm()) {
 		name = str_lit("_start");
 		call_cleanup = false;
 	} else {
 		has_args = true;
 		slice_init(&params->Tuple.variables, permanent_allocator(), 2);
-		params->Tuple.variables[0] = alloc_entity_param(nullptr, make_token_ident("argc"), t_i32, false, true);
-		params->Tuple.variables[1] = alloc_entity_param(nullptr, make_token_ident("argv"), t_ptr_cstring, false, true);
+		params->Tuple.variables[0] = alloc_entity_param(nullptr, make_token_ident("argc"), t_i32,  false, true);
+		params->Tuple.variables[1] = alloc_entity_param(nullptr, make_token_ident("argv"), t_argv, false, true);
 	}
 
 	slice_init(&results->Tuple.variables, permanent_allocator(), 1);
@@ -3419,12 +3430,16 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 
 	if (has_args) { // initialize `runtime.args__`
 		lbValue argc = {LLVMGetParam(p->value, 0), t_i32};
-		lbValue argv = {LLVMGetParam(p->value, 1), t_ptr_cstring};
+		lbValue argv = {LLVMGetParam(p->value, 1), t_argv};
 		LLVMSetValueName2(argc.value, "argc", 4);
 		LLVMSetValueName2(argv.value, "argv", 4);
 		argc = lb_emit_conv(p, argc, t_int);
-		lbAddr args = lb_addr(lb_find_runtime_value(p->module, str_lit("args__")));
+
+		Type *t_args = alloc_type_slice(type_deref(t_argv));
+		lbAddr args = lb_add_local_generated(p, t_args, false);
 		lb_fill_slice(p, args, argv, argc);
+		lbValue rt_args = lb_find_runtime_value(p->module, str_lit("args__"));
+		lb_emit_store_union_variant(p, rt_args, lb_addr_load(p, args), t_args);
 	}
 
 	lbValue startup_runtime_value = {startup_runtime->value, startup_runtime->type};
@@ -3720,8 +3735,20 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 		lbModule *m = entry.value;
 		m->target_machine = target_machine;
 		LLVMTargetDataRef data_layout = LLVMCreateTargetDataLayout(target_machine);
-		LLVMSetModuleDataLayout(m->mod, data_layout);
+		char *layout_string = LLVMCopyStringRepOfTargetData(data_layout);
 		LLVMDisposeTargetData(data_layout);
+		// LLVM aligns a vector to its size, but Odin caps at max_simd_align (lb_alignof);
+		// listing wider vectors with the capped ABI alignment makes LLVM's defaults (load/store, sret) claim that
+		gbString layout = gb_string_make(heap_allocator(), layout_string);
+		LLVMDisposeMessage(layout_string);
+		i64 cap_bits = 8*build_context.max_simd_align;
+		i64 max_bits = 8*LB_MAX_VECTOR_SIZE;
+		for (i64 bits = cap_bits+8; bits <= max_bits; bits += 8) {
+			// v<bits>:<abi>:<preferred>; the preferred alignment stays natural (for LLVM's own stack slots)
+			layout = gb_string_append_fmt(layout, "-v%lld:%lld:%lld", cast(long long)bits, cast(long long)cap_bits, cast(long long)(8*next_pow2(bits/8)));
+		}
+		LLVMSetDataLayout(m->mod, layout);
+		gb_string_free(layout);
 
 	#if LLVM_VERSION_MAJOR >= 18
 		if (build_context.fast_isel) {
@@ -3896,6 +3923,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 				if (e->pkg->kind == Package_Runtime) {
 					if (link_name == "main"           ||
 					    link_name == "_main"          ||
+					    link_name == "wmain"          ||
 					    link_name == "DllMain"        ||
 					    link_name == "WinMain"        ||
 					    link_name == "wWinMain"       ||

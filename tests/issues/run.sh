@@ -48,6 +48,13 @@ else
 	exit 1
 fi
 
+if [[ $($ODIN check ../test_issue_5335 $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 if [[ $($ODIN check ../test_issue_7421_tagged_duplicate $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error: Duplicate case") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
@@ -137,6 +144,20 @@ else
 	exit 1
 fi
 
+if [[ $($ODIN check ../test_issue_7938 -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error: Missing return statement") -eq 3 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
+if [[ $($ODIN check ../test_issue_7975_7976_mismatch $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 8 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 if [[ $($ODIN check ../test_issue_poly_proc_value $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 4 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
@@ -182,6 +203,13 @@ fi
 $ODIN check ../test_issue_escape_store_through_union $COMMON_CHECK
 $ODIN check ../test_issue_poly_struct_field_count_race -no-entry-point $COMMON_CHECK
 
+if [[ $($ODIN check ../test_issue_8074 -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 34 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 # Objective-C tests target darwin, which can be checked and built for from any host
 if [[ $($ODIN check ../test_issue_objc_import_missing_selector -no-entry-point -target:darwin_arm64 $COMMON_CHECK 2>&1 >/dev/null | grep -c "is required for imported Objective-C methods") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
@@ -191,6 +219,13 @@ else
 fi
 
 if [[ $($ODIN check ../test_issue_objc_deferred_import -no-entry-point -target:darwin_arm64 $COMMON_CHECK 2>&1 >/dev/null | grep -c "cannot be used as a deferred_out procedure") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
+if [[ $($ODIN check ../test_issue_7980 -target:darwin_arm64 $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -294,6 +329,10 @@ fi
 # "odin run" tests:
 #
 
+# 7442 is Windows only. TODO: Being in run.sh doesn't necessarily mean we're not on Windows.
+#$ODIN run ../test_issue_7442 $COMMON
+#$ODIN run ../test_issue_7442 $COMMON -no-crt -no-thread-local
+#$ODIN run ../test_issue_7442 $COMMON -subsystem:windows
 $ODIN run ../test_issue_7482 $COMMON
 # 7562 is Windows only. TODO: Being in run.sh doesn't necessarily mean we're not on Windows.
 #$ODIN run ../test_issue_7562 $COMMON -no-crt -no-thread-local
@@ -339,6 +378,11 @@ if [[ -z ${ODIN_TESTS_NO_CLANG+x} ]]; then
 fi
 
 $ODIN test ../test_issue_6344 $COMMON -o:speed
+
+if [[ "$(uname)" != "NetBSD" ]]; then
+	$ODIN test ../test_issue_8072 -o:minimal --sanitize:address $COMMON
+fi
+$ODIN test ../test_issue_8072 -o:speed -lifetime-markers $COMMON
 
 if [[ $($ODIN test ../test_pr_6470 -define:TEST_EXPECT_FAILURE=true $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
@@ -386,10 +430,34 @@ if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
 		echo "SUCCESSFUL 0/1"
 		exit 1
 	fi
+	if [[ $($ODIN check ../test_issue_asm_deferred_errors $COMMON_CHECK 2>&1 >/dev/null | grep -c "Unknown mnemonic") -eq 5 ]]; then
+		echo "SUCCESSFUL 1/1"
+	else
+		echo "SUCCESSFUL 0/1"
+		exit 1
+	fi
+	if [[ $($ODIN check ../test_issue_asm_target_features $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 3 &&
+	      $($ODIN check ../test_issue_asm_target_features $COMMON_CHECK 2>&1 >/dev/null | grep -c "enables target feature 'avx'") -eq 3 ]]; then
+		echo "SUCCESSFUL 1/1"
+	else
+		echo "SUCCESSFUL 0/1"
+		exit 1
+	fi
+	$ODIN test ../test_issue_asm_pinned_clobbers $COMMON -o:speed
+	if [[ $($ODIN check ../test_issue_asm_clobber_pinned_output $COMMON_CHECK 2>&1 >/dev/null | grep -c "which '#clobber' also names") -eq 3 ]]; then
+		echo "SUCCESSFUL 1/1"
+	else
+		echo "SUCCESSFUL 0/1"
+		exit 1
+	fi
 fi
 
 $ODIN test ../test_lifetime_markers $COMMON -o:size -lifetime-markers
 $ODIN test ../test_lifetime_markers $COMMON -o:speed -lifetime-markers
+
+$ODIN test ../test_issue_udivmod128_zero_divisor $COMMON -integer-division-by-zero:zero
+$ODIN test ../test_issue_udivmod128_zero_divisor $COMMON -integer-division-by-zero:self
+$ODIN test ../test_issue_udivmod128_zero_divisor $COMMON -integer-division-by-zero:all-bits
 
 if [[ -z ${ODIN_TESTS_NO_CLANG+x} ]]; then
 	clang -c ../test_issue_sysv_abi/test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o
@@ -406,6 +474,7 @@ fi
 
 $ODIN test ../test_issue_disabled_proc_value $COMMON -disable-assert
 $ODIN test ../test_issue_loaded_pointer_alignment $COMMON -o:speed
+$ODIN test ../test_issue_max_simd_align $COMMON -o:speed
 
 #########################################################################################################
 
