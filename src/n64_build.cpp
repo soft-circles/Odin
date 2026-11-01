@@ -489,10 +489,21 @@ gb_internal void n64_add_c_and_cxx_flags(N64Argv *argv, N64BuildSettings const &
 // N64_CFLAGS, N64_ASFLAGS or N64_RSPASFLAGS followed by -n64-cflags, and its
 // object is linked in the source's place. LIBDRAGON_PREVIEW is n64.mk's 2.
 
-gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const &source, String const &object, char **env);
+// Quotes text as a GAS string: the file name of a .incbin, or a symbol name GAS takes with any characters.
+gb_internal String n64_gas_string(String const &text) {
+	gbString quoted = gb_string_make(permanent_allocator(), "\"");
+	for (isize index = 0; index < text.len; index += 1) {
+		if (text[index] == '"' || text[index] == '\\') {
+			quoted = gb_string_appendc(quoted, "\\");
+		}
+		quoted = gb_string_append_length(quoted, &text.text[index], 1);
+	}
+	quoted = gb_string_appendc(quoted, "\"");
+	return make_string(cast(u8 *)quoted, gb_string_length(quoted));
+}
 
 // Runs n64.mk's rsp*.S rule: link the microcode with rsp.ld, then wrap its .text, .data and .meta as data objects.
-// The wrapper .incbin's each section and assembles like a VR4300 .S source, so its object carries o64 flags.
+// The wrapper .incbin's each section and assembles with VR4300 flags, so its object carries o64 flags.
 gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &source, String const &name,
                                  String const &object, String const &foreign_dir, char **env) {
 	N64BuildSettings const &s = request.settings;
@@ -557,23 +568,20 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 
 		// Each section starts 16-byte aligned in .data, as n64.mk's objcopy -I binary wrappers did.
 		String target = concatenate3_strings(a, stem, STR_LIT("_"), section);
+		String start = n64_gas_string(concatenate_strings(a, target, STR_LIT("_start")));
+		String end = n64_gas_string(concatenate_strings(a, target, STR_LIT("_end")));
+		String size = n64_gas_string(concatenate_strings(a, target, STR_LIT("_size")));
+		String incbin = n64_gas_string(binary);
 		wrapper = gb_string_append_fmt(wrapper,
 			"\t.data\n\t.balign 16\n"
-			"\t.globl %.*s_start\n%.*s_start:\n\t.incbin \"",
-			LIT(target), LIT(target));
-		for (isize c = 0; c < binary.len; c += 1) {
-			if (binary[c] == '"' || binary[c] == '\\') {
-				wrapper = gb_string_append_rune(wrapper, '\\');
-			}
-			wrapper = gb_string_append_rune(wrapper, binary[c]);
-		}
-		wrapper = gb_string_append_fmt(wrapper,
-			"\"\n\t.globl %.*s_end\n%.*s_end:\n"
-			"\t.globl %.*s_size\n\t.set %.*s_size, %.*s_end - %.*s_start\n",
-			LIT(target), LIT(target), LIT(target), LIT(target), LIT(target), LIT(target));
+			"\t.globl %.*s\n%.*s:\n\t.incbin %.*s\n"
+			"\t.globl %.*s\n%.*s:\n"
+			"\t.globl %.*s\n\t.set %.*s, %.*s - %.*s\n",
+			LIT(start), LIT(start), LIT(incbin), LIT(end), LIT(end), LIT(size), LIT(size), LIT(end), LIT(start));
 	}
 
-	String wrapper_path = concatenate_strings(a, base, STR_LIT(".wrapper.S"));
+	String wrapper_name = concatenate_strings(a, name, STR_LIT(".wrapper.s"));
+	String wrapper_path = n64_path_join(a, foreign_dir, wrapper_name);
 	FILE *wrapper_file = fopen(alloc_cstring(a, wrapper_path), "wb");
 	isize wrapper_length = gb_string_length(wrapper);
 	bool written = wrapper_file != nullptr && cast(isize)fwrite(wrapper, 1, wrapper_length, wrapper_file) == wrapper_length;
@@ -584,7 +592,15 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 		gb_printf_err("Failed to write %.*s\n", LIT(wrapper_path));
 		return 1;
 	}
-	return n64_compile_source(request, wrapper_path, object, env);
+	// N64_ASFLAGS's target flags without -n64-cflags, so the object carries the o64 flags of a VR4300 .S source.
+	array_init(&argv, a);
+	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-gcc"));
+	n64_arg(&argv, "-c");
+	n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mabi=o64");
+	n64_arg(&argv, "-Wa,--fatal-warnings");
+	n64_arg(&argv, "-o"); n64_arg(&argv, object);
+	n64_arg(&argv, wrapper_name);
+	return n64_run_tool("rsp-wrap", argv, env, show, false, foreign_dir_c);
 }
 
 // Compiles a C or VR4300 assembly source from its own directory, as n64.mk does, so debug paths stay relative.
