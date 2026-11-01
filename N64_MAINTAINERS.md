@@ -337,10 +337,10 @@ mnemonic lookup, and `mnemonic_unavailable_reason` says why.
 Where rexcode's form is wider than the hardware, the table follows the
 hardware: `ltv`/`stv` take only `%v00`, `%v08`, `%v16` or `%v24` (the RSP uses
 `vt & ~7`), `vsar` is `vsar %vNN, %acc_hi|%acc_md|%acc_lo` (element 8, 9 or 10,
-vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`), and
-`vmov` takes a destination lane like the other single-lane ops, which
-rexcode's `vmov` form has no field for (the golden program adds those bits to
-rexcode's word). The golden program in
+vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`).
+`vmov` takes a destination lane like the other single-lane ops, and so does
+rexcode's `vmov` form: `vmov vd, de, vt, element`, the lane in the vs field.
+The golden program in
 [tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
 through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode
 mnemonic is neither diffed nor in its `REJECTED` set, so a mnemonic rexcode

@@ -353,7 +353,7 @@ vector_ls_size :: proc(m: Mnemonic) -> i32 {
 @(private="file")
 is_single_lane :: proc(m: Mnemonic) -> bool {
 	#partial switch m {
-	case .VRCP, .VRCPL, .VRCPH, .VRSQ, .VRSQL, .VRSQH:
+	case .VRCP, .VRCPL, .VRCPH, .VMOV, .VRSQ, .VRSQL, .VRSQH:
 		return true
 	}
 	return false
@@ -424,16 +424,6 @@ write_instruction :: proc(
 		write_register(sb, ops[2].reg)
 		write_comma(sb, opts)
 		write_decimal_u32(sb, u32(ops[2].element & 0x0F))
-
-	case m == .VMOV && len(ops) == 2:
-		// `vmov vd, de, vt, element`; the table encodes no de, so it is 0.
-		write_register(sb, ops[0].reg)
-		write_comma(sb, opts)
-		strings.write_byte(sb, '0')
-		write_comma(sb, opts)
-		write_register(sb, ops[1].reg)
-		write_comma(sb, opts)
-		write_decimal_u32(sb, u32(ops[1].element & 0x0F))
 
 	case len(ops) == 2 && ops[1].kind == .VECTOR_MEM:
 		// `op vt, element, byte_offset, base`. The encoder takes the element

@@ -192,8 +192,8 @@ inst_vrcpl_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Re
 emit_vrcpl_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vrcpl_vr_vr_vr(a, b, c, element)) }
 inst_vrcph_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRCPH, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vrcph_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vrcph_vr_vr_vr(a, b, c, element)) }
-inst_vmov_vr_vr          :: #force_inline proc "contextless" (a: Register, b: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMOV, operand_count = 2, length = 4, ops = {op_vr(a), op_vr(b, element), {}, {}} } }
-emit_vmov_vr_vr          :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, element: u8 = 0) { append_elem(instructions, inst_vmov_vr_vr(a, b, element)) }
+inst_vmov_vr_vr_vr       :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMOV, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
+emit_vmov_vr_vr_vr       :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmov_vr_vr_vr(a, b, c, element)) }
 inst_vrsq_vr_vr_vr       :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRSQ, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vrsq_vr_vr_vr       :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vrsq_vr_vr_vr(a, b, c, element)) }
 inst_vrsql_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRSQL, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
@@ -429,8 +429,8 @@ inst_vrcpl                    :: inst_vrcpl_vr_vr_vr
 emit_vrcpl                    :: emit_vrcpl_vr_vr_vr
 inst_vrcph                    :: inst_vrcph_vr_vr_vr
 emit_vrcph                    :: emit_vrcph_vr_vr_vr
-inst_vmov                     :: inst_vmov_vr_vr
-emit_vmov                     :: emit_vmov_vr_vr
+inst_vmov                     :: inst_vmov_vr_vr_vr
+emit_vmov                     :: emit_vmov_vr_vr_vr
 inst_vrsq                     :: inst_vrsq_vr_vr_vr
 emit_vrsq                     :: emit_vrsq_vr_vr_vr
 inst_vrsql                    :: inst_vrsql_vr_vr_vr
