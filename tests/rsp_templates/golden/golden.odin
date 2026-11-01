@@ -375,6 +375,21 @@ unroll_operand_forms :: asm(p: ^u32) [p = %s1] {
 SCALAR    :: intrinsics.rsp_template_code(scalar_forms)
 UNROLL    :: intrinsics.rsp_template_code(unroll_forms)
 UNROLL_OPERANDS :: intrinsics.rsp_template_code(unroll_operand_forms)
+
+// jal calls another @(rsp) template, here and in another package, by the address
+// the compiler assigns it
+@(rsp)
+call_forms :: asm() {
+	jal   (valid.fill)
+	nop
+	jal   (scalar_forms)
+	nop
+}
+
+CALL :: intrinsics.rsp_template_code(call_forms)
+FILL_ADDRESS :: intrinsics.rsp_template_address(valid.fill)
+SCALAR_ADDRESS :: intrinsics.rsp_template_address(scalar_forms)
+FILL_PINS :: intrinsics.rsp_template_pins(valid.fill)
 EDGE      :: intrinsics.rsp_template_code(edge_forms)
 FILL      :: intrinsics.rsp_template_code(valid.fill)
 TRANSFORM :: intrinsics.rsp_template_code(transform.transform)
@@ -388,7 +403,7 @@ VLS       :: intrinsics.rsp_template_code(vls_forms)
 // rexcode's RSP mnemonics an @(rsp) template may not use (asm_tables_rsp.cpp's
 // mnemonic_unavailable_reason; bad.odin's `profile` checks each one's error). LWV is
 // one rexcode encodes but the RSP does not implement.
-REJECTED :: bit_set[rsp.Mnemonic]{.J, .JAL, .JR, .JALR, .BLTZAL, .BGEZAL, .MFC0, .MTC0, .BREAK, .LWV}
+REJECTED :: bit_set[rsp.Mnemonic]{.J, .JR, .JALR, .BLTZAL, .BGEZAL, .MFC0, .MTC0, .BREAK, .LWV}
 
 vr :: proc(n: int) -> rsp.Register {
 	return rsp.Register(rsp.REG_VR | u16(n))
@@ -876,11 +891,24 @@ main :: proc() {
 	compare("vls_forms", VLS, vls_code[:], nil)
 	unroll_operands, unroll_operands_extra := expected_unroll_operands()
 	compare("unroll_operand_forms", UNROLL_OPERANDS, unroll_operands[:], nil, unroll_operands_extra)
+	// rexcode's jal takes a label; the target bits come from the assigned addresses
+	call := [?]rsp.Instruction{rsp.inst_jal(0), rsp.inst_nop(), rsp.inst_jal(0), rsp.inst_nop()}
+	compare("call_forms", CALL, call[:], {0}, {FILL_ADDRESS >> 2, 0, SCALAR_ADDRESS >> 2, 0})
+	if FILL_ADDRESS == SCALAR_ADDRESS || FILL_ADDRESS < 0x1000 || FILL_ADDRESS & 3 != 0 {
+		fmt.printfln("call_forms: routine addresses %08x and %08x are not distinct word addresses above IMEM", FILL_ADDRESS, SCALAR_ADDRESS)
+		failures += 1
+	}
+	// fill's parameters, output and value, are pinned to s2 and a0; its result is not a parameter
+	fill_pins := FILL_PINS
+	if len(fill_pins) != 2 || fill_pins[0] != {18, false} || fill_pins[1] != {4, false} {
+		fmt.printfln("fill's pins are %v, want s2 then a0", fill_pins)
+		failures += 1
+	}
 
 	// Every rexcode RSP mnemonic (one form each) is diffed above, or is one the
 	// table rejects and none of the templates holds.
 	covered: bit_set[rsp.Mnemonic]
-	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:]}) {
+	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:], call[:]}) {
 		for inst in list {
 			covered += {inst.mnemonic}
 		}

@@ -12,10 +12,11 @@
 // here through both and diffs the words.
 //
 // Scope: every rexcode RSP mnemonic (core:rexcode/isa/rsp/tablegen/
-// encoding_table.odin, 116 mnemonics, one form each) except the ten a job body
+// encoding_table.odin, 116 mnemonics, one form each) except the nine a job body
 // may not use, which mnemonic_unavailable_reason names:
 //
-//     j jal jr jalr    jumps and calls: a body branches only to its own labels
+//     j jr jalr        jumps: a body branches only to its own labels, and calls
+//                      only another @(rsp) template, with jal (pkg.routine)
 //     bltzal bgezal    they write %ra, which holds the rspq return address
 //     mfc0 mtc0        CP0 (DMA, semaphore, RDP registers): the prologue's and
 //                      epilogue's
@@ -73,6 +74,8 @@
 	X(SLTI, "slti") X(SLTIU, "sltiu") X(ANDI, "andi") X(ORI, "ori") X(XORI, "xori") X(LUI, "lui") \
 	/* branches (explicit delay slot) */ \
 	X(BEQ, "beq") X(BNE, "bne") X(BLEZ, "blez") X(BGTZ, "bgtz") X(BLTZ, "bltz") X(BGEZ, "bgez") \
+	/* a call to another @(rsp) template (check_asm_rsp.cpp) */ \
+	X(JAL, "jal") \
 	/* scalar loads / stores, nop */ \
 	X(LB, "lb") X(LH, "lh") X(LW, "lw") X(LBU, "lbu") X(LHU, "lhu") X(SB, "sb") \
 	X(SH, "sh") X(SW, "sw") X(NOP, "nop") \
@@ -169,6 +172,7 @@ struct Asm_rsp {
 		OP_MEM,         // [base + disp], signed 16-bit byte displacement
 		OP_VMEM,        // [base + disp], byte displacement scaled by the form's access size
 		OP_REL16,       // branch target label (PC-relative, 16-bit word offset)
+		OP_CALL26,      // jal target: the address the compiler assigns a routine
 	};
 
 
@@ -181,6 +185,7 @@ struct Asm_rsp {
 		ENC_IMM16,        // bits 15..0
 		ENC_OFFSET_BASE,  // base in bits 25..21, offset in bits 15..0
 		ENC_BRANCH16,     // (target - (pc+4)) >> 2 in bits 15..0
+		ENC_TARGET26,     // target >> 2 in bits 25..0
 		ENC_VD,           // bits 10..6
 		ENC_VD_DE,        // vd in bits 10..6, its destination lane in bits 15..11 (vs)
 		ENC_VS,           // bits 15..11
@@ -234,6 +239,7 @@ struct Asm_rsp {
 	enum SideEffectFlags : u8 {
 		SideEffectFlag_CONTROL = 1<<0, // writes pc
 		SideEffectFlag_COND    = 1<<1, // conditional transfer: may fall through
+		SideEffectFlag_CALL    = 1<<2, // links through ra and returns: falls through
 	};
 
 	enum OperandSet : u8 {
@@ -305,7 +311,7 @@ struct Asm_rsp {
 		}
 		bool is_conditional(struct Encoding const &valid_form) const {
 			gb_unused(valid_form);
-			return has_control() && (side_effects & SideEffectFlag_COND) != 0;
+			return has_control() && (side_effects & (SideEffectFlag_COND|SideEffectFlag_CALL)) != 0;
 		}
 		bool is_nondeterministic() const {
 			return false;
@@ -520,6 +526,7 @@ struct Asm_rsp {
 		case OP_SIMM16:
 		case OP_UIMM16:
 		case OP_SHAMT:
+		case OP_CALL26:
 			return AsmOperand_Immediate;
 
 		case OP_MEM:
@@ -614,6 +621,7 @@ struct Asm_rsp {
 		case OP_MEM:      return 0; // access size comes from the mnemonic
 		case OP_VMEM:     return 0;
 		case OP_REL16:    return 16;
+		case OP_CALL26:   return 28;
 		}
 		return 0;
 	}
@@ -738,10 +746,10 @@ struct Asm_rsp {
 	// The RSP instructions rexcode encodes that a job body may not use. They are not
 	// in the table, so they fail the mnemonic lookup, and this says why.
 	char const *mnemonic_unavailable_reason(String const &name) const {
-		if (name == "j" || name == "jal" || name == "jr" || name == "jalr") {
+		if (name == "j" || name == "jr" || name == "jalr") {
 			return "jumps out of the template, which an @(rsp) template cannot: a Microcode body branches only "
 			       "to its own labels (beq, bne, blez, bgtz, bltz, bgez) and ends by falling through to the "
-			       "generated epilogue";
+			       "generated epilogue, and calls another @(rsp) template with jal (pkg.routine)";
 		}
 		if (name == "bltzal" || name == "bgezal") {
 			return "writes %ra, which holds the rspq return address; an @(rsp) template branches with bltz or bgez";
@@ -1012,6 +1020,7 @@ struct Asm_rsp {
 		case OP_SIMM16: lo = -32768; hi = 32767; break;
 		case OP_UIMM16: lo = 0;      hi = 65535; break;
 		case OP_SHAMT:  lo = 0;      hi = 31;    break;
+		case OP_CALL26: lo = 0;      hi = 0x0FFFFFFC; break;
 		default:
 			return false;
 		}
@@ -1047,6 +1056,9 @@ struct Asm_rsp {
 		case ENC_BRANCH16:
 			if (value < -32768 || value > 32767) *ok = false;
 			return cast(u32)value & 0xFFFF;
+		case ENC_TARGET26:
+			if (value < 0 || value > 0x0FFFFFFC || (value & 3) != 0) *ok = false;
+			return (cast(u32)value >> 2) & 0x03FFFFFF;
 		case ENC_VD:          return (reg & 0x1F) << 6;
 		case ENC_VD_DE:
 			if (element > 7) *ok = false;
@@ -1118,6 +1130,7 @@ enum Asm_rsp::Shape : u8 {
 	SH_LUI,        // rt, uimm16                         lui
 	SH_BR2,        // rs, rt, label                      beq bne
 	SH_BR1,        // rs, label                          blez bgtz bltz bgez
+	SH_CALL,       // constant address                   jal
 	SH_MEM,        // rt, [base + disp]                  lb lh lw lbu lhu sb sh sw
 	SH_MXC2,       // rt, vs.byte                        mfc2 mtc2
 	SH_CXC2,       // rt, %vco/%vcc/%vce                 cfc2 ctc2
@@ -1145,6 +1158,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 	/* SH_LUI      */ RS((OP_GPR,ENC_RT), (OP_UIMM16,ENC_IMM16), N_, N_),
 	/* SH_BR2      */ RS((OP_GPR,ENC_RS), (OP_GPR,ENC_RT), (OP_REL16,ENC_BRANCH16), N_),
 	/* SH_BR1      */ RS((OP_GPR,ENC_RS), (OP_REL16,ENC_BRANCH16), N_, N_),
+	/* SH_CALL     */ RS((OP_CALL26,ENC_TARGET26), N_, N_, N_),
 	/* SH_MEM      */ RS((OP_GPR,ENC_RT), (OP_MEM,ENC_OFFSET_BASE), N_, N_),
 	/* SH_MXC2     */ RS((OP_GPR,ENC_RT), (OP_VR_BYTE,ENC_VS_ELEM), N_, N_),
 	/* SH_CXC2     */ RS((OP_GPR,ENC_RT), (OP_VC,ENC_RD), N_, N_),
@@ -1176,6 +1190,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_O2 Asm_rsp::OperandSet_OP2
 #define RSP_CTL  Asm_rsp::SideEffectFlag_CONTROL
 #define RSP_COND Asm_rsp::SideEffectFlag_COND
+#define RSP_CALL Asm_rsp::SideEffectFlag_CALL
 
 #define RSP_C_NONE    RSP_CLB(0,      0,             false, false, 0)
 #define RSP_C_W0_R12  RSP_CLB(RSP_O0, RSP_O1|RSP_O2, false, false, 0)  // rd <- rs op rt
@@ -1186,6 +1201,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_C_W1_R0   RSP_CLB(RSP_O1, RSP_O0,        false, false, 0)  // mtc2, ctc2
 #define RSP_C_BR1     RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND)
 #define RSP_C_BR2     RSP_CLB(0,      RSP_O0|RSP_O1, false, false, RSP_CTL|RSP_COND)
+#define RSP_C_CALL    RSP_CLB(0,      0,             false, false, RSP_CTL|RSP_CALL)
 // The accumulator is not modelled (VU effects stay in the generator's check).
 #define RSP_C_VU      RSP_CLB(RSP_O0, RSP_O1|RSP_O2, false, false, 0)
 
@@ -1223,6 +1239,7 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(BGTZ,   SH_BR1,       0x1C000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BLTZ,   SH_BR1,       0x04000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BGEZ,   SH_BR1,       0x04010000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
+	R(JAL,    SH_CALL,      0x0C000000, 0xFC000000, RSP_SCALAR, RSP_C_CALL),
 	R(LB,     SH_MEM,       0x80000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LH,     SH_MEM,       0x84000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LW,     SH_MEM,       0x8C000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),

@@ -22,6 +22,7 @@
 // so these are the places it is used as a value.
 
 gb_internal void check_queued_asm_template_body(Checker *c, Entity *e, UntypedExprInfoMap *untyped);
+gb_internal void rsp_check_routine_calls(Entity *e);
 
 // Its constant, like #load's, is global data, not a temporary of the stack frame.
 gb_internal bool is_rsp_template_code_call(Ast *call) {
@@ -32,7 +33,7 @@ gb_internal bool is_rsp_template_code_call(Ast *call) {
 	Ast *proc = unparen_expr(call->CallExpr.proc);
 	Entity *b = entity_of_node(proc);
 	return proc->tav.mode == Addressing_Builtin && b != nullptr && b->kind == Entity_Builtin &&
-	       b->Builtin.id == BuiltinProc_rsp_template_code;
+	       (b->Builtin.id == BuiltinProc_rsp_template_code || b->Builtin.id == BuiltinProc_rsp_template_pins);
 }
 
 struct RspCodeLine {
@@ -448,6 +449,7 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 			case Asm_rsp::OP_SIMM16:
 			case Asm_rsp::OP_UIMM16:
 			case Asm_rsp::OP_SHAMT:
+			case Asm_rsp::OP_CALL26:
 				if (!rsp_template_constant(expr, &value)) {
 					error(expr, "Expected a constant immediate in an @(rsp) template");
 					return false;
@@ -1101,6 +1103,7 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
 		rsp_expand_unrolls(ctx, e);
 		check_asm_template_body(&g_asm_rsp, ctx, e, d);
+		rsp_check_routine_calls(e);
 		rsp_check_parameter_types(e);
 		rsp_check_template_layout_measures(e);
 	}
@@ -1214,5 +1217,166 @@ gb_internal bool check_rsp_template_location(CheckerContext *c, Operand *operand
 	init_core_source_code_location(c->checker);
 	operand->mode = Addressing_Value;
 	operand->type = t_source_code_location;
+	return true;
+}
+
+// Routines: an @(rsp) template another one calls with `jal (routine)`.
+//
+// The jal encodes the routine's address, which the compiler assigns: the first
+// routine it meets gets RSP_ROUTINE_ADDRESS_BASE, the next one 4 more, and so on.
+// The addresses are above IMEM, so no template's jal can reach real code by them;
+// intrinsics.rsp_template_address gives the generator the same address, so it can
+// tell which routine each jal calls and link the call to the code it emits for it.
+#define RSP_ROUTINE_ADDRESS_BASE 0x0F000000u
+
+gb_global PtrMap<Entity *, u32> rsp_routine_addresses; // guarded by rsp_template_body_mutex
+gb_global bool                  rsp_routine_addresses_init;
+
+gb_internal u32 rsp_routine_address(Entity *routine) {
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	if (!rsp_routine_addresses_init) {
+		map_init(&rsp_routine_addresses);
+		rsp_routine_addresses_init = true;
+	}
+	u32 *found = map_get(&rsp_routine_addresses, routine);
+	if (found != nullptr) {
+		return *found;
+	}
+	u32 address = RSP_ROUTINE_ADDRESS_BASE + 4*cast(u32)rsp_routine_addresses.count;
+	map_set(&rsp_routine_addresses, routine, address);
+	return address;
+}
+
+// The @(rsp) template a parenthesised operand names, as `(routine)` or `(pkg.routine)`,
+// or nullptr when it names something else.
+gb_internal Entity *rsp_template_routine_named(Entity *tmpl, Ast *expr) {
+	if (expr == nullptr || expr->kind != Ast_ParenExpr) {
+		return nullptr;
+	}
+	Ast *inner = unparen_expr(expr);
+	Scope *scope = tmpl->AsmTemplate.param_scope->parent;
+	Entity *found = nullptr;
+	if (inner->kind == Ast_Ident) {
+		found = scope_lookup(scope, inner->Ident.interned, inner->Ident.hash);
+	} else if (inner->kind == Ast_SelectorExpr) {
+		Ast *lhs = unparen_expr(inner->SelectorExpr.expr);
+		Ast *sel = inner->SelectorExpr.selector;
+		if (lhs == nullptr || lhs->kind != Ast_Ident || sel == nullptr || sel->kind != Ast_Ident) {
+			return nullptr;
+		}
+		Entity *pkg = scope_lookup(scope, lhs->Ident.interned, lhs->Ident.hash);
+		if (pkg == nullptr || pkg->kind != Entity_ImportName) {
+			return nullptr;
+		}
+		found = scope_lookup_current(pkg->ImportName.scope, sel->Ident.interned, sel->Ident.hash);
+	}
+	if (found == nullptr || found->kind != Entity_AsmTemplate || found->AsmTemplate.arch != AsmTemplateArch_Rsp) {
+		return nullptr;
+	}
+	return found;
+}
+
+// An operand naming another @(rsp) template is that routine's address, a constant.
+gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr) {
+	Entity *routine = rsp_template_routine_named(tmpl, expr);
+	if (routine == nullptr) {
+		return false;
+	}
+	Ast *inner = unparen_expr(expr);
+	Ast *named = inner;
+	if (inner->kind == Ast_SelectorExpr) {
+		Ast *lhs = unparen_expr(inner->SelectorExpr.expr);
+		add_entity_use(ctx, lhs, scope_lookup(tmpl->AsmTemplate.param_scope->parent, lhs->Ident.interned, lhs->Ident.hash));
+		named = inner->SelectorExpr.selector;
+	}
+	named->Ident.entity = routine;
+	add_entity_use(ctx, named, routine);
+	operand->mode  = Addressing_Constant;
+	operand->type  = t_untyped_integer;
+	operand->value = exact_value_i64(rsp_routine_address(routine));
+	add_type_and_value(ctx, inner, operand->mode, operand->type, operand->value);
+	add_type_and_value(ctx, expr, operand->mode, operand->type, operand->value);
+	return true;
+}
+
+// jal's operand must name another @(rsp) template. Any other instruction's operand
+// that names one is its address, which no 16-bit immediate holds, so the range
+// check rejects it.
+gb_internal void rsp_check_routine_calls(Entity *e) {
+	ast_node(at, AsmTemplate, e->AsmTemplate.node);
+	for (Ast *instruction : at->instructions) {
+		if (instruction->kind != Ast_AsmInstruction) {
+			continue;
+		}
+		ast_node(instr, AsmInstruction, instruction);
+		if (instr->name == nullptr || instr->name->kind != Ast_Ident || instr->name->Ident.token.string != "jal" ||
+		    instr->mnemonic == 0 || instr->valid_form_index < 0 || instr->operands.count != 1) {
+			continue;
+		}
+		Entity *routine = rsp_template_routine_named(e, instr->operands[0]);
+		if (routine == e) {
+			error(instr->operands[0], "'%.*s' calls itself; an @(rsp) template cannot", LIT(e->token.string));
+		} else if (routine == nullptr) {
+			// at the mnemonic: a constant operand in parentheses has its own warning
+			gbString s = expr_to_string(instr->operands[0]);
+			error(instr->name, "'jal' calls an @(rsp) template by name, as 'jal (pkg.routine)'; '%s' is not one", s);
+			gb_string_free(s);
+		}
+	}
+}
+
+// The address a jal to the template encodes (rsp_routine_address), as a constant u32.
+gb_internal bool check_rsp_template_address(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+	operand->mode  = Addressing_Constant;
+	operand->type  = t_u32;
+	operand->value = exact_value_i64(0);
+	Entity *e = rsp_template_argument(c, call, builtin_name);
+	if (e == nullptr) {
+		return true;
+	}
+	operand->value = exact_value_i64(rsp_routine_address(e));
+	return true;
+}
+
+// One parameter's pin, as an intrinsics.Rsp_Pin holds it: a GPR, or a vector register.
+struct RspPin {
+	u8 number;
+	u8 vector;
+};
+
+// Each parameter's pin, in parameter order, as a constant built like rsp_template_code's.
+gb_internal bool check_rsp_template_pins(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+	GB_ASSERT(t_rsp_pin != nullptr);
+	GB_ASSERT(type_size_of(t_rsp_pin) == gb_size_of(RspPin));
+	operand->mode  = Addressing_Constant;
+	operand->type  = alloc_type_slice(t_rsp_pin);
+	operand->value = exact_value_string(make_string(permanent_alloc_array<u8>(1), 0));
+
+	Entity *e = rsp_template_argument(c, call, builtin_name);
+	if (e == nullptr) {
+		return true;
+	}
+	auto const &decls = e->AsmTemplate.decls;
+	isize count = 0;
+	for (auto const &ed : decls) {
+		if (ed.param_index >= 0) count += 1;
+	}
+	u8 *bytes = permanent_alloc_array<u8>(gb_max(count * gb_size_of(RspPin), 1));
+	for (auto const &ed : decls) {
+		if (ed.param_index < 0 || ed.param_index >= count) {
+			continue;
+		}
+		String pin = ed.pin;
+		if (pin.len == 0 && ed.tie >= 0 && ed.tie < decls.count) {
+			pin = decls[ed.tie].pin;
+		}
+		auto r = g_asm_rsp.register_lookup(pin);
+		if (r == Asm_rsp::REG_INVALID) {
+			return true; // an unpinned parameter, which the template's check reports
+		}
+		bytes[ed.param_index*2 + 0] = cast(u8)g_asm_rsp.reg_number(r);
+		bytes[ed.param_index*2 + 1] = g_asm_rsp.reg_class(g_asm_rsp.register_codes[r]) == Asm_rsp::REG_CLASS_VR;
+	}
+	operand->value = exact_value_string(make_string(bytes, count * gb_size_of(RspPin)));
 	return true;
 }

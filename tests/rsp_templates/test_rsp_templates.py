@@ -258,7 +258,7 @@ class Encode(unittest.TestCase):
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
-                     "vls_forms", "transform"):
+                     "vls_forms", "call_forms", "transform"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 

@@ -3034,6 +3034,8 @@ gb_internal AsmTermCategory check_asm_mem_term_category(Operand *o, Array<AsmTem
 	return AsmTermCategory_Other;
 }
 
+gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr); // check_asm_rsp.cpp
+
 template <typename AsmCtx>
 gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *entity, Operand *operand, Ast *expr, bool allow_memory_operands) {
 	if (expr == nullptr) {
@@ -3059,6 +3061,9 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		return;
 	case_end;
 	case_ast_node(pe, ParenExpr, expr);
+		if (ate->arch == AsmTemplateArch_Rsp && rsp_template_routine_operand(ctx, entity, operand, expr)) {
+			return;
+		}
 		check_expr(ctx, operand, expr);
 		if (operand->mode != Addressing_Constant) {
 			error(expr, "Asm operands within parentheses must be compile time constants");

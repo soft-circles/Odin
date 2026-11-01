@@ -60,7 +60,9 @@ whatever build compiles it (Odin64's host Microcode generator):
   element accessors, vector offsets and the register model.
 - [`src/check_asm_rsp.cpp`](src/check_asm_rsp.cpp) holds the RSP-only part of
   a template's check, the encoder, `intrinsics.rsp_template_code` (the encoded
-  words) and `intrinsics.rsp_template_location` (the declaration).
+  words), `intrinsics.rsp_template_location` (the declaration), and the
+  routine calls: `intrinsics.rsp_template_address` and
+  `intrinsics.rsp_template_pins`.
 
 ## Interfaces
 
@@ -304,9 +306,30 @@ template with errors it is an empty constant, so nothing cascades.
 value: the template's file, the line and column of its name, and its name as
 `procedure`; `lb_build_builtin_proc` builds it.
 
+A template calls another `@(rsp)` template, a routine, with `jal (routine)` or
+`jal (pkg.routine)`. `rsp_template_routine_operand` (from the shared check's
+parenthesised-operand case) makes that operand the routine's address, a
+constant the compiler assigns under `rsp_template_body_mutex`: the first
+routine named gets `0x0F000000`, the next 4 more, and so on, above IMEM so no
+jal reaches code by it. The addresses differ from build to build only in which
+routine gets which; one build's jal words and its
+`intrinsics.rsp_template_address(t)` (a constant `u32`) always agree, so
+Odin64's generator matches each jal to the routine it emits and links it by
+label. `intrinsics.rsp_template_pins(t)` is a constant
+`[]intrinsics.Rsp_Pin{number: u8, vector: bool}`, one per parameter in
+parameter order (results and scratch registers are not parameters), so the
+generator knows the registers a routine reads without its source.
+`rsp_check_routine_calls` reports a jal whose operand names no `@(rsp)`
+template (at the mnemonic, since a parenthesised constant has a warning at the
+operand) and a template that calls itself. Any other instruction's operand
+that names a template gets its address, which no 16-bit immediate holds, so
+the range check rejects it. The contract (what a routine reads, writes and
+gives back, and that it calls no routine itself) is the generator's: the
+compiler only names the callee.
+
 The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
-(one form each, with its bits and mask) except ten: the nine a Microcode body
-may not use, `j`, `jal`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`),
+(one form each, with its bits and mask) except nine: the eight a Microcode body
+may not use, `j`, `jr`, `jalr`, `bltzal`, `bgezal` (they write `ra`),
 `mfc0`, `mtc0` and `break`, and `lwv`, which the RSP does not implement (LWC2
 sub-opcode 0x0a does nothing; `swv` is real and in the table). Those fail the
 mnemonic lookup, and `mnemonic_unavailable_reason` says why.
@@ -382,8 +405,8 @@ Preserve these guarantees:
 - Every parameter is pinned. Pinned inputs may be written
   (`input_parameters_are_writable`); no write needs a `#clobber`.
 - `gp` and `ra` are never written or pinned and `sp` is not a register name.
-- Branches take template labels only; the table has no jump, call, CP0 or
-  `break` form. The instruction after a branch is its delay slot; nothing is
+- Branches take template labels only; the table has no jump, CP0 or `break`
+  form, and its one call, `jal`, takes another `@(rsp)` template. The instruction after a branch is its delay slot; nothing is
   inserted.
 - Def-before-use, delay-slot structure and VU effects stay in Odin64's
   generator check.

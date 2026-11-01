@@ -22,6 +22,22 @@ fill :: asm(output: ^[4]u32, value: u32) -> (end: u32) [output = %s2, value = %a
 	addiu end, output, 16
 }
 
+// A call to another template, here and through a package selector
+@(rsp)
+fill_twice :: asm() {
+	jal   (fill)
+	ori   %a0, %zero, 1
+	jal   (transform.transform)
+	nop
+}
+
+FILL_ADDRESS :: intrinsics.rsp_template_address(fill)
+
+@(export)
+fill_twice_code :: proc "contextless" () -> (code: []intrinsics.Rsp_Code_Line, address: u32, pins: []intrinsics.Rsp_Pin) {
+	return intrinsics.rsp_template_code(fill_twice), FILL_ADDRESS, intrinsics.rsp_template_pins(fill)
+}
+
 @(export)
 fill_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
 	return intrinsics.rsp_template_code(fill)

@@ -1686,6 +1686,25 @@ gb_internal void init_universal(void) {
 		t_rsp_code_line = add_global_type_name(intrinsics_pkg->scope, str_lit("Rsp_Code_Line"), rsp_code_line);
 	}
 
+	// intrinsics.Rsp_Pin :: struct {number: u8, vector: bool}, the element of intrinsics.rsp_template_pins
+	{
+		Scope *scope = create_scope(nullptr, nullptr);
+		Token number_token = blank_token; number_token.string = str_lit("number");
+		Token vector_token = blank_token; vector_token.string = str_lit("vector");
+		Entity *number = alloc_entity_field(scope, number_token, t_u8, false, 0, EntityState_Resolved);
+		Entity *vector = alloc_entity_field(scope, vector_token, t_bool, false, 1, EntityState_Resolved);
+		scope_insert(scope, number);
+		scope_insert(scope, vector);
+		auto fields = array_make<Entity *>(permanent_allocator(), 0, 2);
+		array_add(&fields, number);
+		array_add(&fields, vector);
+
+		Type *rsp_pin = alloc_type_struct_complete();
+		rsp_pin->Struct.scope  = scope;
+		rsp_pin->Struct.fields = slice_from_array(fields);
+		t_rsp_pin = add_global_type_name(intrinsics_pkg->scope, str_lit("Rsp_Pin"), rsp_pin);
+	}
+
 	// intrinsics types for C stuff
 	{
 		Scope *scope = create_scope(nullptr, nullptr);
