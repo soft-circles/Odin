@@ -824,6 +824,7 @@ char const *OdinAtomicMemoryOrder_strings[OdinAtomicMemoryOrder_COUNT] = {
 
 gb_global Type *t_atomic_memory_order = nullptr;
 gb_global Type *t_rsp_code_line       = nullptr; // intrinsics.Rsp_Code_Line
+gb_global Type *t_rsp_pin             = nullptr; // intrinsics.Rsp_Pin
 
 enum OdinFutexOperation : i32 {
 	OdinFutexOperation_Wait = 0,

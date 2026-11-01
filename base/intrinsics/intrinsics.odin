@@ -134,6 +134,15 @@ Rsp_Code_Line :: struct {
 rsp_template_code :: proc(t: $T) -> []Rsp_Code_Line ---
 // Where the @(rsp) asm template `t` is declared: its file, the line and column of its name, and its name as `procedure`
 rsp_template_location :: proc(t: $T) -> runtime.Source_Code_Location ---
+// The address a `jal (t)` in another @(rsp) template encodes for the template `t`, as a constant; the compiler assigns it
+rsp_template_address :: proc(t: $T) -> u32 ---
+// The register an @(rsp) asm template parameter is pinned to: a GPR's number, or a vector register's when `vector`
+Rsp_Pin :: struct {
+	number: u8,
+	vector: bool,
+}
+// The pins of the @(rsp) asm template `t`'s parameters, in parameter order, as a constant
+rsp_template_pins :: proc(t: $T) -> []Rsp_Pin ---
 
 atomic_thread_fence :: proc(order: Atomic_Memory_Order) ---
 atomic_signal_fence :: proc(order: Atomic_Memory_Order) ---

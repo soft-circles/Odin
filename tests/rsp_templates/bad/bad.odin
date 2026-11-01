@@ -34,13 +34,12 @@ ok :: asm(args: ^Args, input: ^u32, count: i32) [args = %s6, input = %s1, count 
 	addiu count, count, -1
 }
 
-// A body with no jumps, calls, CP0, DMA or break. rexcode encodes these, and lwv,
+// A body with no jumps, CP0, DMA or break, and no calls but jal's (see calls). rexcode encodes these, and lwv,
 // which the RSP does not implement, so each one says why a template cannot use it; an
 // instruction rexcode lacks too is unknown.
 @(rsp)
 profile :: asm() {
 	j     .end // ERROR: 'j' jumps out of the template, which an @(rsp) template cannot
-	jal   .end // ERROR: 'jal' jumps out of the template
 	jr    %t0 // ERROR: 'jr' jumps out of the template
 	jalr  %t1, %t0 // ERROR: 'jalr' jumps out of the template
 	bltzal %t0, .end // ERROR: 'bltzal' writes %ra, which holds the rspq return address
@@ -56,6 +55,24 @@ profile :: asm() {
 	beq   %t0, %t1, 4 // ERROR: 'beq' operands
 	bne   %t0, %t1, .end
 .end:
+}
+
+// jal calls another @(rsp) template by name, and only jal names one.
+CALL_TARGET :: 0x1000
+
+@(rsp)
+calls :: asm() {
+	jal   (ok)
+	nop
+	jal   .here // ERROR: 'jal' operands
+.here:
+	jal   (CALL_TARGET) // ERROR: 'jal' calls an @(rsp) template by name, as 'jal (pkg.routine)'; '(CALL_TARGET)' is not one
+	nop
+	jal   4096 // ERROR: 'jal' calls an @(rsp) template by name, as 'jal (pkg.routine)'; '4096' is not one
+	nop
+	ori   %t0, %zero, (ok) // ERROR: 'ori' operands
+	jal   (calls) // ERROR: 'calls' calls itself; an @(rsp) template cannot
+	nop
 }
 
 // gp and ra hold rspq state; sp is not available at all.

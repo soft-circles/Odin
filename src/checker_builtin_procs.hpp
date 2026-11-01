@@ -49,6 +49,8 @@ enum BuiltinProcId {
 
 	BuiltinProc_rsp_template_code,
 	BuiltinProc_rsp_template_location,
+	BuiltinProc_rsp_template_address,
+	BuiltinProc_rsp_template_pins,
 
 	BuiltinProc_constant_log2,
 
@@ -467,6 +469,8 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 
 	{STR_LIT("rsp_template_code"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("rsp_template_location"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("rsp_template_address"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("rsp_template_pins"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 
 	{STR_LIT("constant_log2"),     1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("constant_floor"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
