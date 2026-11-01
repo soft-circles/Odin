@@ -128,9 +128,9 @@ run_rsp_printer_tests :: proc() {
 
 	// Single-lane ops: `op vd, de, vt, element` (vs holds the destination lane).
 	check_print(rsp.inst_v_v_v(.VRCP, rsp.VR1, rsp.VR3, rsp.VR2, 13), "vrcp $v01, 3, $v02, 13", 0x4BA21870)
-	check_print(rsp.Instruction{mnemonic = .VMOV, operand_count = 2, length = 4,
-		ops = {rsp.op_vr(rsp.VR1), rsp.op_vr(rsp.VR2, 9), {}, {}}},
-		"vmov $v01, 0, $v02, 9", 0x4B220073)
+	check_print(rsp.inst_vmov(rsp.VR1, rsp.VR0, rsp.VR2, 9), "vmov $v01, 0, $v02, 9", 0x4B220073)
+	// vmov's destination lane is its vs field, like the other single-lane ops'
+	check_print(rsp.inst_vmov(rsp.VR19, rsp.VR5, rsp.VR21, 15), "vmov $v19, 5, $v21, 15", 0x4BF52CF3)
 	// vsar: rsp.inc only takes `vsar vd, element` (vs = vt = 0, element 8-10);
 	// anything else goes through its generic `vectorOp`.
 	check_print(rsp.inst_v_v_v(.VSAR, rsp.VR1, rsp.VR0, rsp.VR0, 8), "vsar $v01, 8", 0x4B00005D)
@@ -179,6 +179,7 @@ run_rsp_printer_tests :: proc() {
 			0x40048800,   // mfc0 a0, $17
 			0xC9010A01,   // lsv $v01, 4, 2, t0
 			0xC885593F,   // ltv $v05, 2, 1008, a0
+			0x4BF52CF3,   // vmov $v19, 5, $v21, 15
 		}
 		code := make([]u8, len(words) * 4, context.temp_allocator)
 		for w, i in words {
@@ -203,7 +204,8 @@ run_rsp_printer_tests :: proc() {
 			"    ctc2 zero, COP2_CTRL_VCE\n" +
 			"    mfc0 a0, $17\n" +
 			"    lsv $v01, 4, 2, t0\n" +
-			"    ltv $v05, 2, 1008, a0\n")
+			"    ltv $v05, 2, 1008, a0\n" +
+			"    vmov $v19, 5, $v21, 15\n")
 	}
 
 	fmt.println()

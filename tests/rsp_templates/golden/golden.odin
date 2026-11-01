@@ -561,12 +561,10 @@ vls :: proc(m: rsp.Mnemonic, t: int, base: rsp.Register, element: u8, units: i32
 	return inst
 }
 
-// unroll_operand_forms; vmov's destination lane 2 is not in rexcode's form (VMOV_DE)
-expected_unroll_operands :: proc() -> (code: [dynamic]rsp.Instruction, extra: []u32) {
-	extra = make([]u32, 23)
+// unroll_operand_forms
+expected_unroll_operands :: proc() -> (code: [dynamic]rsp.Instruction) {
 	for r in 1..=3 {
-		extra[len(code) + 2] = 2 << 11
-		append(&code, single(.VRCP, r, 3, 17, 5), rsp.inst_vsar_acc(vr(r), .HI), rsp.inst_vmov(vr(r), vr(4), 9))
+		append(&code, single(.VRCP, r, 3, 17, 5), rsp.inst_vsar_acc(vr(r), .HI), rsp.inst_vmov(vr(r), vr(2), vr(4), 9))
 	}
 	for g, i in ([]int{0, 8, 16, 24}) {
 		append(&code, vls(.LTV, g, rsp.S1, 0, i32(i)), vls(.STV, g, rsp.ZERO, 14, 63))
@@ -687,26 +685,13 @@ expected_vu :: proc() -> (code: [dynamic]rsp.Instruction) {
 		single(.VRSQL, 21, 7, 5, 1),
 		single(.VRSQH, 26, 5, 10, 2),
 		single(.VRSQH, 26, 0, 10, 2),
-		rsp.inst_vmov(vr(0), vr(31), 8),
-		rsp.inst_vmov(vr(30), vr(1), 15),
-		rsp.inst_vmov(vr(12), vr(12), 12),
-		rsp.inst_vmov(vr(1), vr(2), 8),
-		rsp.inst_vmov(vr(31), vr(15), 10),
+		rsp.inst_vmov(vr(0), vr(0), vr(31), 8),
+		rsp.inst_vmov(vr(30), vr(0), vr(1), 15),
+		rsp.inst_vmov(vr(12), vr(0), vr(12), 12),
+		rsp.inst_vmov(vr(1), vr(3), vr(2), 8),
+		rsp.inst_vmov(vr(31), vr(7), vr(15), 10),
 		rsp.inst_vnop(),
 	)
-	return
-}
-
-// rexcode's vmov form has no destination lane field (`de`, the vs field), which the
-// RSP honours (ares: vd.u16(de) = vt(e).u16(de)), so the vmov words with a lane other
-// than 0 are rexcode's with `de << 11` added: expected_vu's index and lane.
-VMOV_DE :: [?][2]int{{49, 3}, {50, 7}}
-
-vu_extra :: proc() -> (extra: []u32) {
-	extra = make([]u32, len(VU))
-	for d in VMOV_DE {
-		extra[d[0]] = u32(d[1]) << 11
-	}
 	return
 }
 
@@ -886,11 +871,11 @@ main :: proc() {
 	cop2 := expected_cop2()
 	compare("cop2_forms", COP2, cop2[:], nil)
 	vu_code := expected_vu()
-	compare("vu_forms", VU, vu_code[:], nil, vu_extra())
+	compare("vu_forms", VU, vu_code[:], nil)
 	vls_code := expected_vls()
 	compare("vls_forms", VLS, vls_code[:], nil)
-	unroll_operands, unroll_operands_extra := expected_unroll_operands()
-	compare("unroll_operand_forms", UNROLL_OPERANDS, unroll_operands[:], nil, unroll_operands_extra)
+	unroll_operands := expected_unroll_operands()
+	compare("unroll_operand_forms", UNROLL_OPERANDS, unroll_operands[:], nil)
 	// rexcode's jal takes a label; the target bits come from the assigned addresses
 	call := [?]rsp.Instruction{rsp.inst_jal(0), rsp.inst_nop(), rsp.inst_jal(0), rsp.inst_nop()}
 	compare("call_forms", CALL, call[:], {0}, {FILL_ADDRESS >> 2, 0, SCALAR_ADDRESS >> 2, 0})

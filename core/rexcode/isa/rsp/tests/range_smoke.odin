@@ -161,8 +161,8 @@ run_rsp_range_tests :: proc() {
 	accepts("vadd element 15",          rsp.inst_vadd(rsp.VR1, rsp.VR2, rsp.VR3, 15), 0x4BE31050)
 	rejects("vadd element 16",          rsp.inst_vadd(rsp.VR1, rsp.VR2, rsp.VR3, 16))
 	rejects("vadd element 17",          rsp.inst_vadd(rsp.VR1, rsp.VR2, rsp.VR3, 17))
-	accepts("vmov element 15",          rsp.inst_vmov(rsp.VR1, rsp.VR3, 15), 0x4BE30073)
-	rejects("vmov element 16",          rsp.inst_vmov(rsp.VR1, rsp.VR3, 16))
+	accepts("vmov element 15",          rsp.inst_vmov(rsp.VR1, rsp.VR0, rsp.VR3, 15), 0x4BE30073)
+	rejects("vmov element 16",          rsp.inst_vmov(rsp.VR1, rsp.VR0, rsp.VR3, 16))
 
 	// Plain vector register slots (VD, VS, L/S VT) have no element field, so a
 	// non-zero element finds no matching encoding instead of being dropped.
