@@ -4,10 +4,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests/n64_validation"))
+from o64_fork import require_o64_fork
+
 ODIN = Path(os.environ.get("ODIN", ROOT / "odin")).resolve()
 FIXTURE = Path(__file__).parent / "fixture"
 
@@ -22,6 +26,7 @@ def function_body(asm, name):
 class PointerSignExtension(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        require_o64_fork(ODIN)
         with tempfile.TemporaryDirectory(prefix="odin-n64-ptr-sext-") as directory:
             out = Path(directory) / "fixture.S"
             subprocess.run([str(ODIN), "build", str(FIXTURE), "-target:n64", "-o:speed",
