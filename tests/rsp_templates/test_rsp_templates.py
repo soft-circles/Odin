@@ -258,7 +258,7 @@ class Encode(unittest.TestCase):
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
-                     "vls_forms", "call_forms", "transform"):
+                     "vls_forms", "call_forms", "transform", "shade"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 
@@ -301,6 +301,22 @@ class Encode(unittest.TestCase):
                 declared = [n for n, text in enumerate(path.read_text().splitlines(), 1)
                             if text.startswith(f"{name} :: asm")]
                 self.assertEqual(locations.get(name), (declared[0], 1, path.resolve()))
+
+    def test_pins_need_no_earlier_check(self):
+        # The pins come from the template's specification block, which its body check
+        # reads, so a constant that takes them first checks the body itself.
+        require_backend(self, host_target())
+        directory = unique_dir("pins")
+        (directory / "pins.odin").write_text(
+            "package pins\n\nimport \"base:intrinsics\"\nimport \"core:fmt\"\n\n"
+            "PINS :: intrinsics.rsp_template_pins(shade)\n\n"
+            "main :: proc() {\n\tfmt.println(PINS)\n}\n\n"
+            "@(rsp)\nshade :: asm(colour: #simd[8]i16, p: ^u32) [colour = %v05, p = %s1] {\n"
+            "\tsqv   colour, [p]\n}\n")
+        code, output = run_odin("run", directory, f"-out:{unique_dir('pins-out') / 'pins'}")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(output.strip().splitlines()[-1],
+                         "[Rsp_Pin{number = 5, vector = true}, Rsp_Pin{number = 17, vector = false}]")
 
     def test_constant_is_in_the_target_byte_order(self):
         # transform's first word is `lh $t0, 0($s6)`, 0x86c80000, from line 17

@@ -33,6 +33,19 @@ fill_twice :: asm() {
 
 FILL_ADDRESS :: intrinsics.rsp_template_address(fill)
 
+// Vector parameters: named bare as a whole register, or spelled as a register to take
+// a lane or a VU element (`%colour.e2`), like any other pinned name.
+@(rsp)
+shade :: asm(colour: #simd[8]i16, scale: #simd[8]i16, output: ^[8]i16) -> (lane: u32) [colour = %v05, scale = %v06, output = %s4, lane = %t1] {
+	vmudn colour, colour, %scale.e3
+	vaddc %colour, colour, scale
+	sqv   colour, [%output]
+	ssv   %colour.e2, [output + 16]
+	mfc2  lane, %colour.e1
+	mtc2  %lane, %scale.e4
+	lqv   scale, [output + 16]
+}
+
 @(export)
 fill_twice_code :: proc "contextless" () -> (code: []intrinsics.Rsp_Code_Line, address: u32, pins: []intrinsics.Rsp_Pin) {
 	return intrinsics.rsp_template_code(fill_twice), FILL_ADDRESS, intrinsics.rsp_template_pins(fill)

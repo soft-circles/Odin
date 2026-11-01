@@ -1002,14 +1002,18 @@ struct Asm_rsp {
 
 	// gp and ra hold rspq state; a body reads them only through the prologue. A
 	// pin is an entry contract, so pinning a parameter to either is rejected too.
+	// A COP2 control register or accumulator slice is named only, never a parameter.
 	char const *pin_reject_reason(Register r) const {
 		switch (r) {
 		case REG_ZERO: return "it is always zero";
 		case REG_GP:   return "it holds the rspq command pointer";
 		case REG_RA:   return "it holds the rspq return address";
 		}
-		if (r != REG_INVALID && reg_class(register_codes[r]) != REG_CLASS_GPR) {
-			return "@(rsp) parameters are GPRs";
+		if (r != REG_INVALID) {
+			switch (reg_class(register_codes[r])) {
+			case REG_CLASS_VC:  return "@(rsp) parameters are GPRs or vector registers, and it is a COP2 control register";
+			case REG_CLASS_ACC: return "@(rsp) parameters are GPRs or vector registers, and it is an accumulator slice";
+			}
 		}
 		return nullptr;
 	}
