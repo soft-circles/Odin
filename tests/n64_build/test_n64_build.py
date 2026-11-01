@@ -477,6 +477,57 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertNotIn("[SYSTEM CALL] n64-rsp-ld", result.stdout)
 		arch_mach_abi = lambda name: int.from_bytes((foreign / name).read_bytes()[36:40], "big") & 0xF0FFF000
 		self.assertEqual(arch_mach_abi("2-rsp_vector.o"), arch_mach_abi("1-vr4300.o"))
+		wrap = re.search(r"\[SYSTEM CALL\] n64-rsp-wrap\n.*\n", result.stdout)
+		self.assertIsNotNone(wrap, result.stdout)
+		self.assertNotIn("FROM_CFLAGS", wrap.group(0))
+		self.assert_wraps_rsp_sections(foreign, "2-rsp_vector", "rsp_vector")
+
+	def test_rsp_source_names_outside_c_identifiers_are_wrapped(self):
+		app = self.root / "rsp names"
+		app.mkdir()
+		shutil.copy2(ODIN_ROOT / "tests/rsp_asm/vector-reference.S", app / "rsp-café.S")
+		(app / "helper.c").write_text(
+			"void *keep_lib_linked(void) { return keep_lib_linked; }\n",
+			encoding="utf-8",
+		)
+		(app / "main.odin").write_text(
+			"package rsp_names\n\n"
+			"foreign import lib {\"helper.c\", \"rsp-café.S\"}\n\n"
+			"@(default_calling_convention=\"c\")\n"
+			"foreign lib { keep_lib_linked :: proc() -> rawptr --- }\n\n"
+			"main :: proc() {\n"
+			"\tif keep_lib_linked() == nil {\n"
+			"\t\tunreachable()\n"
+			"\t}\n"
+			"}\n",
+			encoding="utf-8",
+		)
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{app / 'names.z64'}", "-keep-temp-files")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assert_wraps_rsp_sections(app / "names.n64-build" / "foreign", "1-rsp-café", "rsp-café")
+
+	def assert_wraps_rsp_sections(self, foreign: Path, job: str, stem: str):
+		run = lambda tool, *arguments: subprocess.run(
+			[str(self.sdk / "bin" / tool), *arguments],
+			stdout=subprocess.PIPE,
+			stderr=subprocess.STDOUT,
+			check=True,
+		).stdout
+		values = {}
+		for line in run("mips64-elf-nm", str(foreign / f"{job}.o")).decode().splitlines():
+			value, kind, name = line.split(" ", 2)
+			values[name] = (int(value, 16), kind)
+		run("mips64-elf-objcopy", "-O", "binary", "-j", ".data", str(foreign / f"{job}.o"), str(foreign / f"{job}.wrapped.bin"))
+		wrapped = (foreign / f"{job}.wrapped.bin").read_bytes()
+		for section in ("text", "data", "meta"):
+			expected = (foreign / f"{job}.{section}.bin").read_bytes()
+			start, start_kind = values[f"{stem}_{section}_start"]
+			end, end_kind = values[f"{stem}_{section}_end"]
+			self.assertEqual((start % 16, start_kind, end_kind), (0, "D", "D"))
+			self.assertEqual(wrapped[start:end], expected)
+			self.assertEqual(values[f"{stem}_{section}_size"], (len(expected), "A"))
 
 	def test_inherited_gcc_environment_does_not_reach_foreign_source_compiles(self):
 		app = create_foreign_source_app(self.root, "gcc environment")
