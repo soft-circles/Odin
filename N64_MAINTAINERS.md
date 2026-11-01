@@ -318,7 +318,9 @@ Odin64's generator matches each jal to the routine it emits and links it by
 label. `intrinsics.rsp_template_pins(t)` is a constant
 `[]intrinsics.Rsp_Pin{number: u8, vector: bool}`, one per parameter in
 parameter order (results and scratch registers are not parameters), so the
-generator knows the registers a routine reads without its source.
+generator knows the registers a routine reads without its source. Like
+`rsp_template_code`, it checks the template's body first if the queue has not
+(`rsp_template_checked`), since the pins come from that check.
 `rsp_check_routine_calls` reports a jal whose operand names no `@(rsp)`
 template (at the mnemonic, since a parenthesised constant has a warning at the
 operand) and a template that calls itself. Any other instruction's operand
@@ -402,8 +404,13 @@ Preserve these guarantees:
   rejected (and given 32 bits in `check_asm_operand_bit_width`, so no host adds
   a width error), and so is measuring a type whose layout is the target's,
   including through a constant the template names.
-- Every parameter is pinned. Pinned inputs may be written
-  (`input_parameters_are_writable`); no write needs a `#clobber`.
+- Every parameter is pinned, to a GPR or a vector register (`#simd[8]i16`);
+  a COP2 control register or accumulator slice is never a pin. Pinned inputs may
+  be written (`input_parameters_are_writable`); no write needs a `#clobber`.
+- A pinned name spelled as a register, `%colour` or `%colour.e3`, is its pinned
+  register (`rsp_expand_pinned_registers`, after the `#unroll for` expansion):
+  that is how a vector parameter takes a lane or VU element, which a bare name
+  can't carry. A bare name in a slot that needs a lane is reported.
 - `gp` and `ra` are never written or pinned and `sp` is not a register name.
 - Branches take template labels only; the table has no jump, CP0 or `break`
   form, and its one call, `jal`, takes another `@(rsp)` template. The instruction after a branch is its delay slot; nothing is

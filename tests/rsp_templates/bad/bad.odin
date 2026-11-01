@@ -201,6 +201,24 @@ pinned_control :: asm(p: ^u32) [p = %vcc] { // ERROR: 'asm' parameter 'p' cannot
 	lw    %t0, [p]
 }
 
+@(rsp)
+pinned_accumulator :: asm(v: #simd[8]i16) [v = %acc_hi] { // ERROR: 'asm' parameter 'v' cannot be pinned to %acc_hi
+	vaddc %v01, v, v
+}
+
+// A vector parameter takes the accessors its pinned register takes, in the slots a
+// vector register fills; a GPR parameter spelled as a register is still a GPR.
+@(rsp)
+vector_parameters :: asm(colour: #simd[8]i16, p: ^u32, wide: u32) [colour = %v05, p = %s1, wide = %v06] { // ERROR: Parameter 'wide' is pinned to %v06, but its type is in the wrong register class
+	vmudn %v01, %v02, %colour.b1 // ERROR: '.b1' on %v05 is not a VU element accessor
+	vmov  colour, %v02.e0 // ERROR: 'vmov' operand-0 'colour' needs a destination lane, .e0-.e7: a single-lane instruction writes one lane; write the lane on the name, %colour.e0
+	vmov  %colour.e3, %v02.e0
+	addu  %t0, colour, %t1 // ERROR: 'addu' operand-1
+	lqv   %p, [%s2] // ERROR: 'lqv' operand-0 cannot be %s1, it must be a vector register
+	lqv   colour, [%colour] // ERROR: A memory operand's base cannot be %v05: it is a vector register
+	sqv   colour, [%p]
+}
+
 // Vector registers have two digits; %v0 and %v1 are GPRs.
 @(rsp)
 vector_names :: asm() {

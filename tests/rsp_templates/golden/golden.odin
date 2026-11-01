@@ -390,6 +390,8 @@ CALL :: intrinsics.rsp_template_code(call_forms)
 FILL_ADDRESS :: intrinsics.rsp_template_address(valid.fill)
 SCALAR_ADDRESS :: intrinsics.rsp_template_address(scalar_forms)
 FILL_PINS :: intrinsics.rsp_template_pins(valid.fill)
+SHADE_PINS :: intrinsics.rsp_template_pins(valid.shade)
+SHADE     :: intrinsics.rsp_template_code(valid.shade)
 EDGE      :: intrinsics.rsp_template_code(edge_forms)
 FILL      :: intrinsics.rsp_template_code(valid.fill)
 TRANSFORM :: intrinsics.rsp_template_code(transform.transform)
@@ -505,6 +507,19 @@ expected_fill :: proc() -> (code: [dynamic]rsp.Instruction) {
 		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 8)),
 		rsp.inst_sw(rsp.T2, rsp.mem(rsp.S2, 12)),
 		rsp.inst_addiu(rsp.S3, rsp.S2, 16),
+	)
+	return
+}
+
+expected_shade :: proc() -> (code: [dynamic]rsp.Instruction) {
+	append(&code,
+		rsp.inst_vmudn(vr(5), vr(5), vr(6), 11),
+		rsp.inst_vaddc(vr(5), vr(5), vr(6), 0),
+		rsp.inst_sqv(vr(5), rsp.vmem(rsp.S4, 0, 0)),
+		vls(.SSV, 5, rsp.S4, 4, 8),
+		rsp.inst_mfc2(rsp.T1, vr(5), 2),
+		rsp.inst_mtc2(rsp.T1, vr(6), 8),
+		rsp.inst_lqv(vr(6), rsp.vmem(rsp.S4, 0, 1)),
 	)
 	return
 }
@@ -864,6 +879,8 @@ main :: proc() {
 	compare("unroll_forms", UNROLL, unroll[:], unroll_labels[:])
 	fill := expected_fill()
 	compare("fill", FILL, fill[:], nil)
+	shade := expected_shade()
+	compare("shade", SHADE, shade[:], nil)
 	vector := expected_vector()
 	compare("vector_forms", VECTOR, vector[:], nil)
 	rest, rest_labels := expected_rest()
@@ -887,6 +904,12 @@ main :: proc() {
 	fill_pins := FILL_PINS
 	if len(fill_pins) != 2 || fill_pins[0] != {18, false} || fill_pins[1] != {4, false} {
 		fmt.printfln("fill's pins are %v, want s2 then a0", fill_pins)
+		failures += 1
+	}
+	// shade's parameters: two vector registers, then a GPR
+	shade_pins := SHADE_PINS
+	if len(shade_pins) != 3 || shade_pins[0] != {5, true} || shade_pins[1] != {6, true} || shade_pins[2] != {20, false} {
+		fmt.printfln("shade's pins are %v, want v05, v06 then s4", shade_pins)
 		failures += 1
 	}
 

@@ -2384,6 +2384,15 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 				}
 				continue;
 			}
+			if (e != nullptr && e->kind == Ast_Ident && e->tav.mode != Addressing_Constant) {
+				// a bare name has no flag; it takes one spelled as a register (%name.flag)
+				auto slot = operand_slot_type(forms[valid_form_index], cast(int)oi);
+				if (char const *why = asm_hook_register_missing_flag_reason(asm_ctx, slot, 0)) {
+					error(e, "'%.*s' operand-%td '%.*s' %s; write the lane on the name, %%%.*s.e0",
+					      LIT(name), oi, LIT(e->Ident.token.string), why, LIT(e->Ident.token.string));
+				}
+				continue;
+			}
 			if (e == nullptr || e->kind != Ast_AsmRegister || e->AsmRegister.flag.kind != Token_Ident ||
 			    e->AsmRegister.name.string == "flags" ||
 			    !asm_hook_register_accepts_flag(asm_ctx, asm_ctx->register_lookup(e->AsmRegister.name.string), e->AsmRegister.flag.string, 0)) {

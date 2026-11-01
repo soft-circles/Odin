@@ -1080,6 +1080,51 @@ gb_internal void rsp_expand_unrolls(CheckerContext *ctx, Entity *e) {
 	at->instructions = slice_from_array(out);
 }
 
+// A name the specification block pins, spelled as a register (`%colour`, or with an
+// accessor, `%colour.e3`), is its pinned register: a bare name has no accessor, so this is
+// how a vector parameter takes a lane. Each such operand is renamed before the body's
+// check, which then sees the register; a register's own name is never a pinned name.
+gb_internal void rsp_rename_pinned_registers(Ast *node, Array<RspUnrollBinding> const &pins) {
+	if (node == nullptr) {
+		return;
+	}
+	if (node->kind == Ast_AsmRegister) {
+		if (g_asm_rsp.register_lookup(node->AsmRegister.name.string) == Asm_rsp::REG_INVALID) {
+			if (RspUnrollBinding const *found = rsp_unroll_find(pins, node->AsmRegister.name.string)) {
+				node->AsmRegister.name.string = found->reg;
+			}
+		}
+		return;
+	}
+	rsp_unroll_each_child(node, [&](Ast **child, bool) {
+		rsp_rename_pinned_registers(*child, pins);
+	});
+}
+
+gb_internal void rsp_expand_pinned_registers(Entity *e) {
+	ast_node(at, AsmTemplate, e->AsmTemplate.node);
+	Array<RspUnrollBinding> pins = {};
+	array_init(&pins, heap_allocator());
+	defer (array_free(&pins));
+	for (Ast *spec : at->specs) {
+		if (spec->kind != Ast_AsmSpec || spec->AsmSpec.name == nullptr || spec->AsmSpec.name->kind != Ast_Ident) {
+			continue;
+		}
+		Ast *value = spec->AsmSpec.value;
+		if (value == nullptr || value->kind != Ast_AsmRegister || value->AsmRegister.flag.kind == Token_Ident ||
+		    g_asm_rsp.register_lookup(value->AsmRegister.name.string) == Asm_rsp::REG_INVALID) {
+			continue; // not a register pin; the check reports what is wrong with it
+		}
+		array_add(&pins, RspUnrollBinding{spec->AsmSpec.name->Ident.token.string, value->AsmRegister.name.string});
+	}
+	if (pins.count == 0) {
+		return;
+	}
+	for (Ast *instruction : at->instructions) {
+		rsp_rename_pinned_registers(instruction, pins);
+	}
+}
+
 // The check of an @(rsp) template's body, from its queued check or from a builtin
 // that needs its words (check_asm_template_body_from_entity). It runs once.
 gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInfo *d) {
@@ -1102,6 +1147,7 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 	{
 		AsmCheckTargetScope target(asm_hook_table_arch(&g_asm_rsp, 0), asm_hook_table_pointer_bits(&g_asm_rsp, 0));
 		rsp_expand_unrolls(ctx, e);
+		rsp_expand_pinned_registers(e);
 		check_asm_template_body(&g_asm_rsp, ctx, e, d);
 		rsp_check_routine_calls(e);
 		rsp_check_parameter_types(e);
@@ -1155,6 +1201,26 @@ gb_internal Entity *rsp_template_argument(CheckerContext *c, Ast *call, String c
 	return e;
 }
 
+// The state of `e` once its body is checked, which this checks now if the queue has
+// not: its pins and words come from that check. nullptr, reported, when `call` is in
+// that check. Call with rsp_template_body_mutex held.
+gb_internal RspTemplateState *rsp_template_checked(CheckerContext *c, Entity *e, Ast *call) {
+	RspTemplateState *st = rsp_template_state(e);
+	if (st->in_progress) {
+		gbString s = expr_to_string(call);
+		error(call, "'%s' refers to the template being checked; an @(rsp) template's words cannot depend on its own", s);
+		gb_string_free(s);
+		return nullptr;
+	}
+	if ((e->flags & EntityFlag_ProcBodyChecked) == 0) {
+		UntypedExprInfoMap untyped = {};
+		map_init(&untyped);
+		check_queued_asm_template_body(c->checker, e, &untyped);
+		map_destroy(&untyped);
+	}
+	return st;
+}
+
 gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
 	GB_ASSERT(t_rsp_code_line != nullptr);
 	GB_ASSERT(type_size_of(t_rsp_code_line) == gb_size_of(RspCodeLine));
@@ -1171,20 +1237,8 @@ gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, As
 	}
 
 	MUTEX_GUARD(&rsp_template_body_mutex);
-	RspTemplateState *st = rsp_template_state(e);
-	if (st->in_progress) {
-		gbString s = expr_to_string(call);
-		error(call, "'%s' refers to the template being checked; an @(rsp) template's words cannot depend on its own", s);
-		gb_string_free(s);
-		return true;
-	}
-	if ((e->flags & EntityFlag_ProcBodyChecked) == 0) {
-		UntypedExprInfoMap untyped = {};
-		map_init(&untyped);
-		check_queued_asm_template_body(c->checker, e, &untyped);
-		map_destroy(&untyped);
-	}
-	if (!st->encoded) {
+	RspTemplateState *st = rsp_template_checked(c, e, call);
+	if (st == nullptr || !st->encoded) {
 		return true; // its check reported why
 	}
 
@@ -1354,6 +1408,10 @@ gb_internal bool check_rsp_template_pins(CheckerContext *c, Operand *operand, As
 
 	Entity *e = rsp_template_argument(c, call, builtin_name);
 	if (e == nullptr) {
+		return true;
+	}
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	if (rsp_template_checked(c, e, call) == nullptr) {
 		return true;
 	}
 	auto const &decls = e->AsmTemplate.decls;
