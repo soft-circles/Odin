@@ -15,4 +15,7 @@ libdragon relies on that for every pointer argument. The fixture builds at
   zero-extended 64-bit constant.
 
 The fix is in the MIPS backend of the soft-circles/llvm-project fork, so this
-test fails with an LLVM older than that fix.
+test fails with a fork build older than that fix.
+
+With stock LLVM, as in CI's quick mode, these checks skip; see
+[tests/n64_validation/o64_fork.py](../n64_validation/o64_fork.py).

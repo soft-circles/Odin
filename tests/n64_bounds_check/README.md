@@ -23,3 +23,6 @@ At `-o:speed` LLVM removes provably redundant checks itself, so that build only
 checks that the procedures in the first group still reach a check handler.
 
 `ODIN` selects the compiler under test.
+
+With stock LLVM, as in CI's quick mode, the `-o:speed` check skips; see
+[tests/n64_validation/o64_fork.py](../n64_validation/o64_fork.py).

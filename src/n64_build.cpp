@@ -326,12 +326,16 @@ gb_internal i32 n64_spawn_and_wait(char const *const *arguments, char **environm
 		posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
 	}
 	if (working_dir != nullptr) {
-		// macOS 26 deprecates the _np name in favour of POSIX 2024's
-		// posix_spawn_file_actions_addchdir, which older hosts and libcs lack.
+		// NetBSD has only POSIX 2024's posix_spawn_file_actions_addchdir. macOS 26
+		// deprecates the _np name in favour of it, but older hosts and libcs lack it.
+	#if defined(GB_SYSTEM_NETBSD)
+		posix_spawn_file_actions_addchdir(&actions, working_dir);
+	#else
 	#pragma GCC diagnostic push
 	#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 		posix_spawn_file_actions_addchdir_np(&actions, working_dir);
 	#pragma GCC diagnostic pop
+	#endif
 	}
 	pid_t pid = 0;
 	int status = posix_spawn(&pid, arguments[0], &actions, nullptr, cast(char *const *)arguments, environment);

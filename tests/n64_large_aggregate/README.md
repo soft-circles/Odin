@@ -34,3 +34,6 @@ computed before reserving the 64 KB outgoing area
 ([soft-circles/Odin64#1071](https://github.com/soft-circles/Odin64/issues/1071)).
 Those two cases are expected failures and turn into unexpected successes once
 LLVM is fixed.
+
+With stock LLVM, as in CI's quick mode, these checks skip; see
+[tests/n64_validation/o64_fork.py](../n64_validation/o64_fork.py).

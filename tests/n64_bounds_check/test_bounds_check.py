@@ -4,10 +4,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests/n64_validation"))
+from o64_fork import require_o64_fork
+
 ODIN = Path(os.environ.get("ODIN", ROOT / "odin")).resolve()
 FIXTURE = Path(__file__).parent / "fixture"
 # Any reference counts, not only `jal`: LLVM may tail-call the handler with `j` or call it through a register. At
@@ -66,6 +70,7 @@ class BoundsCheckElision(unittest.TestCase):
                 self.assertEqual(check_references(self.unoptimized, name), 0)
 
     def test_optimization_keeps_the_unprovable_checks(self):
+        require_o64_fork(ODIN)
         for name in CHECKED:
             with self.subTest(function=name):
                 self.assertGreater(check_references(self.optimized, name), 0)
