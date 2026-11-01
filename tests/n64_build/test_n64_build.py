@@ -473,6 +473,10 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		).stdout
 		for symbol in ("helper_value", "asm_value", "first_probe", "second_probe", "rsp_vector_text_start", "rsp_vector_meta_end"):
 			self.assertRegex(symbols, rf" {symbol}\n")
+		self.assertNotIn("-I binary", result.stdout)
+		self.assertNotIn("[SYSTEM CALL] n64-rsp-ld", result.stdout)
+		arch_mach_abi = lambda name: int.from_bytes((foreign / name).read_bytes()[36:40], "big") & 0xF0FFF000
+		self.assertEqual(arch_mach_abi("2-rsp_vector.o"), arch_mach_abi("1-vr4300.o"))
 
 	def test_inherited_gcc_environment_does_not_reach_foreign_source_compiles(self):
 		app = create_foreign_source_app(self.root, "gcc environment")
