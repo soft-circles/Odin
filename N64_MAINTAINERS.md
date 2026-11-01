@@ -448,6 +448,14 @@ every RSP form against `core:rexcode/isa/rsp`. The "asm
 template ROM probe" stage type-checks [tests/n64_asm/rom](tests/n64_asm/rom).
 No project-local binding is required.
 
+The pointer sign-extension, large aggregate argument and optimized
+bounds-check stages read machine code that only the O64 fork generates: stock
+LLVM lowers `-target:n64` with 64-bit pointers, so its assembly says nothing
+about the N64 build. Their tests call `require_o64_fork` from
+[tests/n64_validation/o64_fork.py](tests/n64_validation/o64_fork.py), which
+skips them with stock LLVM, as in CI, and fails under the same conditions as
+the asm object tests.
+
 ### Full: compiler SDK and runtime checks
 
 ```sh
