@@ -563,7 +563,8 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 	n64_arg(&argv, concatenate3_strings(a, STR_LIT("-Map="), base, STR_LIT(".map"))); n64_arg(&argv, "--cref");
 	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, base, STR_LIT(".elf")));
 	n64_arg(&argv, microcode_object);
-	if ((result = n64_run_tool("rsp-ld", argv, env, show, false, foreign_dir_c)) != 0) return result;
+	result = n64_run_tool("rsp-ld", argv, env, show, false, foreign_dir_c);
+	if (result != 0) return result;
 
 	// The section binaries are written in the foreign directory, where the wrapper finds them by bare file name.
 	char const *sections[] = {"text", "data", "meta"};
