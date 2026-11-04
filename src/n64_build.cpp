@@ -83,6 +83,9 @@ gb_internal String n64_llvm_tool(char const *name) {
 	return n64_path_join(permanent_allocator(), n64_llvm_bindir(), make_string_c(name));
 }
 
+// The names n64sym runs under $N64_INST/bin, and the LLVM tools linked there under them.
+gb_global char const *n64_sym_tools[][2] = {{"mips64-elf-objdump", "llvm-objdump"}, {"mips64-elf-addr2line", "llvm-addr2line"}};
+
 gb_internal String n64_sanitized_rom_title(String const &source) {
 	gbString title = gb_string_make_reserve(permanent_allocator(), 21);
 	for (isize index = 0; index < source.len && gb_string_length(title) < 20; index += 1) {
@@ -318,12 +321,16 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 				continue;
 			}
 			bool rsp = n64_foreign_input_is_rsp_source(input);
-			char const *tools[] = {"clang", "ld.lld", "llvm-objcopy"};
-			for (isize index = 0; index < (rsp ? gb_count_of(tools) : 1); index += 1) {
-				if (!n64_sdk_tool_is_executable(n64_llvm_tool(tools[index]))) {
+			char const *source_tools[] = {"clang"};
+			char const *rsp_tools[] = {"clang", "ld.lld", "llvm-objcopy"};
+			char const **tools = rsp ? rsp_tools : source_tools;
+			isize tool_count = rsp ? gb_count_of(rsp_tools) : gb_count_of(source_tools);
+			for (isize index = 0; index < tool_count; index += 1) {
+				char const *tool = tools[index];
+				if (!n64_sdk_tool_is_executable(n64_llvm_tool(tool))) {
 					gb_printf_err("N64 %s %.*s requires the LLVM fork's executable %s in '%.*s'; "
 					              "set ODIN_N64_LLVM_BIN to the directory that holds it\n",
-					              rsp ? "RSP microcode" : "foreign import source", LIT(input), tools[index], LIT(n64_llvm_bindir()));
+					              rsp ? "RSP microcode" : "foreign import source", LIT(input), tool, LIT(n64_llvm_bindir()));
 					return false;
 				}
 			}
@@ -826,14 +833,13 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	// unquoted, so it runs inside the intermediates directory with N64_INST naming a relative directory whose bin holds
 	// llvm-objdump and llvm-addr2line under those names.
 	String sym_bin = n64_path_join(a, files.sym_sdk, STR_LIT("bin"));
-	char const *sym_tools[][2] = {{"mips64-elf-objdump", "llvm-objdump"}, {"mips64-elf-addr2line", "llvm-addr2line"}};
 	for (String const &directory : {files.sym_sdk, sym_bin}) {
 		if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
 			gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
 			return 1;
 		}
 	}
-	for (auto const &tool : sym_tools) {
+	for (auto const &tool : n64_sym_tools) {
 		String link = n64_path_join(a, sym_bin, make_string_c(tool[0]));
 		n64_remove_file_if_present(link);
 		if (!n64_create_symlink(n64_llvm_tool(tool[1]), link)) {
@@ -964,14 +970,13 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 		return {0, files.dir};
 	}
 	String sym_bin = n64_path_join(temporary_allocator(), files.sym_sdk, STR_LIT("bin"));
-	String generated[] = {
-		files.elf, files.map, files.sym, files.stripped, files.dfs,
-		n64_path_join(temporary_allocator(), sym_bin, STR_LIT("mips64-elf-objdump")),
-		n64_path_join(temporary_allocator(), sym_bin, STR_LIT("mips64-elf-addr2line")),
-	};
+	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs};
 	bool clean = true;
 	for (String const &path : generated) {
 		clean = n64_remove_file_if_present(path) && clean;
+	}
+	for (auto const &tool : n64_sym_tools) {
+		clean = n64_remove_file_if_present(n64_path_join(temporary_allocator(), sym_bin, make_string_c(tool[0]))) && clean;
 	}
 	for (String const &directory : {sym_bin, files.sym_sdk}) {
 		clean = (n64_remove_directory(directory) || errno == ENOENT) && clean;

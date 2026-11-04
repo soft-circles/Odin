@@ -355,6 +355,19 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertIn("missing required file", result.stdout)
 		self.assertIn("mips64-elf/lib/n64.ld", result.stdout)
 
+	def test_missing_gcc_runtime_is_named(self):
+		source = configured_sdk()
+		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
+			self.skipTest("a complete N64 SDK is required for the SDK fixture")
+		sdk = make_sdk_facade(self.root, source)
+		(sdk / GCC_RUNTIME).unlink()
+		(sdk / GCC_RUNTIME).mkdir()
+
+		result = run_build(self.app, f"-n64-inst:{sdk}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("is missing the GCC runtime", result.stdout)
+
 	def test_non_executable_sdk_tool_is_named(self):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
@@ -760,6 +773,14 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(intermediates.name, "runtime result.n64-build")
 		self.assertEqual({path.name for path in intermediates.iterdir()},
 		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "n64sym"})
+		llvm = llvm_bindir()
+		if llvm is not None:
+			nm = subprocess.run([str(llvm / "llvm-nm"), "--defined-only", str(intermediates / "odin-n64.elf")],
+			                    text=True, stdout=subprocess.PIPE, check=True).stdout
+			functions = sum(1 for line in nm.splitlines() if line.split()[1:2] in (["t"], ["T"]))
+			symbols = int.from_bytes((intermediates / "odin-n64.elf.sym").read_bytes()[8:12], "big")
+			# n64sym records every call site it finds in llvm-objdump's disassembly, so it holds far more entries than functions.
+			self.assertGreater(symbols, 2 * functions)
 
 		headless_runner = os.environ.get("ARES_TEST")
 		if headless_runner:
