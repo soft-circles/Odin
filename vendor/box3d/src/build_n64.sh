@@ -22,8 +22,7 @@
 # B3_LINEAR_SLOP becomes.
 # BOX3D_CONTINUOUS=0, BOX3D_SENSORS=0 and BOX3D_NAMES=0 compile out continuous collision, sensors and names.
 # Code generation: -O2 with functions aligned to BOX3D_ALIGN_FUNCTIONS (8) bytes, and BOX3D_CFLAGS appended to every
-# compile. BOX3D_LTO=1 builds fat LTO objects and indexes the archive with gcc-ar; a ROM link that passes -flto
-# optimizes them with the game's code, and one that does not links their regular code.
+# compile. The objects carry no GCC LTO sections, because ld.lld, which links the ROM, cannot read them.
 set -e
 
 : "${N64_INST:?Set N64_INST to the libdragon SDK}"
@@ -77,10 +76,6 @@ align_functions=${BOX3D_ALIGN_FUNCTIONS:-8}
 extra_cflags=${BOX3D_CFLAGS:-}
 cc="$N64_INST/bin/mips64-elf-gcc"
 ar="$N64_INST/bin/mips64-elf-ar"
-if [ "${BOX3D_LTO:-0}" = 1 ]; then
-	extra_cflags="$extra_cflags -flto -ffat-lto-objects"
-	ar="$N64_INST/bin/mips64-elf-gcc-ar"
-fi
 
 cd "$ODIN_ROOT/vendor/box3d/src" || exit 1
 
