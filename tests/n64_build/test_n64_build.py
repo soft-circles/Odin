@@ -32,6 +32,30 @@ REQUIRED_SDK_TOOLS = (
 )
 
 
+ROM_LLVM_TOOLS = ("ld.lld", "llvm-strip", "llvm-objdump", "llvm-addr2line")
+CLANG_TARGET_FLAGS = ("--target=mips64-elf", "-march=mips3", "-mabi=o64", "-mno-abicalls", "-fno-pic", "-G0")
+
+
+def llvm_bindir() -> Path | None:
+	configured = os.environ.get("ODIN_N64_LLVM_BIN")
+	if configured:
+		return Path(configured).resolve()
+	llvm_config = os.environ.get("LLVM_CONFIG")
+	if not llvm_config:
+		return None
+	result = subprocess.run([llvm_config, "--bindir"], text=True, stdout=subprocess.PIPE, check=False)
+	return Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
+
+
+def fake_llvm_bindir(parent: Path, name: str, tools: tuple[str, ...]) -> Path:
+	directory = parent / name
+	directory.mkdir()
+	for tool in tools:
+		(directory / tool).write_text("#!/bin/sh\nexit 3\n")
+		(directory / tool).chmod(0o755)
+	return directory
+
+
 def configured_sdk() -> Path | None:
 	configured = os.environ.get("N64_INST")
 	if configured:
@@ -298,20 +322,20 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		for index, metadata in enumerate((None, "not JSON", '{"hash":"local-development","dirty":true}')):
 			with self.subTest(metadata=metadata):
 				sdk = self.root / f"custom sdk {index}"
-				for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS):
+				runtime = tuple(f"{GCC_RUNTIME}/13.2.0/{name}" for name in ("crti.o", "crtbegin.o", "crtend.o", "crtn.o", "libgcc.a"))
+				for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS, *runtime):
 					path = sdk / relative
 					path.parent.mkdir(parents=True, exist_ok=True)
 					path.touch(mode=0o755 if relative in REQUIRED_SDK_TOOLS else 0o644)
-				# The link is the first packaging step.
-				(sdk / "bin/mips64-elf-g++").write_text(
-					"#!/bin/sh\necho custom-sdk-packaging-reached\nexit 37\n")
+				llvm = fake_llvm_bindir(self.root, f"custom llvm {index}", ROM_LLVM_TOOLS)
+				(llvm / "ld.lld").write_text("#!/bin/sh\necho custom-sdk-packaging-reached\nexit 37\n")
 				if metadata is not None:
 					for name in ("libdragon.version", "toolchain.version"):
 						path = sdk / "mips64-elf/include" / name
 						path.parent.mkdir(parents=True, exist_ok=True)
 						path.write_text(metadata)
 
-				result = run_build(self.app, f"-n64-inst:{sdk}")
+				result = run_build(self.app, f"-n64-inst:{sdk}", extra_env={"ODIN_N64_LLVM_BIN": str(llvm)})
 
 				self.assertNotEqual(result.returncode, 0, result.stdout)
 				self.assertIn("custom-sdk-packaging-reached", result.stdout)
@@ -398,9 +422,12 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		app.mkdir()
 		(app / "object.c").write_text("int object_data = 20; int object_value(int *p) { return *p; }\n", encoding="utf-8")
 		(app / "archive.c").write_text("int archive_value(void) { return 22; }\n", encoding="utf-8")
-		compiler = self.sdk / "bin/mips64-elf-gcc"
-		archiver = self.sdk / "bin/mips64-elf-ar"
-		common = ("-march=vr4300", "-mtune=vr4300", "-mabi=o64", "-c")
+		llvm = llvm_bindir()
+		if llvm is None:
+			self.skipTest("set ODIN_N64_LLVM_BIN or LLVM_CONFIG to build the foreign inputs with the fork's clang")
+		compiler = llvm / "clang"
+		archiver = llvm / "llvm-ar"
+		common = (*CLANG_TARGET_FLAGS, "-c")
 		subprocess.run(
 			[str(compiler), *common, "object.c", "-o", "object.o"],
 			cwd=app,
@@ -572,19 +599,8 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertTrue(output.is_file(), result.stdout)
 		self.assertFalse((app / "clean.n64-build").exists(), result.stdout)
 
-	def test_foreign_source_requires_the_sdk_compiler(self):
-		sdk = make_sdk_facade(self.root, self.sdk)
-		app = create_foreign_source_app(self.root, "facade foreign sources")
-		output = app / "must-not-exist.z64"
-
-		result = run_build(app, f"-n64-inst:{sdk}", f"-out:{output}", "-n64-cflags:-DFROM_CFLAGS=1")
-
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("requires the executable N64 SDK tool bin/mips64-elf-gcc", result.stdout)
-		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
-
-	def test_rsp_source_requires_the_llvm_tools(self):
-		app = create_foreign_source_app(self.root, "rsp without llvm")
+	def test_rom_link_requires_the_llvm_tools(self):
+		app = create_app(self.root, "rom without llvm")
 		empty = self.root / "no llvm"
 		empty.mkdir()
 
@@ -592,8 +608,49 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		                   extra_env={"ODIN_N64_LLVM_BIN": str(empty)})
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("N64 ROM builds require the LLVM fork's executable ld.lld in", result.stdout)
+		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
+
+	def test_foreign_source_requires_the_llvm_clang(self):
+		app = create_foreign_source_app(self.root, "foreign sources without clang")
+		llvm = fake_llvm_bindir(self.root, "rom tools only", ROM_LLVM_TOOLS)
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{app / 'must-not-exist.z64'}", "-n64-cflags:-DFROM_CFLAGS=1",
+		                   extra_env={"ODIN_N64_LLVM_BIN": str(llvm)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("foreign import source", result.stdout)
 		self.assertIn("requires the LLVM fork's executable clang in", result.stdout)
 		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
+
+	def test_rsp_source_requires_the_llvm_tools(self):
+		app = create_foreign_source_app(self.root, "rsp without llvm-objcopy")
+		llvm = fake_llvm_bindir(self.root, "no llvm-objcopy", (*ROM_LLVM_TOOLS, "clang"))
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{app / 'must-not-exist.z64'}", "-n64-cflags:-DFROM_CFLAGS=1",
+		                   extra_env={"ODIN_N64_LLVM_BIN": str(llvm)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("N64 RSP microcode", result.stdout)
+		self.assertIn("requires the LLVM fork's executable llvm-objcopy in", result.stdout)
+		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
+
+	def test_microcode_project_builds_without_mips64_elf_tools_or_n64_inst(self):
+		odin_root = self.root / "odin root"
+		odin_root.mkdir()
+		for name in ("base", "core", "shared", "vendor", "misc"):
+			(odin_root / name).symlink_to(ODIN_ROOT / name, target_is_directory=True)
+		bundled = make_sdk_facade(self.root, self.sdk)
+		(bundled / "mips64-elf/include").symlink_to(self.sdk / "mips64-elf/include", target_is_directory=True)
+		bundled.rename(odin_root / "n64")
+		self.assertEqual(list((odin_root / "n64/bin").glob("mips64-elf-*")), [])
+		app = create_foreign_source_app(self.root, "microcode without gcc")
+		output = app / "microcode.z64"
+
+		result = run_build(app, f"-out:{output}", "-n64-cflags:-DFROM_CFLAGS=1", extra_env={"ODIN_ROOT": str(odin_root)})
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes()[:4], bytes.fromhex("80371240"))
 
 	def test_failing_llvm_tools_stop_the_build_before_a_rom(self):
 		app = create_foreign_source_app(self.root, "rsp with failing llvm")
@@ -702,7 +759,7 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertEqual(intermediates.parent, output.parent)
 		self.assertEqual(intermediates.name, "runtime result.n64-build")
 		self.assertEqual({path.name for path in intermediates.iterdir()},
-		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped"})
+		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "n64sym"})
 
 		headless_runner = os.environ.get("ARES_TEST")
 		if headless_runner:
@@ -772,13 +829,12 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		# left beside the ROM.
 		self.assertEqual(intermediates.name, "configured output.n64-build")
 		self.assertEqual({path.name for path in intermediates.iterdir()},
-		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "odin-n64.dfs"})
+		                 {"odin-n64.elf", "odin-n64.map", "odin-n64.elf.sym", "odin-n64.elf.stripped", "odin-n64.dfs", "n64sym"})
 		self.assertIn(asset_payload, (intermediates / "odin-n64.dfs").read_bytes())
 
-	def test_sdk_directory_with_spaces_reaches_n64sym_through_a_relative_link(self):
-		# A symlinked alias is resolved to the real SDK path; a real directory
-		# whose own name has a space is not, and n64sym may run objdump through
-		# a shell. Link each top-level SDK entry so the root itself is real.
+	def test_sdk_directory_with_spaces_reaches_n64sym_through_a_relative_facade(self):
+		# n64sym runs objdump through a shell, unquoted. Link each top-level
+		# SDK entry so the spaced SDK root itself is real, not resolved away.
 		sdk = self.root / "real sdk with spaces"
 		sdk.mkdir()
 		for entry in self.sdk.iterdir():
@@ -795,9 +851,11 @@ class N64EndToEndBuildTests(unittest.TestCase):
 
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertEqual(baseline.returncode, 0, baseline.stdout)
-		link = output.parent / "rom.n64-build" / "sdk"
+		link = output.parent / "rom.n64-build" / "n64sym/bin/mips64-elf-objdump"
 		self.assertTrue(link.is_symlink(), result.stdout)
-		self.assertEqual(link.resolve(), sdk.resolve())
+		llvm = llvm_bindir()
+		if llvm is not None:
+			self.assertEqual(link.resolve(), (llvm / "llvm-objdump").resolve())
 		self.assertEqual(output.read_bytes(), reference.read_bytes())
 
 	def test_extra_linker_flags_reach_the_sdk_link(self):
@@ -814,9 +872,12 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		)
 
 		self.assertEqual(result.returncode, 0, result.stdout)
-		self.assertIn("-Wl,--defsym=odin_n64_extra_flag_marker=0x1234 -Wl,--wrap=odin_n64_unused_symbol", result.stdout)
+		self.assertIn("--defsym=odin_n64_extra_flag_marker=0x1234 --wrap=odin_n64_unused_symbol", result.stdout)
+		llvm = llvm_bindir()
+		if llvm is None:
+			self.skipTest("set ODIN_N64_LLVM_BIN or LLVM_CONFIG to read the ELF with llvm-nm")
 		symbols = subprocess.run(
-			[str(self.sdk / "bin/mips64-elf-nm"), str(app / "flags.n64-build" / "odin-n64.elf")],
+			[str(llvm / "llvm-nm"), str(app / "flags.n64-build" / "odin-n64.elf")],
 			text=True,
 			stdout=subprocess.PIPE,
 			stderr=subprocess.STDOUT,

@@ -43,8 +43,10 @@ Foreign-source tests build a package that imports a `.c` file, a VR4300 `.S`
 file, an RSP `.S` file and two `probe.c` files from different directories. They
 check that `-n64-cflags` reaches the compile, that the RSP section symbols link,
 that a failing compile fails the build and keeps the intermediates, that a
-successful build without `-keep-temp-files` removes them, and that an SDK
-without `mips64-elf-gcc` is rejected. A check-only test confirms the checker
+successful build without `-keep-temp-files` removes them, and that an LLVM bindir
+without `clang`, or without `llvm-objcopy` for RSP microcode, is rejected. One
+builds that package with an SDK at `<odin root>/n64` that holds no
+`mips64-elf-` tool and with `N64_INST` unset. A check-only test confirms the checker
 accepts `.c` imports on `-target:n64` and still rejects them on the host.
 Further end-to-end tests check that `-extra-linker-flags` reaches the link, that
 an SDK directory whose own name contains spaces packages the same ROM, and that
