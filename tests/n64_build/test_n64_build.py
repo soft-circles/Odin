@@ -19,12 +19,13 @@ REQUIRED_SDK_FILES = (
 	"mips64-elf/lib/libdragon.a",
 	"mips64-elf/lib/libdragonsys.a",
 	"mips64-elf/lib/n64.ld",
+	"mips64-elf/lib/libc.a",
+	"mips64-elf/lib/libm.a",
+	"mips64-elf/lib/libstdc++.a",
 )
+GCC_RUNTIME = "lib/gcc/mips64-elf"
 REQUIRED_SDK_TOOLS = (
 	"bin/ed64romconfig",
-	"bin/mips64-elf-g++",
-	"bin/mips64-elf-objdump",
-	"bin/mips64-elf-strip",
 	"bin/n64elfcompress",
 	"bin/n64sym",
 	"bin/n64tool",
@@ -146,7 +147,7 @@ def create_foreign_source_app(parent: Path, name: str) -> Path:
 def make_sdk_facade(parent: Path, source: Path) -> Path:
 	"""Link the required SDK inputs without requiring version metadata."""
 	root = parent / "sdk facade"
-	for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS):
+	for relative in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS, GCC_RUNTIME):
 		destination = root / relative
 		destination.parent.mkdir(parents=True, exist_ok=True)
 		destination.symlink_to(source / relative)
