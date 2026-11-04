@@ -110,10 +110,8 @@ gb_internal String n64_gcc_runtime_dir(String const &sdk_root) {
 	if (read_directory(parent, &entries) != ReadDirectory_None) {
 		return {};
 	}
-	array_sort(entries, [](void const *a, void const *b) -> int {
-		return string_compare((cast(FileInfo const *)a)->fullpath, (cast(FileInfo const *)b)->fullpath);
-	});
 	char const *files[] = {"crti.o", "crtbegin.o", "crtend.o", "crtn.o", "libgcc.a"};
+	String found = {};
 	for (FileInfo const &entry : entries) {
 		bool complete = path_is_directory(entry.fullpath);
 		for (char const *file : files) {
@@ -121,10 +119,13 @@ gb_internal String n64_gcc_runtime_dir(String const &sdk_root) {
 			complete = complete && gb_file_exists(alloc_cstring(temporary_allocator(), path));
 		}
 		if (complete) {
-			return entry.fullpath;
+			if (found.len != 0) {
+				return {};
+			}
+			found = entry.fullpath;
 		}
 	}
-	return {};
+	return found;
 }
 
 gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
@@ -159,7 +160,7 @@ gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 		}
 	}
 	if (n64_gcc_runtime_dir(sdk_root).len == 0) {
-		gb_printf_err("N64 SDK %.*s is missing the GCC runtime: lib/gcc/mips64-elf/<version>/ with %s\n",
+		gb_printf_err("N64 SDK %.*s needs exactly one GCC runtime: lib/gcc/mips64-elf/<version>/ with %s\n",
 		              LIT(sdk_root), "crti.o, crtbegin.o, crtend.o, crtn.o and libgcc.a");
 		valid = false;
 	}
@@ -426,8 +427,7 @@ gb_internal i32 n64_spawn_and_wait(char const *const *arguments, char **environm
 }
 
 gb_internal bool n64_remove_file_if_present(String const &path) {
-	char const *path_c = alloc_cstring(temporary_allocator(), path);
-	return !gb_file_exists(path_c) || gb_file_remove(path_c);
+	return unlink(alloc_cstring(temporary_allocator(), path)) == 0 || errno == ENOENT;
 }
 
 // ---- Packaging --------------------------------------------------------------
@@ -543,6 +543,7 @@ gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &out
 // clang's flags for the VR4300 with GCC's o64 types. clang has no vr4300 CPU, so it targets mips3 as the RSP steps do,
 // and -G0 keeps data out of $gp-relative sections. GCC's stdint.h types follow its __*_TYPE__ macros: int32_t is long
 // and the fast 8- and 16-bit types are int there, so foreign C keeps the layout and format specifiers GCC code uses.
+// Their limit, width and _C macros follow, so INT32_MAX and INT32_C(1) are long as PRId32 expects.
 gb_internal void n64_add_clang_target_flags(N64Argv *argv) {
 	char const *flags[] = {
 		"--target=mips64-elf", "-march=mips3", "-mabi=o64", "-mno-abicalls", "-fno-pic", "-G0",
@@ -552,6 +553,13 @@ gb_internal void n64_add_clang_target_flags(N64Argv *argv) {
 		"-U__INT_FAST8_TYPE__", "-D__INT_FAST8_TYPE__=int", "-U__UINT_FAST8_TYPE__", "-D__UINT_FAST8_TYPE__=unsigned int",
 		"-U__INT_FAST16_TYPE__", "-D__INT_FAST16_TYPE__=int", "-U__UINT_FAST16_TYPE__", "-D__UINT_FAST16_TYPE__=unsigned int",
 		"-U__CHAR32_TYPE__", "-D__CHAR32_TYPE__=long unsigned int", "-U__WINT_TYPE__", "-D__WINT_TYPE__=unsigned int",
+		"-U__INT32_C", "-D__INT32_C(c)=c ## L", "-U__UINT32_C", "-D__UINT32_C(c)=c ## UL",
+		"-U__INT32_MAX__", "-D__INT32_MAX__=0x7fffffffL", "-U__INT_LEAST32_MAX__", "-D__INT_LEAST32_MAX__=0x7fffffffL",
+		"-U__UINT32_MAX__", "-D__UINT32_MAX__=0xffffffffUL", "-U__UINT_LEAST32_MAX__", "-D__UINT_LEAST32_MAX__=0xffffffffUL",
+		"-U__INT_FAST8_MAX__", "-D__INT_FAST8_MAX__=0x7fffffff", "-U__INT_FAST16_MAX__", "-D__INT_FAST16_MAX__=0x7fffffff",
+		"-U__UINT_FAST8_MAX__", "-D__UINT_FAST8_MAX__=0xffffffffU", "-U__UINT_FAST16_MAX__", "-D__UINT_FAST16_MAX__=0xffffffffU",
+		"-U__INT_FAST8_WIDTH__", "-D__INT_FAST8_WIDTH__=32", "-U__INT_FAST16_WIDTH__", "-D__INT_FAST16_WIDTH__=32",
+		"-U__WINT_MAX__", "-D__WINT_MAX__=0xffffffffU", "-U__WINT_MIN__", "-D__WINT_MIN__=0U",
 	};
 	for (char const *flag : flags) {
 		n64_arg(argv, flag);
@@ -829,9 +837,8 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	N64Argv argv = {};
 
 	// n64sym --all elf elf.sym
-	// n64sym popen()s "$N64_INST/bin/mips64-elf-objdump -t <elf>" and addr2line the same way (n64sym.cpp:330, :450),
-	// unquoted, so it runs inside the intermediates directory with N64_INST naming a relative directory whose bin holds
-	// llvm-objdump and llvm-addr2line under those names.
+	// n64sym runs $N64_INST/bin/mips64-elf-objdump and mips64-elf-addr2line, so it gets N64_INST naming a relative
+	// directory inside the intermediates whose bin holds llvm-objdump and llvm-addr2line under those names.
 	String sym_bin = n64_path_join(a, files.sym_sdk, STR_LIT("bin"));
 	for (String const &directory : {files.sym_sdk, sym_bin}) {
 		if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {

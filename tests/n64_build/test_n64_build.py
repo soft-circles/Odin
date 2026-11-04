@@ -127,6 +127,10 @@ def create_foreign_source_app(parent: Path, name: str) -> Path:
 	(app / "other").mkdir(parents=True)
 	(app / "helper.c").write_text(
 		"#include <rsp.h>\n"
+		"#include <inttypes.h>\n"
+		"#include <stdio.h>\n"
+		"_Static_assert(INT_FAST16_MAX == 0x7fffffff, \"GCC's int_fast16_t is int\");\n"
+		"int helper_format(char *text) { return snprintf(text, 32, \"%\" PRId32 \" %ld\", INT32_C(1), INT32_MAX); }\n"
 		"#ifndef FROM_CFLAGS\n"
 		"#error FROM_CFLAGS must come from -n64-cflags\n"
 		"#endif\n"
@@ -355,18 +359,23 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertIn("missing required file", result.stdout)
 		self.assertIn("mips64-elf/lib/n64.ld", result.stdout)
 
-	def test_missing_gcc_runtime_is_named(self):
+	def test_a_missing_or_ambiguous_gcc_runtime_is_named(self):
 		source = configured_sdk()
 		if source is None or not all((source / path).exists() for path in (*REQUIRED_SDK_FILES, *REQUIRED_SDK_TOOLS)):
 			self.skipTest("a complete N64 SDK is required for the SDK fixture")
-		sdk = make_sdk_facade(self.root, source)
-		(sdk / GCC_RUNTIME).unlink()
-		(sdk / GCC_RUNTIME).mkdir()
+		versions = [entry for entry in (source / GCC_RUNTIME).iterdir() if (entry / "crtbegin.o").is_file()]
+		for runtimes in ([], [versions[0], versions[0]]):
+			with self.subTest(runtimes=len(runtimes)):
+				sdk = make_sdk_facade(self.root / f"{len(runtimes)} runtimes", source)
+				(sdk / GCC_RUNTIME).unlink()
+				(sdk / GCC_RUNTIME).mkdir()
+				for index, runtime in enumerate(runtimes):
+					(sdk / GCC_RUNTIME / f"{runtime.name}.{index}").symlink_to(runtime, target_is_directory=True)
 
-		result = run_build(self.app, f"-n64-inst:{sdk}")
+				result = run_build(self.app, f"-n64-inst:{sdk}")
 
-		self.assertNotEqual(result.returncode, 0, result.stdout)
-		self.assertIn("is missing the GCC runtime", result.stdout)
+				self.assertNotEqual(result.returncode, 0, result.stdout)
+				self.assertIn("needs exactly one GCC runtime", result.stdout)
 
 	def test_non_executable_sdk_tool_is_named(self):
 		source = configured_sdk()
@@ -878,6 +887,18 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		if llvm is not None:
 			self.assertEqual(link.resolve(), (llvm / "llvm-objdump").resolve())
 		self.assertEqual(output.read_bytes(), reference.read_bytes())
+
+	def test_a_dangling_n64sym_facade_link_from_an_earlier_build_is_replaced(self):
+		app = create_app(self.root, "dangling facade app")
+		output = app / "rom.z64"
+		stale = app / "rom.n64-build/n64sym/bin/mips64-elf-objdump"
+		stale.parent.mkdir(parents=True)
+		stale.symlink_to(self.root / "removed llvm/llvm-objdump")
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertFalse((app / "rom.n64-build").exists(), result.stdout)
 
 	def test_extra_linker_flags_reach_the_sdk_link(self):
 		app = create_app(self.root, "extra linker flags app")
