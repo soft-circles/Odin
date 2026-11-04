@@ -594,6 +594,20 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertIn("requires the LLVM fork's executable clang in", result.stdout)
 		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
 
+	def test_failing_llvm_tools_stop_the_build_before_a_rom(self):
+		app = create_foreign_source_app(self.root, "rsp with failing llvm")
+		failing = self.root / "failing llvm"
+		failing.mkdir()
+		for name in ("clang", "ld.lld", "llvm-objcopy"):
+			(failing / name).write_text("#!/bin/sh\nexit 3\n")
+			(failing / name).chmod(0o755)
+		output = app / "must-not-exist.z64"
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}", extra_env={"ODIN_N64_LLVM_BIN": str(failing)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertFalse(output.exists(), result.stdout)
+
 	def test_inherited_n64_toolchain_override_does_not_escape_validated_sdk(self):
 		app = create_app(self.root, "sanitized environment app")
 		output = app / "sanitized.z64"

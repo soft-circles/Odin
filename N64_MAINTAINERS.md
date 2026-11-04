@@ -112,7 +112,8 @@ version metadata. SDK compatibility is exercised by compilation, packaging
 and the ABI/runtime tests.
 
 Each packaging tool is started with `posix_spawn`, an absolute path inside the
-validated SDK, and a fixed argument vector rather than a shell command. Its
+validated SDK (or, for RSP microcode, the LLVM bindir below), and a fixed
+argument vector rather than a shell command. Its
 environment drops inherited `PATH`, `SHELL`, every `N64_*` variable and the
 variables GCC reads for search paths, its own programs and dependency output
 (`CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
@@ -121,6 +122,16 @@ variables GCC reads for search paths, its own programs and dependency output
 set to the validated SDK, because it finds `objdump` and `addr2line` through
 it. These controls prevent an inherited toolchain prefix or SDK root from
 escaping the SDK that was validated.
+
+RSP microcode builds with `clang`, `ld.lld` and `llvm-objcopy` from the bindir
+of the LLVM the compiler was built against (`ODIN_LLVM_BINDIR`, which
+`build_odin.sh` bakes in from `llvm-config --bindir`). `ODIN_N64_LLVM_BIN`
+replaces that directory. It is trusted the way `-n64-inst` is: the user picks
+the toolchain with it. It selects only those three tools, never an SDK tool,
+and validation requires each to be executable before any build output exists.
+A failing tool stops the build before a ROM is placed
+(`test_rsp_source_requires_the_llvm_tools` and
+`test_failing_llvm_tools_stop_the_build_before_a_rom`).
 
 Preserve these guarantees when adding a tool or setting. A new environment
 input needs an explicit trust decision and a regression proving it cannot
@@ -142,13 +153,15 @@ it, and reuses it on the next build of the same output:
 ├── sdk -> <validated SDK>     # only when the SDK path is not shell-safe
 └── foreign/                   # only when a foreign import names .c or .S sources
     ├── <n>-<name>.o           # the object linked in place of source n
-    └── <n>-<name>.{elf,map,text.bin,...}  # RSP microcode steps
+    └── <n>-<name>.{rsp.o,elf,map,text.bin,...}  # RSP microcode steps
 ```
 
 `n64_package_rom` first compiles foreign `.c` and `.S` sources with the
 `$(BUILD_DIR)/%.o` rules of `n64.mk` (see `n64_compile_foreign_sources`), each
 from its own directory and numbered so two sources with one file name stay
-apart. It then runs the steps of libdragon's `n64.mk` recipe for the
+apart. RSP microcode follows the `rsp%.S` rule's flags but runs the LLVM
+fork's `clang`, `ld.lld` with `misc/n64/rsp.lld.ld`, and `llvm-objcopy`
+instead of GCC's tools. It then runs the steps of libdragon's `n64.mk` recipe for the
 `odin-n64.z64` goal in order: `mips64-elf-g++` link, `n64sym`, a copy and
 `mips64-elf-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
 `n64tool --toc`, `ed64romconfig` and `n64metadata` when metadata is present.
