@@ -103,6 +103,19 @@ packaging steps itself.
    guide for its host prerequisites.
 3. The upstream `./build.sh` also builds the complete libdragon example suite; that
    is optional for Odin and may download additional example assets.
+4. Rewrite the SDK's archives and objects for `ld.lld`, which rejects the local
+   symbols GCC places after globals:
+
+   ```sh
+   find "$N64_INST/mips64-elf/lib" "$N64_INST/lib/gcc/mips64-elf" \
+     \( -name '*.a' -o -name '*.o' \) -exec llvm-objcopy {} \;
+   ```
+
+   Rewrite a prebuilt foreign `.o` or `.a` made by GCC the same way. Odin links
+   the ROM with the LLVM fork's `ld.lld`, compiles foreign C with its `clang` and
+   runs `n64sym` on its `llvm-objdump` and `llvm-addr2line`, so the build needs
+   no `mips64-elf-` tool from the SDK. It still needs the SDK's newlib, libstdc++
+   and the GCC runtime in `lib/gcc/mips64-elf/<version>`.
 
 Select the installed SDK for subsequent builds in either of these ways:
 
@@ -211,9 +224,9 @@ The integrated executable pipeline also rejects these combinations:
   sources, except the built-in `c`, `m`, `dragon`, and `dragonsys` libraries.
 
 `-extra-linker-flags` and the extra linker flags attached to a foreign import
-are appended to the SDK's `mips64-elf-g++` link command. They are split on
-whitespace with no shell quoting, so pass linker options as `-Wl,` words such
-as `-extra-linker-flags:"-Wl,--wrap=malloc"`.
+are appended to the `ld.lld` link command. They are split on whitespace with no
+shell quoting. A `-Wl,` word such as `-extra-linker-flags:"-Wl,--wrap=malloc"`
+is split at its commas into `ld.lld` arguments; any other word passes as is.
 
 Object, assembly, and LLVM IR build modes do not run libdragon packaging and
 therefore do not accept ROM configuration options.
@@ -228,15 +241,16 @@ foreign import probe {"probe.c", "rsp_probe.S"}
 ```
 
 The build compiles each source with the flags of libdragon's `n64.mk` rules,
-then links the object in the source's place. A `.c` file gets the SDK's
-`mips64-elf-gcc` and `N64_CFLAGS`. A `.S` file whose name starts with `rsp` is
+then links the object in the source's place. A `.c` file gets the LLVM fork's
+`clang` and `N64_CFLAGS`, targeting `mips3` with the `o64` ABI and GCC's `stdint.h`
+types, so `int32_t` stays `long`. A `.S` file whose name starts with `rsp` is
 RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
 `misc/n64/rsp.lld.ld`, a copy of libdragon's `rsp.ld`, and `llvm-objcopy` turns its `.text`, `.data` and
 `.meta` sections into `<name>_text_start` and the other symbols that
 `DEFINE_RSP_UCODE(<name>)` expects. These tools come from the bindir of the
 LLVM the compiler was built against, or from the directory
 `ODIN_N64_LLVM_BIN` names. Any other `.S` file is VR4300 assembly
-and gets `N64_ASFLAGS`. Each compile runs in the source's directory, so
+and gets `clang` with `N64_ASFLAGS`. Each compile runs in the source's directory, so
 `#include "..."` and `__FILE__` see the paths `n64.mk` would give them.
 
 `-n64-cflags` appends flags to every source of the build, for example

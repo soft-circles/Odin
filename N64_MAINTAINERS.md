@@ -119,8 +119,8 @@ variables GCC reads for search paths, its own programs and dependency output
 (`CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
 `LIBRARY_PATH`, `GCC_EXEC_PREFIX`, `COMPILER_PATH`, `DEPENDENCIES_OUTPUT` and
 `SUNPRO_DEPENDENCIES`), and supplies a fixed system `PATH` and shell. Only `n64sym` receives `N64_INST`,
-set to the validated SDK, because it finds `objdump` and `addr2line` through
-it. These controls prevent an inherited toolchain prefix or SDK root from
+set to a relative `n64sym` directory whose `bin` links `llvm-objdump` and
+`llvm-addr2line` under the `mips64-elf-` names it looks for. These controls prevent an inherited toolchain prefix or SDK root from
 escaping the SDK that was validated.
 
 RSP microcode builds with `clang`, `ld.lld` and `llvm-objcopy` from the bindir
@@ -150,7 +150,7 @@ it, and reuses it on the next build of the same output:
 ├── odin-n64.elf.stripped      # stripped, then compressed in place
 ├── odin-n64.dfs               # only with -n64-assets
 ├── odin-n64.z64.tmp           # before final placement
-├── sdk -> <validated SDK>     # only when the SDK path is not shell-safe
+├── n64sym/bin/mips64-elf-{objdump,addr2line} -> the LLVM tools
 └── foreign/                   # only when a foreign import names .c or .S sources
     ├── <n>-<name>.o           # the object linked in place of source n
     └── <n>-<name>.{rsp.o,elf,map,text.bin,...}  # RSP microcode steps
@@ -162,10 +162,16 @@ from its own directory and numbered so two sources with one file name stay
 apart. RSP microcode follows the `rsp%.S` rule's flags but runs the LLVM
 fork's `clang`, `ld.lld` with `misc/n64/rsp.lld.ld`, and `llvm-objcopy`
 instead of GCC's tools. It then runs the steps of libdragon's `n64.mk` recipe for the
-`odin-n64.z64` goal in order: `mips64-elf-g++` link, `n64sym`, a copy and
-`mips64-elf-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
+`odin-n64.z64` goal in order: the `ld.lld` link, `n64sym`, a copy and
+`llvm-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
 `n64tool --toc`, `ed64romconfig` and `n64metadata` when metadata is present.
-The link flags copy `N64_C_AND_CXX_FLAGS` and `N64_LDFLAGS`, and the defaults
+The link passes `ld.lld` the arguments `collect2` gets from `mips64-elf-g++`: the GCC
+runtime's `crti.o` and `crtbegin.o` first, `crtend.o` and `crtn.o` last, `-lstdc++ -lm -lc -lgcc`
+after the inputs, and `-z max-page-size=4096` so the LOAD segments keep GNU ld's offsets.
+The GCC runtime is the `lib/gcc/mips64-elf/<version>` directory of the SDK. Its
+archives and libdragon's must be rewritten by `llvm-objcopy` first, because
+`ld.lld` rejects GCC's local symbols that follow globals. The other link flags
+copy `N64_C_AND_CXX_FLAGS` and `N64_LDFLAGS`, and the defaults
 `--category N`, `--regionfree` and `-c 1` copy the recipe's `?=` defaults.
 `n64tool --toc` records each input's basename in the ROM, so keep the
 `odin-n64.*` names. When a libdragon bump changes those recipe lines, mirror
@@ -179,11 +185,11 @@ weaken input ordering without comparing ELF, symbol, and ROM hashes. The user's
 asset directory and metadata INI are passed to `mkdfs` and `n64metadata` in
 place; `n64metadata` resolves companion files against the INI's own directory.
 
-Older `n64sym` builds run `$N64_INST/bin/mips64-elf-objdump -t <elf>` through
-`popen` without quoting. So `n64sym` runs inside the intermediates directory on
-relative names. It receives the SDK root as `N64_INST` when that path is
-shell-safe, and otherwise a relative `sdk` link to it. Remove the link once
-every supported libdragon revision runs `objdump` through an argument vector.
+`n64sym` runs `$N64_INST/bin/mips64-elf-objdump` and `mips64-elf-addr2line` through
+`popen` without quoting. So `n64sym` runs inside the intermediates directory with
+`N64_INST=n64sym`, a relative directory whose `bin` links the LLVM tools under those
+names. Its disassembly parser needs the libdragon revision that reads
+`llvm-objdump`'s spacing; older revisions find almost no call sites.
 
 After every step succeeds, `rename` places the ROM at the final path. Only
 then may successful intermediates be removed. `-keep-temp-files` retains the
