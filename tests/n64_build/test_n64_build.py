@@ -474,7 +474,10 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		for symbol in ("helper_value", "asm_value", "first_probe", "second_probe", "rsp_vector_text_start", "rsp_vector_meta_end"):
 			self.assertRegex(symbols, rf" {symbol}\n")
 		self.assertNotIn("-I binary", result.stdout)
-		self.assertNotIn("[SYSTEM CALL] n64-rsp-ld", result.stdout)
+		rsp_commands = re.findall(r"\[SYSTEM CALL\] n64-rsp-[a-z]+\n(.*)\n", result.stdout)
+		self.assertEqual(len(rsp_commands), 6, result.stdout)
+		for command in rsp_commands:
+			self.assertNotIn("bin/mips64-elf-", command)
 		arch_mach_abi = lambda name: int.from_bytes((foreign / name).read_bytes()[36:40], "big") & 0xF0FFF000
 		self.assertEqual(arch_mach_abi("2-rsp_vector.o"), arch_mach_abi("1-vr4300.o"))
 		wrap = re.search(r"\[SYSTEM CALL\] n64-rsp-wrap\n.*\n", result.stdout)
@@ -577,6 +580,18 @@ class N64EndToEndBuildTests(unittest.TestCase):
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn("requires the executable N64 SDK tool bin/mips64-elf-gcc", result.stdout)
+		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
+
+	def test_rsp_source_requires_the_llvm_tools(self):
+		app = create_foreign_source_app(self.root, "rsp without llvm")
+		empty = self.root / "no llvm"
+		empty.mkdir()
+
+		result = run_build(app, f"-n64-inst:{self.sdk}", f"-out:{app / 'must-not-exist.z64'}",
+		                   extra_env={"ODIN_N64_LLVM_BIN": str(empty)})
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("requires the LLVM fork's executable clang in", result.stdout)
 		self.assertFalse((app / "must-not-exist.n64-build").exists(), result.stdout)
 
 	def test_inherited_n64_toolchain_override_does_not_escape_validated_sdk(self):

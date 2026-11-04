@@ -93,6 +93,7 @@ else
 fi
 
 LLVM_VERSION="$($LLVM_CONFIG --version)"
+CPPFLAGS="$CPPFLAGS -DODIN_LLVM_BINDIR=\"$($LLVM_CONFIG --bindir)\""
 LLVM_VERSION_MAJOR="$(echo $LLVM_VERSION | awk -F. '{print $1}')"
 LLVM_VERSION_MINOR="$(echo $LLVM_VERSION | awk -F. '{print $2}')"
 LLVM_VERSION_PATCH="$(echo $LLVM_VERSION | awk -F. '{print $3}')"

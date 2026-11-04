@@ -227,12 +227,15 @@ objects. Paths resolve against the importing file, as object paths do:
 foreign import probe {"probe.c", "rsp_probe.S"}
 ```
 
-The build compiles each source with the SDK's `mips64-elf-gcc` and the flags of
-libdragon's `n64.mk` rules, then links the object in the source's place. A `.c`
-file gets `N64_CFLAGS`. A `.S` file whose name starts with `rsp` is RSP
-microcode: it is linked with `rsp.ld`, and its `.text`, `.data` and `.meta`
-sections become `<name>_text_start` and the other symbols that
-`DEFINE_RSP_UCODE(<name>)` expects. Any other `.S` file is VR4300 assembly
+The build compiles each source with the flags of libdragon's `n64.mk` rules,
+then links the object in the source's place. A `.c` file gets the SDK's
+`mips64-elf-gcc` and `N64_CFLAGS`. A `.S` file whose name starts with `rsp` is
+RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
+`misc/n64/rsp.lld.ld`, a copy of libdragon's `rsp.ld`, and `llvm-objcopy` turns its `.text`, `.data` and
+`.meta` sections into `<name>_text_start` and the other symbols that
+`DEFINE_RSP_UCODE(<name>)` expects. These tools come from the bindir of the
+LLVM the compiler was built against, or from the directory
+`ODIN_N64_LLVM_BIN` names. Any other `.S` file is VR4300 assembly
 and gets `N64_ASFLAGS`. Each compile runs in the source's directory, so
 `#include "..."` and `__FILE__` see the paths `n64.mk` would give them.
 

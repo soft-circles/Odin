@@ -65,6 +65,24 @@ gb_internal bool n64_sdk_tool_is_executable(String const &path) {
 #endif
 }
 
+#if !defined(ODIN_LLVM_BINDIR)
+#define ODIN_LLVM_BINDIR ""
+#endif
+
+// RSP microcode builds with the clang, ld.lld and llvm-objcopy of the LLVM fork. ODIN_N64_LLVM_BIN names their
+// directory; without it they are in the bindir of the LLVM the compiler was built against.
+gb_internal String n64_llvm_bindir() {
+	char const *environment = gb_get_env("ODIN_N64_LLVM_BIN", permanent_allocator());
+	if (environment != nullptr && environment[0] != '\0') {
+		return make_string_c(environment);
+	}
+	return STR_LIT(ODIN_LLVM_BINDIR);
+}
+
+gb_internal String n64_llvm_tool(char const *name) {
+	return n64_path_join(permanent_allocator(), n64_llvm_bindir(), make_string_c(name));
+}
+
 gb_internal String n64_sanitized_rom_title(String const &source) {
 	gbString title = gb_string_make_reserve(permanent_allocator(), 21);
 	for (isize index = 0; index < source.len && gb_string_length(title) < 20; index += 1) {
@@ -257,16 +275,23 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 			if (!source) {
 				continue;
 			}
-			// Sources need the SDK compiler; RSP microcode also needs objcopy to extract its sections.
-			char const *tools[] = {"bin/mips64-elf-gcc", "bin/mips64-elf-objcopy"};
-			isize tool_count = n64_foreign_input_is_rsp_source(input) ? gb_count_of(tools) : 1;
-			for (isize index = 0; index < tool_count; index += 1) {
-				String tool = n64_path_join(temporary_allocator(), request.settings.sdk_root, make_string_c(tools[index]));
-				if (!n64_sdk_tool_is_executable(tool)) {
-					gb_printf_err("N64 foreign import source %.*s requires the executable N64 SDK tool %s in %.*s\n",
-					              LIT(input), tools[index], LIT(request.settings.sdk_root));
-					return false;
+			if (n64_foreign_input_is_rsp_source(input)) {
+				char const *tools[] = {"clang", "ld.lld", "llvm-objcopy"};
+				for (char const *name : tools) {
+					if (!n64_sdk_tool_is_executable(n64_llvm_tool(name))) {
+						gb_printf_err("N64 RSP microcode %.*s requires the LLVM fork's executable %s in '%.*s'; "
+						              "set ODIN_N64_LLVM_BIN to the directory that holds it\n",
+						              LIT(input), name, LIT(n64_llvm_bindir()));
+						return false;
+					}
 				}
+				continue;
+			}
+			String tool = n64_path_join(temporary_allocator(), request.settings.sdk_root, STR_LIT("bin/mips64-elf-gcc"));
+			if (!n64_sdk_tool_is_executable(tool)) {
+				gb_printf_err("N64 foreign import source %.*s requires the executable N64 SDK tool bin/mips64-elf-gcc in %.*s\n",
+				              LIT(input), LIT(request.settings.sdk_root));
+				return false;
 			}
 		}
 	}
@@ -502,7 +527,8 @@ gb_internal String n64_gas_string(String const &text) {
 	return make_string(cast(u8 *)quoted, gb_string_length(quoted));
 }
 
-// Runs n64.mk's rsp*.S rule: link the microcode with rsp.ld, then wrap its .text, .data and .meta as data objects.
+// Runs n64.mk's rsp*.S rule with the LLVM fork's tools: assemble the microcode, link it with misc/n64/rsp.lld.ld,
+// then wrap its .text, .data and .meta as data objects.
 // The wrapper .incbin's each section and assembles with VR4300 flags, so its object carries o64 flags.
 gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &source, String const &name,
                                  String const &object, String const &foreign_dir, char **env) {
@@ -511,26 +537,33 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 	gbAllocator a = permanent_allocator();
 	String stem = remove_extension_from_path(remove_directory_from_path(source));
 	String base = n64_path_join(a, foreign_dir, name);
+	String microcode_object = concatenate_strings(a, base, STR_LIT(".rsp.o"));
 	char const *foreign_dir_c = alloc_cstring(a, foreign_dir);
 	i32 result = 0;
 	N64Argv argv = {};
 
 	// N64_RSPASFLAGS, run from the source's directory like the C rule.
 	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-gcc"));
-	n64_arg(&argv, "-march=mips1"); n64_arg(&argv, "-mabi=32"); n64_arg(&argv, "-Wa,--fatal-warnings");
+	n64_arg(&argv, n64_llvm_tool("clang"));
+	n64_arg(&argv, "--target=mips-elf"); n64_arg(&argv, "-march=mips1"); n64_arg(&argv, "-mabi=32");
+	n64_arg(&argv, "-mno-abicalls"); n64_arg(&argv, "-Wa,--fatal-warnings");
 	n64_arg(&argv, concatenate_strings(a, STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
 	n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2");
 	n64_add_words(&argv, s.cflags);
-	n64_arg(&argv, concatenate_strings(a, STR_LIT("-L"), n64_sdk_path(s, "mips64-elf/lib")));
-	n64_arg(&argv, "-nostartfiles"); n64_arg(&argv, "-Wl,-Trsp.ld"); n64_arg(&argv, "-Wl,--gc-sections");
-	// -Xlinker keeps a map path containing commas in one linker argument.
-	n64_arg(&argv, "-Xlinker"); n64_arg(&argv, concatenate3_strings(a, STR_LIT("-Map="), base, STR_LIT(".map")));
-	n64_arg(&argv, "-Xlinker"); n64_arg(&argv, "--cref");
-	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, base, STR_LIT(".elf")));
+	n64_arg(&argv, "-c");
+	n64_arg(&argv, "-o"); n64_arg(&argv, microcode_object);
 	n64_arg(&argv, remove_directory_from_path(source));
 	result = n64_run_tool("rsp-as", argv, env, show, false, alloc_cstring(a, directory_from_path(source)));
 	if (result != 0) return result;
+
+	array_init(&argv, a);
+	n64_arg(&argv, n64_llvm_tool("ld.lld"));
+	n64_arg(&argv, "-T"); n64_arg(&argv, n64_path_join(a, odin_root_dir(), STR_LIT("misc/n64/rsp.lld.ld")));
+	n64_arg(&argv, "--gc-sections");
+	n64_arg(&argv, concatenate3_strings(a, STR_LIT("-Map="), base, STR_LIT(".map"))); n64_arg(&argv, "--cref");
+	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, base, STR_LIT(".elf")));
+	n64_arg(&argv, microcode_object);
+	if ((result = n64_run_tool("rsp-ld", argv, env, show, false, foreign_dir_c)) != 0) return result;
 
 	// The section binaries are written in the foreign directory, where the wrapper finds them by bare file name.
 	char const *sections[] = {"text", "data", "meta"};
@@ -539,7 +572,7 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 		String section = make_string_c(sections[index]);
 		String binary = concatenate_strings(a, concatenate3_strings(a, name, STR_LIT("."), section), STR_LIT(".bin"));
 		array_init(&argv, a);
-		n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-objcopy"));
+		n64_arg(&argv, n64_llvm_tool("llvm-objcopy"));
 		n64_arg(&argv, "-O"); n64_arg(&argv, "binary");
 		n64_arg(&argv, "-j"); n64_arg(&argv, concatenate_strings(a, STR_LIT("."), section));
 		n64_arg(&argv, concatenate_strings(a, name, STR_LIT(".elf"))); n64_arg(&argv, binary);
@@ -592,12 +625,12 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 		gb_printf_err("Failed to write %.*s\n", LIT(wrapper_path));
 		return 1;
 	}
-	// N64_ASFLAGS's target flags without -n64-cflags, so the object carries the o64 flags of a VR4300 .S source.
+	// The VR4300 target flags without -n64-cflags, so the object carries the o64 flags of the code it links with.
 	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/mips64-elf-gcc"));
+	n64_arg(&argv, n64_llvm_tool("clang"));
 	n64_arg(&argv, "-c");
-	n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mabi=o64");
-	n64_arg(&argv, "-Wa,--fatal-warnings");
+	n64_arg(&argv, "--target=mips64-elf"); n64_arg(&argv, "-march=mips3"); n64_arg(&argv, "-mabi=o64");
+	n64_arg(&argv, "-mno-abicalls"); n64_arg(&argv, "-Wa,--fatal-warnings");
 	n64_arg(&argv, "-o"); n64_arg(&argv, object);
 	n64_arg(&argv, wrapper_name);
 	return n64_run_tool("rsp-wrap", argv, env, show, false, foreign_dir_c);
