@@ -9,6 +9,7 @@ struct N64BuildSettings {
 	String controllers[4];
 	String assets;
 	String metadata;
+	String pack; // runs `<pack> --n64-tool <tool> ...` in place of the SDK's packaging tools
 	String cflags; // appended to the SDK flags for foreign .c and .S sources
 	bool   rtc;
 };

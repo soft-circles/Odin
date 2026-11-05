@@ -429,6 +429,7 @@ enum BuildFlagKind {
 	BuildFlag_N64Controllers,
 	BuildFlag_N64Assets,
 	BuildFlag_N64Metadata,
+	BuildFlag_N64Pack,
 	BuildFlag_N64CFlags,
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
@@ -798,6 +799,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_N64Controllers,          str_lit("n64-controllers"),           BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Assets,               str_lit("n64-assets"),                BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Metadata,             str_lit("n64-metadata"),              BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Pack,                 str_lit("n64-pack"),                  BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64CFlags,               str_lit("n64-cflags"),                BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
@@ -1543,6 +1545,14 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_N64Metadata:
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (n64_parse_existing_path(STR_LIT("-n64-metadata"), value.value_string, false, &build_context.n64.metadata)) {
+								build_context.n64_rom_options_given = true;
+							} else {
+								bad_flags = true;
+							}
+							break;
+						case BuildFlag_N64Pack:
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (n64_parse_existing_path(STR_LIT("-n64-pack"), value.value_string, false, &build_context.n64.pack)) {
 								build_context.n64_rom_options_given = true;
 							} else {
 								bad_flags = true;
@@ -3666,6 +3676,10 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 		if (print_flag("-n64-metadata:<file>")) {
 			print_usage_line(2, "Passes a libdragon-compatible metadata INI file to n64metadata.");
+		}
+		if (print_flag("-n64-pack:<executable>")) {
+			print_usage_line(2, "Runs <executable> --n64-tool <tool> <arguments> in place of the SDK's mkdfs, n64tool,");
+			print_usage_line(2, "ed64romconfig and n64elfcompress, which the SDK then need not provide.");
 		}
 		if (print_flag("-n64-cflags:<string>")) {
 			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c and .S sources.");

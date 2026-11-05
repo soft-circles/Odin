@@ -51,6 +51,9 @@ accepts `.c` imports on `-target:n64` and still rejects them on the host.
 Further end-to-end tests check that `-extra-linker-flags` reaches the link, that
 an SDK directory whose own name contains spaces packages the same ROM, and that
 the ROM title defaults to the package directory name.
+Two `-n64-pack` tests check that the named executable runs in place of
+the SDK's mkdfs, n64tool, ed64romconfig and n64elfcompress, which the SDK then
+need not hold, and that a non-executable one is rejected.
 The [canonical option table](../../N64_BUILD.md#rom-configuration-options) and
 [maintainer intermediates contract](../../N64_MAINTAINERS.md#intermediates-and-cleanup-guarantees)
 own the behavior exercised here.
