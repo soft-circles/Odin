@@ -740,6 +740,44 @@ class N64EndToEndBuildTests(unittest.TestCase):
 		self.assertIn("N64 packaging step 'sym' failed with exit code 19", result.stdout)
 		self.assertIn("intermediates were retained", result.stdout)
 
+	def test_n64_pack_replaces_the_sdk_packaging_tools(self):
+		sdk = make_sdk_facade(self.root, self.sdk)
+		for tool in ("ed64romconfig", "n64elfcompress", "n64tool"):
+			(sdk / "bin" / tool).unlink()
+		log = self.root / "pack calls.txt"
+		pack = self.root / "pack shim"
+		pack.write_text(
+			"#!/bin/sh\n"
+			f"printf '%s\\n' \"$*\" >> '{log}'\n"
+			"[ \"$1\" = --n64-tool ] || exit 64\n"
+			"tool=$2\nshift 2\n"
+			f"exec '{self.sdk}/bin/'\"$tool\" \"$@\"\n",
+			encoding="utf-8",
+		)
+		pack.chmod(0o755)
+		app = create_app(self.root, "pack app")
+		assets = app / "assets"
+		assets.mkdir()
+		(assets / "message.txt").write_bytes(b"ODIN_N64_PACK_ASSET")
+		output = app / "packed.z64"
+
+		result = run_build(app, f"-n64-inst:{sdk}", f"-n64-assets:{assets}", f"-n64-pack:{pack}", f"-out:{output}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertIn(b"ODIN_N64_PACK_ASSET", output.read_bytes())
+		tools = [line.split()[1] for line in log.read_text(encoding="utf-8").splitlines()]
+		self.assertEqual(tools, ["n64elfcompress", "mkdfs", "n64tool", "ed64romconfig"])
+
+	def test_n64_pack_must_be_executable(self):
+		pack = self.root / "not executable"
+		pack.write_text("#!/bin/sh\n", encoding="utf-8")
+		pack.chmod(0o644)
+
+		result = run_build(create_app(self.root, "pack app"), f"-n64-inst:{self.sdk}", f"-n64-pack:{pack}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("-n64-pack must name an executable", result.stdout)
+
 	def test_incompatible_generic_link_options_are_rejected(self):
 		cases = {
 			"position-independent relocation": ("-reloc-mode:pic", "require -reloc-mode:static"),

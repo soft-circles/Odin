@@ -191,6 +191,7 @@ they apply only to executable ROM output.
 | `-n64-controllers:<list>` | 1–4 semicolon-separated declarations | No controller hints in the advanced homebrew header |
 | `-n64-assets:<directory>` | Existing directory | No DragonFS image is added |
 | `-n64-metadata:<file>` | Existing INI file | No extended metadata is added |
+| `-n64-pack:<executable>` | Existing executable, run as `<executable> --n64-tool <tool> <arguments>` in place of the SDK's `mkdfs`, `n64tool`, `ed64romconfig` and `n64elfcompress` | The SDK's own tools run, and it must provide them |
 | `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c` and `.S` sources get only the SDK's flags |
 | `-out:<path>` | Output file path, with optional `.z64` suffix | Package-directory name plus `.z64` |
 
@@ -437,6 +438,7 @@ replace an existing output.
 | `N64 SDK is not configured` | Set `N64_INST`, pass `-n64-inst:<directory>`, or install the SDK at `<odin root>/n64`. |
 | `missing required file` or `missing required executable tool` | Install the missing SDK component or select the complete SDK root. |
 | `-n64-assets requires ... mkdfs` | Install the libdragon host tools into the selected SDK. |
+| `-n64-pack must name an executable` | Point `-n64-pack` at an executable file. |
 | `-n64-metadata requires ... n64metadata` | Install the libdragon host tools into the selected SDK. |
 | RTC cannot be used with EEPROM | Remove `-n64-rtc` or choose a non-EEPROM save type. |
 | Invalid controller list | Use 1–4 semicolon-separated declarations; keep attachment commas inside one declaration. |

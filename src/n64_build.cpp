@@ -128,7 +128,7 @@ gb_internal String n64_gcc_runtime_dir(String const &sdk_root) {
 	return found;
 }
 
-gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
+gb_internal bool n64_validate_sdk_root(String const &sdk_root, bool packaging_tools) {
 	Array<String> required_files = {};
 	array_init(&required_files, temporary_allocator());
 	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragon.a"));
@@ -139,10 +139,12 @@ gb_internal bool n64_validate_sdk_root(String const &sdk_root) {
 	array_add(&required_files, STR_LIT("mips64-elf/lib/libstdc++.a"));
 	Array<String> required_tools = {};
 	array_init(&required_tools, temporary_allocator());
-	array_add(&required_tools, STR_LIT("bin/ed64romconfig"));
-	array_add(&required_tools, STR_LIT("bin/n64elfcompress"));
+	if (packaging_tools) {
+		array_add(&required_tools, STR_LIT("bin/ed64romconfig"));
+		array_add(&required_tools, STR_LIT("bin/n64elfcompress"));
+		array_add(&required_tools, STR_LIT("bin/n64tool"));
+	}
 	array_add(&required_tools, STR_LIT("bin/n64sym"));
-	array_add(&required_tools, STR_LIT("bin/n64tool"));
 
 	bool valid = true;
 	for (String const &relative_path : required_files) {
@@ -250,10 +252,15 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		gb_printf_err("N64 SDK is not configured; use -n64-inst:<path>, set the N64_INST environment variable, or install the SDK at <odin root>/n64\n");
 		return false;
 	}
-	if (!n64_validate_sdk_root(sdk_root) || !n64_validate_llvm_rom_tools()) {
+	bool packs = request.settings.pack.len > 0;
+	if (!n64_validate_sdk_root(sdk_root, !packs) || !n64_validate_llvm_rom_tools()) {
 		return false;
 	}
-	if (request.settings.assets.len > 0) {
+	if (packs && !n64_sdk_tool_is_executable(request.settings.pack)) {
+		gb_printf_err("-n64-pack must name an executable, got %.*s\n", LIT(request.settings.pack));
+		return false;
+	}
+	if (request.settings.assets.len > 0 && !packs) {
 		String tool = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("bin/mkdfs"));
 		if (!n64_sdk_tool_is_executable(tool)) {
 			gb_printf_err("-n64-assets requires the executable N64 SDK tool bin/mkdfs in %.*s\n", LIT(sdk_root));
@@ -460,6 +467,16 @@ gb_internal void n64_arg(N64Argv *argv, char const *value) {
 
 gb_internal String n64_sdk_path(N64BuildSettings const &settings, char const *relative_path) {
 	return n64_path_join(permanent_allocator(), settings.sdk_root, make_string_c(relative_path));
+}
+
+// Starts argv with -n64-pack's `<pack> --n64-tool <tool>` when given, else with the SDK's bin/<tool>.
+gb_internal void n64_packaging_tool(N64Argv *argv, N64BuildSettings const &settings, char const *tool) {
+	if (settings.pack.len > 0) {
+		n64_arg(argv, settings.pack); n64_arg(argv, "--n64-tool"); n64_arg(argv, tool);
+	} else {
+		gbAllocator a = permanent_allocator();
+		n64_arg(argv, n64_path_join(a, settings.sdk_root, concatenate_strings(a, STR_LIT("bin/"), make_string_c(tool))));
+	}
 }
 
 // -extra-linker-flags reaches the link driver as whitespace-separated words;
@@ -871,7 +888,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 
 	// n64elfcompress -o <dir>/ -c 1 elf.stripped   (rewrites the file in place)
 	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/n64elfcompress"));
+	n64_packaging_tool(&argv, s, "n64elfcompress");
 	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, files.dir, STR_LIT("/")));
 	n64_arg(&argv, "-c"); n64_arg(&argv, "1"); n64_arg(&argv, files.stripped);
 	if ((result = n64_run_tool("elfcompress", argv, env, show)) != 0) return result;
@@ -879,7 +896,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	// mkdfs dfs <assets> >/dev/null
 	if (s.assets.len > 0) {
 		array_init(&argv, a);
-		n64_arg(&argv, n64_sdk_path(s, "bin/mkdfs")); n64_arg(&argv, files.dfs); n64_arg(&argv, s.assets);
+		n64_packaging_tool(&argv, s, "mkdfs"); n64_arg(&argv, files.dfs); n64_arg(&argv, s.assets);
 		if ((result = n64_run_tool("mkdfs", argv, env, show, true)) != 0) return result;
 	}
 
@@ -887,7 +904,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	String title = s.title.len > 0 ? s.title : n64_sanitized_rom_title(request.output_name);
 	n64_remove_file_if_present(files.rom_tmp);
 	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/n64tool"));
+	n64_packaging_tool(&argv, s, "n64tool");
 	n64_arg(&argv, "--toc"); n64_arg(&argv, "--title"); n64_arg(&argv, title);
 	n64_arg(&argv, "--category"); n64_arg(&argv, "N");
 	if (s.region.len > 0) { n64_arg(&argv, "--region"); n64_arg(&argv, s.region); }
@@ -920,7 +937,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 
 	// ed64romconfig N64_ED64ROMCONFIGFLAGS z64.tmp (always runs: --regionfree is a default)
 	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/ed64romconfig"));
+	n64_packaging_tool(&argv, s, "ed64romconfig");
 	if (s.save_type.len > 0) { n64_arg(&argv, "--savetype"); n64_arg(&argv, s.save_type); }
 	if (s.rtc) { n64_arg(&argv, "--rtc"); }
 	n64_arg(&argv, "--regionfree");
