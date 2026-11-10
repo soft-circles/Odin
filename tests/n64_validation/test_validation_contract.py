@@ -124,9 +124,17 @@ class O64ForkRequirement(unittest.TestCase):
     def test_elf64_skips_without_a_fork_expectation(self):
         self.assertEqual(self.require(elf32=False), ["skipped", "skipped"])
 
-    def test_required_fork_turns_elf64_skips_into_failures(self):
-        os.environ["N64_REQUIRE_O64_FORK"] = "1"
-        self.assertEqual(self.require(elf32=False), ["failed", "failed"])
+    def test_elf64_skips_when_the_switch_is_not_1(self):
+        for setting in ({"N64_VALIDATION_MODE": "quick"}, {"N64_REQUIRE_O64_FORK": "0"},
+                        {"N64_REQUIRE_O64_FORK": ""}, {"N64_REQUIRE_O64_FORK": "true"}):
+            with self.subTest(setting), mock.patch.dict(os.environ, setting):
+                self.assertEqual(self.require(elf32=False), ["skipped", "skipped"])
+
+    def test_each_fork_expectation_turns_elf64_skips_into_failures(self):
+        for setting in ({"N64_REQUIRE_O64_FORK": "1"}, {"N64_VALIDATION_MODE": "full"},
+                        {"N64_INST": "/sdk"}, {"MIPS_O64_OBJDUMP": "/sdk/bin/mips64-elf-objdump"}):
+            with self.subTest(setting), mock.patch.dict(os.environ, setting):
+                self.assertEqual(self.require(elf32=False), ["failed", "failed"])
 
     def test_required_fork_runs_checks_on_elf32(self):
         os.environ["N64_REQUIRE_O64_FORK"] = "1"

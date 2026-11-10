@@ -458,7 +458,9 @@ a memory base) and `mnemonic_unavailable_reason`.
 
 [Odin64's toolchain.lock.toml](https://github.com/soft-circles/Odin64/blob/main/toolchain.lock.toml)
 records the default Odin/LLVM, libdragon and runner revisions used for setup.
-The compiler has no duplicate SDK pin constants or lock-drift gate. When changing
+The compiler has no duplicate SDK pin constants or lock-drift gate; the one
+copy is the LLVM fork tarball that
+[n64_llvm_fork.yml](.github/workflows/n64_llvm_fork.yml) pins (see below). When changing
 those defaults, review affected bindings and run compiler and C/Odin ABI tests
 with the selected installation. Keep historical test evidence unchanged.
 
@@ -496,14 +498,16 @@ stages skip there.
 [n64_llvm_fork.yml](.github/workflows/n64_llvm_fork.yml) runs on every PR
 into `n64`. It builds Odin against the prebuilt MIPS O64 LLVM fork and sets
 `N64_REQUIRE_O64_FORK=1`, so the encoding tests, pointer sign extension, large
-aggregates and the `-o:speed` bounds-check stages must run and pass. It
-downloads the tarball from a release of the private soft-circles/Odin64
-repository with the `ODIN64_LLVM_READ_TOKEN` repository secret (read-only
-Contents access to Odin64) and checks a pinned SHA-256. The release tag, asset
-key and SHA-256 follow Odin64's `toolchain.lock.toml` `[llvm]` commit; bump
-them with that pin. Secrets are not passed to PRs from forks, so there, or
-while the secret is unset, the job is skipped with a notice and those PRs get
-only the stock-LLVM run. The "RSP asm
+aggregates and the `-o:speed` bounds-check stages must run and pass. The
+objdump cross-check still skips there (no SDK objdump), and the RSP template
+acceptance tests skip the hosts whose backend the fork does not build (it builds
+MIPS and X86); the stock-LLVM run covers those. It downloads the tarball from a release of the
+private soft-circles/Odin64 repository with the `ODIN64_LLVM_READ_TOKEN`
+repository secret (read-only Contents access to Odin64) and checks a pinned
+SHA-256. The release tag, asset key and SHA-256 follow Odin64's
+`toolchain.lock.toml` `[llvm]` commit; bump them with that pin. GitHub passes
+no secrets to PRs from forks, so those skip the job with a notice and get only
+the stock-LLVM run. Elsewhere a missing secret or release fails the job. The "RSP asm
 templates" stage runs
 [tests/rsp_templates/test_rsp_templates.py](tests/rsp_templates/test_rsp_templates.py):
 checker rejections and acceptance on hosts and the N64, and a golden diff of
