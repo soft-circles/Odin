@@ -15,11 +15,12 @@ permissions:
 jobs:
   # The tarball is a release asset of the private soft-circles/Odin64 repository, read with the repository secret
   # ODIN64_LLVM_READ_TOKEN (a fine-grained token with read-only Contents access to Odin64) in the download step only.
-  # GitHub passes no secrets to PRs from forks, so those skip the fork job with this notice; everywhere else a missing
-  # secret fails the job, so a lapsed token cannot turn the O64 stages off unnoticed.
+  # GitHub passes no secrets to PRs from other repositories, so those skip the fork job with this notice. This repository
+  # is itself a GitHub fork, so head.repo.fork cannot tell them apart; compare repository names. Everywhere else a
+  # download without the secret fails the job (a cache hit needs no download), so a skipped job never hides it.
   fork_pr_notice:
     name: N64 LLVM fork job skipped (PR from a fork)
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - run: |
@@ -29,7 +30,7 @@ jobs:
 
   quick:
     name: N64 quick validation (MIPS O64 LLVM fork)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

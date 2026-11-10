@@ -507,7 +507,8 @@ repository secret (read-only Contents access to Odin64) and checks a pinned
 SHA-256. The release tag, asset key and SHA-256 follow Odin64's
 `toolchain.lock.toml` `[llvm]` commit; bump them with that pin. GitHub passes
 no secrets to PRs from forks, so those skip the job with a notice and get only
-the stock-LLVM run. Elsewhere a missing secret or release fails the job. The "RSP asm
+the stock-LLVM run. Elsewhere, a run that has to download the tarball (no
+cached copy) fails when the secret or release is missing. The "RSP asm
 templates" stage runs
 [tests/rsp_templates/test_rsp_templates.py](tests/rsp_templates/test_rsp_templates.py):
 checker rejections and acceptance on hosts and the N64, and a golden diff of
