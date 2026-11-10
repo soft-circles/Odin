@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -423,6 +427,366 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 		self.assertIn("bin/n64metadata", result.stdout)
 
 
+# Each stub logs one JSON line per call and writes the files its real tool would, so the packaging pipeline runs to a
+# ROM without an SDK or the LLVM fork. A behaviour of "exit:N" or "signal:N" for a tool makes it fail after its outputs.
+STUB_TOOL = r'''
+import json, os, signal, sys
+
+log, behaviours, program, *argv = sys.argv[1:]
+tool = os.path.basename(program)
+if argv[:1] == ["--n64-tool"]:
+	tool = argv[1]
+	arguments = argv[2:]
+else:
+	arguments = argv
+record = {"program": program, "tool": tool, "argv": argv, "cwd": os.getcwd(), "env": dict(os.environ)}
+
+def write(path, data):
+	with open(path, "wb") as file:
+		file.write(data)
+
+def value_after(flag):
+	return arguments[arguments.index(flag) + 1]
+
+if tool in ("ld.lld", "clang"):
+	write(value_after("-o"), b"stub object")
+	for argument in arguments:
+		if argument.startswith("-Map="):
+			write(argument[len("-Map="):], b"stub map")
+elif tool == "n64sym":
+	write(arguments[-1], b"stub symbols")
+	sym_bin = os.path.join(os.environ.get("N64_INST", ""), "bin")
+	record["sym_tools"] = {name: os.path.realpath(os.path.join(sym_bin, name)) for name in ("mips64-elf-objdump", "mips64-elf-addr2line")}
+elif tool == "mkdfs":
+	write(arguments[0], b"stub dfs")
+elif tool == "n64tool":
+	write(value_after("--output"), b"stub rom")
+elif tool == "ed64romconfig":
+	with open(arguments[-1], "ab") as file:
+		file.write(b" configured")
+print(f"stub {tool} ran", flush=True)
+with open(log, "a", encoding="utf-8") as file:
+	file.write(json.dumps(record) + "\n")
+with open(behaviours, encoding="utf-8") as file:
+	behaviour = json.load(file).get(tool, "ok")
+if behaviour.startswith("exit:"):
+	sys.exit(int(behaviour[len("exit:"):]))
+if behaviour.startswith("signal:"):
+	os.kill(os.getpid(), int(behaviour[len("signal:"):]))
+'''
+STUB_LLVM_TOOLS = (*ROM_LLVM_TOOLS, "clang")
+STUB_SDK_TOOLS = (*REQUIRED_SDK_TOOLS, "bin/mkdfs")
+SANITIZED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+class N64StubPackagingTests(unittest.TestCase):
+	"""The packaging pipeline against stub tools, so quick mode covers it without an SDK or the LLVM fork."""
+
+	def setUp(self):
+		if not ODIN.is_file():
+			self.skipTest(f"Odin compiler not found: {ODIN}")
+		self.temporary = tempfile.TemporaryDirectory(prefix="odin n64 stub test ")
+		self.addCleanup(self.temporary.cleanup)
+		self.root = Path(self.temporary.name).resolve()
+		self.log = self.root / "stub calls.jsonl"
+		self.behaviours = self.root / "stub behaviours.json"
+		self.set_behaviours({})
+		script = self.root / "stub tool.py"
+		script.write_text(STUB_TOOL, encoding="utf-8")
+		command = " ".join(shlex.quote(str(part)) for part in (sys.executable, "-I", script, self.log, self.behaviours))
+		self.wrapper = f"#!/bin/sh\nexec {command} \"$0\" \"$@\"\n"
+		self.sdk = self.root / "stub sdk"
+		self.runtime = self.sdk / GCC_RUNTIME / "13.2.0"
+		for relative in REQUIRED_SDK_FILES:
+			(self.sdk / relative).parent.mkdir(parents=True, exist_ok=True)
+			(self.sdk / relative).touch()
+		self.runtime.mkdir(parents=True)
+		for name in ("crti.o", "crtbegin.o", "crtend.o", "crtn.o", "libgcc.a"):
+			(self.runtime / name).touch()
+		for relative in STUB_SDK_TOOLS:
+			self.make_stub(self.sdk / relative)
+		self.include = self.sdk / "mips64-elf/include"
+		self.include.mkdir()
+		for name in ("toolchain.version", "libdragon.version"):
+			(self.include / name).write_text("{}", encoding="utf-8")
+		self.llvm = self.root / "stub llvm"
+		for name in STUB_LLVM_TOOLS:
+			self.make_stub(self.llvm / name)
+		self.pack = self.root / "stub pack"
+		self.make_stub(self.pack)
+		self.inherited = {
+			"N64_GCCPREFIX": str(self.root / "unvalidated toolchain"),
+			"N64_INST": str(self.root / "unvalidated sdk"),
+			"CPATH": str(self.root / "unvalidated include"),
+			"LIBRARY_PATH": str(self.root / "unvalidated lib"),
+			"GCC_EXEC_PREFIX": str(self.root / "unvalidated gcc"),
+			"CCC_OVERRIDE_OPTIONS": "+-DODIN_UNEXPECTED",
+			"ODIN_N64_STUB_INHERITED": "kept",
+			# Nothing reads these now that no make or shell runs; the exact link argv shows they add nothing.
+			"LDFLAGS": f"-L{self.root / 'missing libs'} -lno-such-library",
+			"CFLAGS": "-DODIN_UNEXPECTED",
+			"ASFLAGS": "--no-such-assembler-flag",
+		}
+
+	def make_stub(self, path: Path):
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(self.wrapper, encoding="utf-8")
+		path.chmod(0o755)
+
+	def set_behaviours(self, behaviours: dict[str, str]):
+		self.behaviours.write_text(json.dumps(behaviours), encoding="utf-8")
+
+	def build(self, app: Path, output: Path, *arguments: str, extra_env: dict[str, str] | None = None):
+		environment = {"ODIN_N64_LLVM_BIN": str(self.llvm), **(extra_env or {})}
+		return run_build(app, f"-n64-inst:{self.sdk}", f"-out:{output}", *arguments, extra_env=environment)
+
+	def calls(self) -> list[dict]:
+		if not self.log.exists():
+			return []
+		return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+	def intermediates(self, output: Path) -> Path:
+		return output.parent / f"{output.stem}.n64-build"
+
+	def assert_sanitized_environment(self, call: dict):
+		environment = call["env"]
+		self.assertEqual(environment.get("PATH"), SANITIZED_PATH)
+		self.assertEqual(environment.get("SHELL"), "/bin/sh")
+		self.assertEqual(environment.get("ODIN_N64_STUB_INHERITED"), "kept")
+		for key in ("CPATH", "LIBRARY_PATH", "GCC_EXEC_PREFIX", "N64_GCCPREFIX", "CCC_OVERRIDE_OPTIONS"):
+			self.assertFalse(key in environment, key)
+		if call["tool"] != "n64sym":
+			self.assertFalse("N64_INST" in environment)
+
+	def test_each_step_gets_its_argv_and_a_sanitized_environment_in_order(self):
+		app = create_app(self.root)
+		output = app / "stub.z64"
+		build = self.intermediates(output)
+
+		result = self.build(app, output, extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[(call["program"], call["tool"]) for call in calls],
+			[
+				(str(self.llvm / "ld.lld"), "ld.lld"),
+				(str(self.sdk / "bin/n64sym"), "n64sym"),
+				(str(self.llvm / "llvm-strip"), "llvm-strip"),
+				(str(self.sdk / "bin/n64elfcompress"), "n64elfcompress"),
+				(str(self.sdk / "bin/n64tool"), "n64tool"),
+				(str(self.sdk / "bin/ed64romconfig"), "ed64romconfig"),
+			],
+		)
+		link, sym, strip, compress, n64tool, romconfig = calls
+		elf, stripped, rom_tmp = build / "odin-n64.elf", build / "odin-n64.elf.stripped", build / "odin-n64.z64.tmp"
+		self.assertEqual(
+			link["argv"][:7],
+			["-EB", "-o", str(elf), str(self.runtime / "crti.o"), str(self.runtime / "crtbegin.o"),
+			 f"-L{self.runtime}", f"-L{self.sdk / 'mips64-elf/lib'}"],
+		)
+		objects = link["argv"][7:link["argv"].index("-ldragon")]
+		self.assertTrue(objects and all(path.endswith(".o") for path in objects), link["argv"])
+		self.assertEqual(
+			link["argv"][7 + len(objects):],
+			["-ldragon", "-lm", "-ldragonsys", "-Tn64.ld", "--gc-sections", "--wrap", "__do_global_ctors",
+			 "-z", "max-page-size=4096", f"-Map={build / 'odin-n64.map'}", "--cref",
+			 "-lstdc++", "-lm", "-lc", "-lgcc", str(self.runtime / "crtend.o"), str(self.runtime / "crtn.o")],
+		)
+		self.assertEqual(sym["argv"], ["--all", "odin-n64.elf", "odin-n64.elf.sym"])
+		self.assertEqual(sym["cwd"], str(build))
+		self.assertEqual(sym["env"].get("N64_INST"), "n64sym")
+		self.assertEqual(
+			sym["sym_tools"],
+			{"mips64-elf-objdump": str(self.llvm / "llvm-objdump"), "mips64-elf-addr2line": str(self.llvm / "llvm-addr2line")},
+		)
+		self.assertEqual(strip["argv"], ["-s", str(stripped)])
+		self.assertEqual(compress["argv"], ["-o", f"{build}/", "-c", "1", str(stripped)])
+		self.assertEqual(
+			n64tool["argv"],
+			["--toc", "--title", "app", "--category", "N", "--output", str(rom_tmp), "--align", "256",
+			 str(stripped), str(build / "odin-n64.elf.sym"),
+			 str(self.include / "libdragon.version"), str(self.include / "toolchain.version")],
+		)
+		self.assertEqual(romconfig["argv"], ["--regionfree", str(rom_tmp)])
+		for call in calls:
+			with self.subTest(tool=call["tool"]):
+				self.assert_sanitized_environment(call)
+
+	def test_assets_reach_the_sdk_mkdfs_between_compression_and_n64tool(self):
+		app = create_app(self.root)
+		assets = app / "spaced assets"
+		assets.mkdir()
+		(assets / "message.txt").write_text("asset", encoding="utf-8")
+		output = app / "assets.z64"
+		build = self.intermediates(output)
+
+		result = self.build(app, output, f"-n64-assets:{assets}", extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[call["tool"] for call in calls],
+			["ld.lld", "n64sym", "llvm-strip", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig"],
+		)
+		mkdfs = calls[4]
+		self.assertEqual(mkdfs["program"], str(self.sdk / "bin/mkdfs"))
+		self.assertEqual(mkdfs["argv"], [str(build / "odin-n64.dfs"), str(assets)])
+		self.assert_sanitized_environment(mkdfs)
+		self.assertEqual(calls[5]["argv"][-3], str(build / "odin-n64.dfs"))
+		self.assertNotIn("stub mkdfs ran", result.stdout)
+
+	def test_a_failing_step_keeps_the_intermediates_and_the_previous_rom(self):
+		app = create_app(self.root)
+		output = app / "stub.z64"
+		output.write_bytes(b"previous rom")
+		build = self.intermediates(output)
+		self.set_behaviours({"n64tool": "exit:7"})
+
+		result = self.build(app, output)
+
+		self.assertEqual(result.returncode, 7, result.stdout)
+		self.assertIn("N64 packaging step 'n64tool' failed with exit code 7", result.stdout)
+		self.assertIn(f"N64 build failed; intermediates were retained at {build}\n", result.stdout)
+		self.assertEqual(output.read_bytes(), b"previous rom")
+		for name in ("odin-n64.elf", "odin-n64.elf.sym", "odin-n64.elf.stripped", "odin-n64.z64.tmp"):
+			self.assertTrue((build / name).is_file(), name)
+		self.assertNotIn("ed64romconfig", [call["tool"] for call in self.calls()])
+
+	def test_success_places_the_rom_and_removes_the_intermediates(self):
+		app = create_app(self.root)
+		output = app / "stub.z64"
+		output.write_bytes(b"previous rom")
+
+		result = self.build(app, output)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes(), b"stub rom configured")
+		self.assertEqual(list(app.glob("*.n64-build")), [])
+
+	def test_keep_temp_files_retains_the_intermediates_after_success(self):
+		app = create_app(self.root)
+		output = app / "stub.z64"
+		build = self.intermediates(output)
+
+		result = self.build(app, output, "-keep-temp-files")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"Retained N64 build intermediates: {build}\n", result.stdout)
+		self.assertTrue((build / "odin-n64.elf").is_file())
+		self.assertFalse((build / "odin-n64.z64.tmp").exists())
+		self.assertEqual(output.read_bytes(), b"stub rom configured")
+
+	def test_source_and_output_paths_with_spaces(self):
+		app = self.root / "spaced source dir" / "spaced app"
+		app.mkdir(parents=True)
+		(app / "helper source.c").write_text("int helper(void) { return 1; }\n", encoding="utf-8")
+		(app / "main.odin").write_text(
+			"package spaced_app\n\n"
+			"foreign import lib \"helper source.c\"\n"
+			"@(default_calling_convention=\"c\")\n"
+			"foreign lib {\n\thelper :: proc() -> i32 ---\n}\n\n"
+			"main :: proc() { helper() }\n",
+			encoding="utf-8",
+		)
+		output = self.root / "rom output dir" / "spaced rom.z64"
+		output.parent.mkdir()
+		build = self.intermediates(output)
+
+		result = self.build(app, output, extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes(), b"stub rom configured")
+		self.assertFalse(build.exists())
+		self.assertEqual(
+			[call["tool"] for call in self.calls()],
+			["clang", "ld.lld", "n64sym", "llvm-strip", "n64elfcompress", "n64tool", "ed64romconfig"],
+		)
+		calls = {call["tool"]: call for call in self.calls()}
+		self.assert_sanitized_environment(calls["clang"])
+		compile_ = calls["clang"]
+		self.assertEqual(compile_["cwd"], str(app))
+		self.assertEqual(compile_["argv"][-3:], ["-o", str(build / "foreign/0-helper source.o"), "helper source.c"])
+		self.assertIn(f"-ffile-prefix-map={app}=", compile_["argv"])
+		link = calls["ld.lld"]["argv"]
+		self.assertEqual(link[1:3], ["-o", str(build / "odin-n64.elf")])
+		self.assertIn(str(build / "foreign/0-helper source.o"), link)
+		self.assertEqual(calls["n64tool"]["argv"][1:3], ["--title", "spaced app"])
+		self.assertEqual(calls["ed64romconfig"]["argv"], ["--regionfree", str(build / "odin-n64.z64.tmp")])
+
+	def test_a_tool_killed_by_a_signal_maps_to_128_plus_the_signal(self):
+		app = create_app(self.root)
+		output = app / "stub.z64"
+		output.write_bytes(b"previous rom")
+		self.set_behaviours({"n64elfcompress": f"signal:{int(signal.SIGKILL)}"})
+
+		result = self.build(app, output)
+
+		code = 128 + int(signal.SIGKILL)
+		self.assertEqual(result.returncode, code, result.stdout)
+		self.assertIn(f"N64 packaging subprocess terminated by signal {int(signal.SIGKILL)}", result.stdout)
+		self.assertIn(f"N64 packaging step 'elfcompress' failed with exit code {code}", result.stdout)
+		self.assertIn(f"intermediates were retained at {self.intermediates(output)}\n", result.stdout)
+		self.assertEqual(output.read_bytes(), b"previous rom")
+
+	def test_n64_pack_runs_each_sdk_packaging_tool_as_n64_tool(self):
+		for tool in ("ed64romconfig", "n64elfcompress", "n64tool", "mkdfs"):
+			(self.sdk / "bin" / tool).unlink()
+		app = create_app(self.root)
+		assets = app / "spaced assets"
+		assets.mkdir()
+		(assets / "message.txt").write_text("asset", encoding="utf-8")
+		output = app / "packed.z64"
+		build = self.intermediates(output)
+		stripped, rom_tmp, dfs = build / "odin-n64.elf.stripped", build / "odin-n64.z64.tmp", build / "odin-n64.dfs"
+
+		result = self.build(app, output, f"-n64-assets:{assets}", f"-n64-pack:{self.pack}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes(), b"stub rom configured")
+		calls = self.calls()
+		self.assertEqual(
+			[(Path(call["program"]).name, call["tool"]) for call in calls],
+			[("ld.lld", "ld.lld"), ("n64sym", "n64sym"), ("llvm-strip", "llvm-strip"),
+			 ("stub pack", "n64elfcompress"), ("stub pack", "mkdfs"), ("stub pack", "n64tool"), ("stub pack", "ed64romconfig")],
+		)
+		packed = {call["tool"]: call["argv"] for call in calls if call["program"] == str(self.pack)}
+		self.assertEqual(packed["n64elfcompress"], ["--n64-tool", "n64elfcompress", "-o", f"{build}/", "-c", "1", str(stripped)])
+		self.assertEqual(packed["mkdfs"], ["--n64-tool", "mkdfs", str(dfs), str(assets)])
+		self.assertEqual(
+			packed["n64tool"],
+			["--n64-tool", "n64tool", "--toc", "--title", "app", "--category", "N", "--output", str(rom_tmp),
+			 "--align", "256", str(stripped), str(build / "odin-n64.elf.sym"), str(dfs),
+			 str(self.include / "libdragon.version"), str(self.include / "toolchain.version")],
+		)
+		self.assertEqual(packed["ed64romconfig"], ["--n64-tool", "ed64romconfig", "--regionfree", str(rom_tmp)])
+		# mkdfs's stdout is discarded as n64.mk's `>/dev/null` does; the other tools' output reaches the user.
+		self.assertNotIn("stub mkdfs ran", result.stdout)
+		self.assertIn("stub n64tool ran", result.stdout)
+
+	def test_inherited_clang_driver_overrides_do_not_reach_the_tools(self):
+		app = self.root / "override app"
+		app.mkdir()
+		(app / "helper.c").write_text("int helper(void) { return 1; }\n", encoding="utf-8")
+		(app / "main.odin").write_text(
+			"package override_app\n\n"
+			"foreign import lib \"helper.c\"\n"
+			"@(default_calling_convention=\"c\")\n"
+			"foreign lib {\n\thelper :: proc() -> i32 ---\n}\n\n"
+			"main :: proc() { helper() }\n",
+			encoding="utf-8",
+		)
+
+		result = self.build(app, app / "override.z64", extra_env={"CCC_OVERRIDE_OPTIONS": "+-DODIN_UNEXPECTED"})
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertIn("clang", [call["tool"] for call in calls])
+		for call in calls:
+			with self.subTest(tool=call["tool"]):
+				self.assertFalse("CCC_OVERRIDE_OPTIONS" in call["env"])
+
+
 class N64EndToEndBuildTests(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -699,25 +1063,6 @@ class N64EndToEndBuildTests(unittest.TestCase):
 			extra_env={
 				"N64_GCCPREFIX": str(self.root / "unvalidated toolchain"),
 				"N64_INST": str(self.root / "unvalidated sdk"),
-			},
-		)
-
-		self.assertEqual(result.returncode, 0, result.stdout)
-		self.assertTrue(output.is_file(), result.stdout)
-
-	def test_inherited_compiler_and_linker_flags_do_not_reach_the_sdk_link(self):
-		app = create_app(self.root, "inherited flags app")
-		output = app / "flags.z64"
-
-		result = run_build(
-			app,
-			f"-n64-inst:{self.sdk}",
-			f"-out:{output}",
-			extra_env={
-				"LDFLAGS": f"-L{self.root / 'missing libs'} -lno-such-library",
-				"CFLAGS": "-DODIN_UNEXPECTED",
-				"CXXFLAGS": "-DODIN_UNEXPECTED",
-				"ASFLAGS": "--no-such-assembler-flag",
 			},
 		)
 

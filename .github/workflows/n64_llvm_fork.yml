@@ -1,0 +1,104 @@
+name: N64 LLVM fork
+# ci.yml builds Odin with stock LLVM, which writes ELF64 n64-ABI objects for -target:n64, so the O64-only checks skip
+# there. This job builds Odin against the MIPS O64 LLVM fork and runs the same quick stages with those skips turned
+# into failures (N64_REQUIRE_O64_FORK=1). ci.yml stays as it is: the compiler must keep building without the fork.
+on:
+  pull_request:
+    branches: [n64]
+  push:
+    branches: [n64]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The tarball is a release asset of the private soft-circles/Odin64 repository, read with the repository secret
+  # ODIN64_LLVM_READ_TOKEN (a fine-grained token with read-only Contents access to Odin64) in the download step only.
+  # GitHub passes no secrets to PRs from other repositories, so those skip the fork job with this notice. This repository
+  # is itself a GitHub fork, so head.repo.fork cannot tell them apart; compare repository names. Everywhere else a
+  # download without the secret fails the job (a cache hit needs no download), so a skipped job never hides it.
+  fork_pr_notice:
+    name: N64 LLVM fork job skipped (PR from a fork)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          message="PRs from forks get no ODIN64_LLVM_READ_TOKEN, so the MIPS O64 LLVM fork job is skipped; ci.yml's stock-LLVM quick run still applies"
+          echo "::notice title=LLVM fork job skipped::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
+  quick:
+    name: N64 quick validation (MIPS O64 LLVM fork)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The prebuilt LLVM fork for linux-amd64, release LLVM_FORK_TAG of soft-circles/Odin64, asset
+      # LLVM_FORK_KEY.tar.zst. Source of truth: Odin64's toolchain.lock.toml [llvm] commit
+      # (61c3a66050a43a529293b7b6fe0d03811a1ff8c6); Odin64's tools/toolchain/llvm-key.sh names the key and tag
+      # (ODIN64_LLVM_PLATFORM=linux-amd64) and tools/toolchain/llvm-prebuilt.sh publishes the asset and its .sha256.
+      # Bump the key, tag and SHA-256 together when that pin moves.
+      LLVM_FORK_REPOSITORY: soft-circles/Odin64
+      LLVM_FORK_TAG: toolchain-llvm-linux-amd64-61c3a66050a4-7f9d1726d264e598
+      LLVM_FORK_KEY: odin64-llvm-v1-linux-amd64-61c3a66050a4-7f9d1726d264e598
+      LLVM_FORK_SHA256: ac2346f8b091e1f644ed3b1155b410f70d3670b194bcd58bcaa358169d002f04
+      N64_REQUIRE_O64_FORK: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 zstd libzstd-dev libxml2-dev zlib1g-dev
+
+      # The cache holds the verified tarball, not the extracted tree, and every run checks it against the pin.
+      - name: Restore the pinned LLVM fork tarball
+        id: llvm_cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/llvm-download
+          key: ${{ env.LLVM_FORK_KEY }}-${{ env.LLVM_FORK_SHA256 }}
+
+      - name: Download the pinned LLVM fork tarball
+        if: steps.llvm_cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ODIN64_LLVM_READ_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error title=ODIN64_LLVM_READ_TOKEN missing::set the repository secret ODIN64_LLVM_READ_TOKEN (read-only Contents access to $LLVM_FORK_REPOSITORY)"
+            exit 1
+          fi
+          gh release download "$LLVM_FORK_TAG" --repo "$LLVM_FORK_REPOSITORY" --pattern "$LLVM_FORK_KEY.tar.zst" \
+            --dir "$RUNNER_TEMP/llvm-download"
+
+      - name: Verify and extract the LLVM fork
+        run: |
+          archive="$RUNNER_TEMP/llvm-download/$LLVM_FORK_KEY.tar.zst"
+          echo "$LLVM_FORK_SHA256  $archive" | sha256sum --check
+          zstd -dc "$archive" | tar -xf - -C "$RUNNER_TEMP"
+          echo "LLVM_CONFIG=$RUNNER_TEMP/llvm/bin/llvm-config" >> "$GITHUB_ENV"
+
+      # build_odin.sh links libLLVM.so with only an $ORIGIN rpath, so record the fork's libdir too.
+      - name: Build Odin against the LLVM fork
+        env:
+          CXX: clang++-18
+        run: |
+          "$LLVM_CONFIG" --version --targets-built
+          LDFLAGS="-Wl,-rpath,$("$LLVM_CONFIG" --libdir)" ./build_odin.sh release
+          ./odin version
+
+      - name: N64 quick validation
+        run: |
+          python3 tests/n64_validation/test_validation_contract.py
+          python3 tests/n64_validate.py quick
+
+      - name: Retain N64 validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: n64-quick-validation-llvm-fork-${{ github.run_id }}
+          path: .n64-validation-artifacts/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
