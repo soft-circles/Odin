@@ -490,25 +490,7 @@ tests skip with "compiler emits ELF64: not the MIPS O64 LLVM fork". This
 covers the encodings, the branch interpreter, delay slots, labels and the
 `ext` encodings in the target-feature tests. When `N64_INST`,
 `MIPS_O64_OBJDUMP` or `N64_REQUIRE_O64_FORK=1` is set, or in full mode, an
-ELF64 object fails these tests instead of skipping them.
-
-CI runs quick mode twice. [ci.yml](.github/workflows/ci.yml) builds Odin with
-stock LLVM, so the compiler stays buildable without the fork, and the O64-only
-stages skip there.
-[n64_llvm_fork.yml](.github/workflows/n64_llvm_fork.yml) runs on every PR
-into `n64`. It builds Odin against the prebuilt MIPS O64 LLVM fork and sets
-`N64_REQUIRE_O64_FORK=1`, so the encoding tests, pointer sign extension, large
-aggregates and the `-o:speed` bounds-check stages must run and pass. The
-objdump cross-check still skips there (no SDK objdump), and the RSP template
-acceptance tests skip the hosts whose backend the fork does not build (it builds
-MIPS and X86); the stock-LLVM run covers those. It downloads the tarball from a release of the
-private soft-circles/Odin64 repository with the `ODIN64_LLVM_READ_TOKEN`
-repository secret (read-only Contents access to Odin64) and checks a pinned
-SHA-256. The release tag, asset key and SHA-256 follow Odin64's
-`toolchain.lock.toml` `[llvm]` commit; bump them with that pin. GitHub passes
-no secrets to PRs from forks, so those skip the job with a notice and get only
-the stock-LLVM run. Elsewhere, a run that has to download the tarball (no
-cached copy) fails when the secret or release is missing. The "RSP asm
+ELF64 object fails these tests instead of skipping them. The "RSP asm
 templates" stage runs
 [tests/rsp_templates/test_rsp_templates.py](tests/rsp_templates/test_rsp_templates.py):
 checker rejections and acceptance on hosts and the N64, and a golden diff of
@@ -521,6 +503,24 @@ emit. The "float abs lowering" stage runs
 [tests/n64_float_abs/test_float_abs.py](tests/n64_float_abs/test_float_abs.py),
 which builds and runs a host program: with a Mips-only LLVM, set `HOST_ODIN` to
 a host-capable build of the same revision.
+
+CI runs quick mode twice. [ci.yml](.github/workflows/ci.yml) builds Odin with
+stock LLVM, so the compiler stays buildable without the fork, and the O64-only
+stages skip there.
+[n64_llvm_fork.yml](.github/workflows/n64_llvm_fork.yml) runs on every PR
+into `n64`. It builds Odin against the prebuilt MIPS O64 LLVM fork and sets
+`N64_REQUIRE_O64_FORK=1`, so the encoding tests, pointer sign extension, large
+aggregates and the `-o:speed` bounds-check stages must run and pass. The
+objdump cross-check still skips there (no SDK objdump), and the RSP template
+acceptance tests and the generic asm-template checker skip the hosts whose backend the fork does not build (it builds
+MIPS and X86); the stock-LLVM run covers those. It downloads the tarball from a release of the
+private soft-circles/Odin64 repository with the `ODIN64_LLVM_READ_TOKEN`
+repository secret (read-only Contents access to Odin64) and checks a pinned
+SHA-256. The release tag, asset key and SHA-256 follow Odin64's
+`toolchain.lock.toml` `[llvm]` commit; bump them with that pin. GitHub passes
+no secrets to PRs from forks, so those skip the job with a notice and get only
+the stock-LLVM run. Elsewhere, a run that has to download the tarball (no
+cached copy) fails when the secret or release is missing.
 
 The pointer sign-extension, large aggregate argument and optimized
 bounds-check stages read machine code that only the O64 fork generates: stock
