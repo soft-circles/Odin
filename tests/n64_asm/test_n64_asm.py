@@ -17,9 +17,10 @@ with the SDK's objdump as a cross-check; otherwise that test is skipped.
 
 Instruction words are read from ELF32 objects, which only the MIPS O64 LLVM fork
 writes; stock LLVM writes an ELF64 n64-ABI object for -target:n64. With a stock
-compiler (quick mode in CI) the object checks skip and the IR, constraint,
-checker and feature checks still run. In full mode, or when N64_INST or
-MIPS_O64_OBJDUMP is set, the fork is expected and an ELF64 object fails instead.
+compiler (CI's stock-LLVM quick job) the object checks skip and the IR,
+constraint, checker and feature checks still run. In full mode, or when N64_INST,
+MIPS_O64_OBJDUMP or N64_REQUIRE_O64_FORK=1 (CI's LLVM-fork job) is set, the fork
+is expected and an ELF64 object fails instead.
 """
 import functools
 import os
@@ -127,7 +128,8 @@ NOT_O64_FORK = ("compiler emits ELF64: not the MIPS O64 LLVM fork; "
 def o64_fork_expected():
     """Full mode and an SDK both come with the O64 fork, so ELF64 output is a failure there."""
     return (os.environ.get("N64_VALIDATION_MODE") == "full"
-            or bool(os.environ.get("N64_INST")) or bool(os.environ.get("MIPS_O64_OBJDUMP")))
+            or bool(os.environ.get("N64_INST")) or bool(os.environ.get("MIPS_O64_OBJDUMP"))
+            or os.environ.get("N64_REQUIRE_O64_FORK") == "1")
 
 
 @functools.lru_cache(maxsize=None)
@@ -149,7 +151,7 @@ def require_o64_objects(test):
     if emits_elf32_objects():
         return
     if o64_fork_expected():
-        test.fail(f"{NOT_O64_FORK}; N64_VALIDATION_MODE=full, N64_INST or MIPS_O64_OBJDUMP requires the fork")
+        test.fail(f"{NOT_O64_FORK}; N64_VALIDATION_MODE=full, N64_INST, MIPS_O64_OBJDUMP or N64_REQUIRE_O64_FORK=1 requires the fork")
     test.skipTest(NOT_O64_FORK)
 
 
