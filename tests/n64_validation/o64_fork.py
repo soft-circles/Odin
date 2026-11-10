@@ -2,8 +2,8 @@
 
 Stock LLVM lowers -target:n64 with the n64 ABI's 64-bit pointers and writes ELF64 objects, so the assembly it
 generates for the fork's O64 IR (32-bit pointers, aggregates in 8-byte slots) says nothing about the N64 build.
-CI's quick mode builds with stock LLVM and these checks skip there. Full mode and an SDK both come with the fork,
-so stock output fails instead.
+CI's stock-LLVM quick job skips these checks. Full mode, an SDK and CI's LLVM-fork job (N64_REQUIRE_O64_FORK=1) all
+come with the fork, so stock output fails instead.
 """
 import functools
 import os
@@ -17,7 +17,8 @@ NOT_O64_FORK = "compiler emits ELF64: not the MIPS O64 LLVM fork; checked in ful
 
 def o64_fork_expected():
     return (os.environ.get("N64_VALIDATION_MODE") == "full"
-            or bool(os.environ.get("N64_INST")) or bool(os.environ.get("MIPS_O64_OBJDUMP")))
+            or bool(os.environ.get("N64_INST")) or bool(os.environ.get("MIPS_O64_OBJDUMP"))
+            or os.environ.get("N64_REQUIRE_O64_FORK") == "1")
 
 
 @functools.lru_cache(maxsize=None)
@@ -37,6 +38,6 @@ def require_o64_fork(odin):
     if emits_elf32_objects(odin):
         return
     if o64_fork_expected():
-        raise AssertionError(f"{NOT_O64_FORK}; N64_VALIDATION_MODE=full, N64_INST or MIPS_O64_OBJDUMP "
-                             "requires the fork")
+        raise AssertionError(f"{NOT_O64_FORK}; N64_VALIDATION_MODE=full, N64_INST, MIPS_O64_OBJDUMP or "
+                             "N64_REQUIRE_O64_FORK=1 requires the fork")
     raise unittest.SkipTest(NOT_O64_FORK)

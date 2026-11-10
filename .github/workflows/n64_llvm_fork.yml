@@ -1,0 +1,116 @@
+name: N64 LLVM fork
+# ci.yml builds Odin with stock LLVM, which writes ELF64 n64-ABI objects for -target:n64, so the O64-only checks skip
+# there. This job builds Odin against the MIPS O64 LLVM fork and runs the same quick stages with those skips turned
+# into failures (N64_REQUIRE_O64_FORK=1). ci.yml stays as it is: the compiler must keep building without the fork.
+on:
+  pull_request:
+    branches: [n64]
+  push:
+    branches: [n64]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The tarball is a release asset of the private soft-circles/Odin64 repository. The repository secret
+  # ODIN64_LLVM_READ_TOKEN, a fine-grained token with read-only Contents access to it, downloads it. Secrets are not
+  # passed to PRs from forks, so without the secret the fork job is skipped with a notice instead of failing.
+  token:
+    name: Check for the LLVM fork download token
+    runs-on: ubuntu-24.04
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.ODIN64_LLVM_READ_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            message="ODIN64_LLVM_READ_TOKEN is not available (unset, or a PR from a fork); skipping the LLVM fork job"
+            echo "::notice title=LLVM fork job skipped::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  quick:
+    name: N64 quick validation (MIPS O64 LLVM fork)
+    needs: token
+    if: needs.token.outputs.present == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The prebuilt LLVM fork for linux-amd64, release LLVM_FORK_TAG of soft-circles/Odin64, asset
+      # LLVM_FORK_KEY.tar.zst. Source of truth: Odin64's toolchain.lock.toml [llvm] commit
+      # (61c3a66050a43a529293b7b6fe0d03811a1ff8c6); Odin64's tools/toolchain/llvm-key.sh names the key and tag
+      # (ODIN64_LLVM_PLATFORM=linux-amd64) and tools/toolchain/llvm-prebuilt.sh publishes the asset and its .sha256.
+      # Bump the key, tag and SHA-256 together when that pin moves.
+      LLVM_FORK_REPOSITORY: soft-circles/Odin64
+      LLVM_FORK_TAG: toolchain-llvm-linux-amd64-61c3a66050a4-7f9d1726d264e598
+      LLVM_FORK_KEY: odin64-llvm-v1-linux-amd64-61c3a66050a4-7f9d1726d264e598
+      LLVM_FORK_SHA256: ac2346f8b091e1f644ed3b1155b410f70d3670b194bcd58bcaa358169d002f04
+      N64_REQUIRE_O64_FORK: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 zstd libzstd-dev libxml2-dev zlib1g-dev
+
+      - name: Restore the pinned LLVM fork
+        id: llvm_cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/llvm
+          key: ${{ env.LLVM_FORK_KEY }}-${{ env.LLVM_FORK_SHA256 }}
+
+      - name: Download the pinned LLVM fork
+        if: steps.llvm_cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ODIN64_LLVM_READ_TOKEN }}
+        run: |
+          archive="$RUNNER_TEMP/$LLVM_FORK_KEY.tar.zst"
+          gh release download "$LLVM_FORK_TAG" --repo "$LLVM_FORK_REPOSITORY" --pattern "$LLVM_FORK_KEY.tar.zst" \
+            --dir "$RUNNER_TEMP"
+          echo "$LLVM_FORK_SHA256  $archive" | sha256sum --check
+          zstd -dc "$archive" | tar -xf - -C "$RUNNER_TEMP"
+          rm "$archive"
+
+      - name: Build Odin against the LLVM fork
+        env:
+          CXX: clang++-18
+        run: |
+          export LLVM_CONFIG="$RUNNER_TEMP/llvm/bin/llvm-config"
+          "$LLVM_CONFIG" --version --targets-built
+          ./build_odin.sh release
+          ./odin version
+
+      - name: Check the compiler writes ELF32 O64 objects
+        run: |
+          probe="$RUNNER_TEMP/probe"
+          mkdir -p "$probe"
+          printf 'package probe\n\n@(export) probe :: proc "contextless" () {}\n' > "$probe/probe.odin"
+          ./odin build "$probe" -target:n64 -build-mode:obj -no-entry-point -use-single-module -out:"$probe/probe.o"
+          class=$(od -An -tu1 -j4 -N1 "$probe/probe.o" | tr -d ' ')
+          if [ "$class" != 1 ]; then
+            echo "::error title=Not the O64 fork::-target:n64 wrote an ELF class $class object; the fork writes ELF32 (1)"
+            exit 1
+          fi
+
+      - name: N64 quick validation
+        run: |
+          python3 tests/n64_validation/test_validation_contract.py
+          python3 tests/n64_validate.py quick
+
+      - name: Retain N64 validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: n64-quick-validation-llvm-fork-${{ github.run_id }}
+          path: .n64-validation-artifacts/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

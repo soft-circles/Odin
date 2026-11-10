@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Guard standalone compiler validation ownership and failure behavior."""
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("compiler_validation", ROOT / "tests/n64_validate.py")
@@ -75,6 +77,60 @@ class ValidationContract(unittest.TestCase):
         self.assertNotIn("odin64:", contents)
         for marker in ("GENERAL_ALLOCATOR", "TEMP_ALLOCATOR", "ALLOCATOR_REPLACEABILITY", "CLEANUP"):
             self.assertIn(marker, contents)
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+FORK_ENVIRONMENT = ("N64_VALIDATION_MODE", "N64_INST", "MIPS_O64_OBJDUMP", "N64_REQUIRE_O64_FORK")
+
+class O64ForkRequirement(unittest.TestCase):
+    """CI's fork job sets N64_REQUIRE_O64_FORK=1 so ELF64 output fails the O64-only checks instead of skipping them."""
+
+    def setUp(self):
+        self.stage = load("o64_fork", "tests/n64_validation/o64_fork.py")
+        self.asm = load("n64_asm", "tests/n64_asm/test_n64_asm.py")
+        environment = {key: value for key, value in os.environ.items() if key not in FORK_ENVIRONMENT}
+        patcher = mock.patch.dict(os.environ, environment, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def require(self, elf32):
+        """Run both fork gates against a compiler that writes ELF32 (`elf32`) or ELF64 objects."""
+        outcomes = []
+        with mock.patch.object(self.stage, "emits_elf32_objects", return_value=elf32):
+            try:
+                self.stage.require_o64_fork("odin")
+                outcomes.append("ran")
+            except unittest.SkipTest:
+                outcomes.append("skipped")
+            except AssertionError:
+                outcomes.append("failed")
+        test = mock.Mock(spec=unittest.TestCase)
+        test.fail.side_effect = AssertionError
+        test.skipTest.side_effect = unittest.SkipTest
+        with mock.patch.object(self.asm, "emits_elf32_objects", return_value=elf32):
+            try:
+                self.asm.require_o64_objects(test)
+                outcomes.append("ran")
+            except unittest.SkipTest:
+                outcomes.append("skipped")
+            except AssertionError:
+                outcomes.append("failed")
+        return outcomes
+
+    def test_elf64_skips_without_a_fork_expectation(self):
+        self.assertEqual(self.require(elf32=False), ["skipped", "skipped"])
+
+    def test_required_fork_turns_elf64_skips_into_failures(self):
+        os.environ["N64_REQUIRE_O64_FORK"] = "1"
+        self.assertEqual(self.require(elf32=False), ["failed", "failed"])
+
+    def test_required_fork_runs_checks_on_elf32(self):
+        os.environ["N64_REQUIRE_O64_FORK"] = "1"
+        self.assertEqual(self.require(elf32=True), ["ran", "ran"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
