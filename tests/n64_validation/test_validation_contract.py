@@ -50,6 +50,22 @@ class ValidationContract(unittest.TestCase):
         self.assertIn("N64_VALIDATION_MODE", text)
         self.assertIn("quick", text)
 
+    def test_quick_runs_asm_check_and_float_abs_with_the_built_compiler(self):
+        stages = {stage.name: stage for stage in driver.quick_stages()}
+        for name, script in (("generic asm-template checker", "tests/asm_check/test_asm_check.py"),
+                             ("float abs lowering", "tests/n64_float_abs/test_float_abs.py")):
+            with self.subTest(stage=name):
+                self.assertIn(name, stages)
+                self.assertTrue((ROOT / script).is_file(), script)
+                self.assertEqual(stages[name].command, (driver.PYTHON, script))
+                self.assertEqual(stages[name].environment["ODIN"], str(ROOT / "odin"))
+
+    def test_every_test_script_runs_in_a_stage(self):
+        stages = driver.quick_stages() + driver.full_stages(Path("/sdk"), "/runner", Path("/artifacts"))
+        commands = {argument for stage in stages for argument in stage.command}
+        scripts = sorted(path.relative_to(ROOT).as_posix() for path in ROOT.glob("tests/*/test_*.py"))
+        self.assertEqual([script for script in scripts if script not in commands], [])
+
     def test_full_retains_compiler_runtime_and_abi_only(self):
         stages = driver.full_stages(Path("/sdk"), "/runner", Path("/artifacts"))
         names = [stage.name for stage in stages]

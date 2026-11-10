@@ -495,7 +495,13 @@ templates" stage runs
 checker rejections and acceptance on hosts and the N64, and a golden diff of
 every RSP form against `core:rexcode/isa/rsp`. The "asm
 template ROM probe" stage type-checks [tests/n64_asm/rom](tests/n64_asm/rom).
-No project-local binding is required.
+No project-local binding is required. The "generic asm-template checker" stage
+runs [tests/asm_check/test_asm_check.py](tests/asm_check/test_asm_check.py) for
+amd64, arm64 and riscv64, and skips each target the compiler's LLVM cannot
+emit. The "float abs lowering" stage runs
+[tests/n64_float_abs/test_float_abs.py](tests/n64_float_abs/test_float_abs.py),
+which builds and runs a host program: with a Mips-only LLVM, set `HOST_ODIN` to
+a host-capable build of the same revision.
 
 The pointer sign-extension, large aggregate argument and optimized
 bounds-check stages read machine code that only the O64 fork generates: stock
