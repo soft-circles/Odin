@@ -353,11 +353,13 @@ gb_internal bool n64_environment_key_is_filtered(char const *entry) {
 		return true;
 	}
 	isize key_length = equals-entry;
-	// GCC reads the others to add include and library paths, find its own programs or write dependency files.
+	// GCC reads the others to add include and library paths, find its own programs or write dependency files, and the
+	// clang driver reads CCC_OVERRIDE_OPTIONS to edit its own command line.
 	char const *exact_keys[] = {
 		"PATH", "SHELL",
 		"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH",
 		"GCC_EXEC_PREFIX", "COMPILER_PATH", "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES",
+		"CCC_OVERRIDE_OPTIONS",
 	};
 	for (char const *key : exact_keys) {
 		isize length = cast(isize)strlen(key);
