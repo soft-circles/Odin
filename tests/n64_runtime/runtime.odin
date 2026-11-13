@@ -18,7 +18,7 @@ main :: proc() {
 	runtime.print_string("ODIN_N64_RUNTIME_CHECK:v2:MAIN_REACHED:PASS\n")
 	if !verify_runtime_ordering() || !verify_general_allocator() ||
 	   !verify_temp_allocator() || !verify_allocator_replaceability() ||
-	   !verify_maps() {
+	   !verify_maps() || !verify_no_default_random_generator() {
 		return
 	}
 	debugf(PASS_SENTINEL)
@@ -32,6 +32,7 @@ GENERAL_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:GENERAL_ALLOCATOR:PASS\n"
 TEMP_SENTINEL        :: "ODIN_N64_RUNTIME_CHECK:v2:TEMP_ALLOCATOR:PASS\n"
 REPLACE_SENTINEL     :: "ODIN_N64_RUNTIME_CHECK:v2:ALLOCATOR_REPLACEABILITY:PASS\n"
 MAP_SENTINEL         :: "ODIN_N64_RUNTIME_CHECK:v2:MAP:PASS\n"
+RANDOM_SENTINEL      :: "ODIN_N64_RUNTIME_CHECK:v2:NO_DEFAULT_RANDOM_GENERATOR:PASS\n"
 MAIN_RETURN_SENTINEL :: "ODIN_N64_RUNTIME_MAIN_RETURN:v2\n"
 CLEANUP_SENTINEL     :: "ODIN_N64_RUNTIME_CLEANUP:v2\n"
 PASS_SENTINEL        :: "ODIN_N64_RUNTIME_PASS:v2\n"
@@ -439,5 +440,14 @@ verify_maps :: proc() -> bool {
 	}
 
 	debugf(MAP_SENTINEL)
+	return true
+}
+
+verify_no_default_random_generator :: proc() -> bool {
+	if context.random_generator.procedure != nil {
+		debugf("ODIN_N64_RUNTIME_FAIL:v2:DEFAULT_RANDOM_GENERATOR\n")
+		return false
+	}
+	debugf(RANDOM_SENTINEL)
 	return true
 }

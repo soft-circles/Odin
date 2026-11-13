@@ -916,7 +916,9 @@ __init_context :: proc "contextless" (c: ^Context) {
 	c.logger.procedure = default_logger_proc
 	c.logger.data = nil
 
-	c.random_generator.procedure = default_random_generator_proc
+	when ODIN_OS != .N64 {
+		c.random_generator.procedure = default_random_generator_proc
+	}
 	c.random_generator.data = nil
 }
 
