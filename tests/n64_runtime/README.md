@@ -2,9 +2,10 @@
 
 This standalone compiler-owned fixture tests global initialization, package init,
 both context allocators (alignment, zeroing, growth, shrink, OOM, reset and
-replacement), built-in maps, main return, and package finalization. Its only local
-foreign declarations are the SDK logging functions used as the test oracle. It does
-not import Odin64 or require a graphics binding.
+replacement), built-in maps, the absent default random generator, main return, and
+package finalization. Its only local foreign declarations are the SDK logging
+functions used as the test oracle. It does not import Odin64 or require a graphics
+binding.
 
 ```sh
 ./odin check tests/n64_runtime -target:n64 -vet -warnings-as-errors
