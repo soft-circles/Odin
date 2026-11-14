@@ -1984,6 +1984,9 @@ struct lbAsmGenerate_arm64 : lbAsmGenerate {
 //     .set reorder` but still allocates $at to operands. Every template clobbers
 //     $at so an assembler macro expansion can never overwrite an operand. The
 //     same `.set reorder` lets the assembler fill branch delay slots.
+//   * A #noreorder template is emitted between `.set noreorder; .set noat` and
+//     `.set at; .set reorder`: its delay slots are the instructions written
+//     after each branch, and its body may name $1 (checked in check_asm_cfg_build).
 //   * Two-operand div/divu/ddiv/ddivu are LLVM assembler macros that also write
 //     `mflo rs`; they are always emitted as `div $zero, rs, rt`.
 //   * LLVM keeps a value narrower than 64 bits sign-extended from bit 31 in its
@@ -2215,7 +2218,8 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 	};
 	// A label or directive counts as no instruction, an `li` as one, a branch or
 	// jump as two (the assembler's delay-slot nop): never more than it emits, so
-	// the padding is never short.
+	// the padding is never short. Under #noreorder nothing is inserted: a branch is
+	// one word and its slot is the next template instruction.
 	BodyNode body_node(Ast *node) {
 		BodyNode b = {};
 		if (node->kind != Ast_AsmInstruction) {
@@ -2234,7 +2238,7 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 		u8 const hilo = Asm_mips::ClobberReg_HI | Asm_mips::ClobberReg_LO;
 		b.writes_hilo = (cl.implicit_wr & hilo) != 0;
 		b.reads_hilo  = (cl.implicit_rd & hilo) != 0;
-		if (g_asm_mips.has_delay_slot(in->mnemonic, cl)) {
+		if (g_asm_mips.has_delay_slot(in->mnemonic, cl) && !tmpl_entity->AsmTemplate.is_noreorder) {
 			b.words += 1;
 		}
 		return b;
@@ -2309,6 +2313,12 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 	// moved-in inputs' mthi/mtlo, else the body's). Any path that reaches a write
 	// through a taken branch already has the branch and its delay slot before it.
 	void write_body_prologue(Slice<i32> const &op_number) override {
+		if (tmpl_entity->AsmTemplate.is_noreorder) {
+			// The author owns every delay slot, and $1 (asm_tables_mips.cpp header).
+			// Everything up to the matching directives in write_body_epilogue is
+			// emitted as written; the hazard nops and HI/LO moves are no branches.
+			write_cstr("\t.set noreorder\n\t.set noat\n");
+		}
 		bool moves = false;
 		for (AsmTemplateEntityDecl const &e : *ops) {
 			moves |= e.view_of < 0 && this->is_moved_hilo_input(e);
@@ -2364,6 +2374,9 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 		}
 		for (int n = after; n < HILO_HAZARD_DISTANCE; n++) {
 			write_cstr("\n\tnop");
+		}
+		if (tmpl_entity->AsmTemplate.is_noreorder) {
+			write_cstr("\n\t.set at\n\t.set reorder");
 		}
 	}
 

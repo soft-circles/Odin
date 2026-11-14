@@ -46,6 +46,17 @@ cp0_typo            :: asm() -> (r: u32) { mfc0 r, %c0_cnt }
 at_operand          :: asm(a: u32) -> (r: u32) { addu r, a, %at }
 at_pin              :: asm(a: u32) -> (r: u32) [a = %at] { addu r, a, a }
 at_clobber          :: asm(a: u32) -> (r: u32) [#clobber %at] { addu r, a, a }
+at_pin_noreorder    :: asm(a: u32) -> (r: u32) [a = %at, #noreorder] { addu r, a, a }
+at_clobber_noreorder :: asm(a: u32) -> (r: u32) [#noreorder, #clobber %at] { addu r, a, a }
+
+// #noreorder: the author fills every delay slot with exactly one instruction
+noreorder_twice     :: asm(a: u32) -> (r: u32) [#noreorder, #noreorder] { move r, a }
+noreorder_no_slot   :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; .x: }
+noreorder_label_slot :: asm(a: u32) -> (r: u32) [#noreorder] { bnez a, .x; .x: move r, a }
+noreorder_branch_slot :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; b .x; nop; .x: }
+noreorder_li_slot   :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; li r, 0x12345678; .x: }
+noreorder_likely_path :: asm(a: u32) -> (r: u32) [#noreorder] { bnezl a, .x; move r, a; .x: }
+noreorder_imm_disp  :: asm(p: rawptr, $D: int) -> (r: u32) [#noreorder] { move r, %zero; bnez p, .x; lw r, [p + D]; .x: }
 
 // branch and jump targets are template labels only
 absolute_j          :: asm() { j 0x80001000 }
@@ -89,7 +100,9 @@ use :: proc "contextless" (x: u32, w: u64, f: f32, d: f64, p: rawptr) {
 	_ = lw_disp_max_plus1(p); sw_disp_max_plus1(p, x); sw_disp_min_less1(p, x)
 	gpr_in_cp0_slot(x); _ = param_in_cp0_slot(x); f32_to_mtc0(f)
 	unknown_mnemonic(p); _ = mnemonic_typo(x); _ = unknown_cp0(); _ = cp0_typo()
-	_ = at_operand(x); _ = at_pin(x); _ = at_clobber(x)
+	_ = at_operand(x); _ = at_pin(x); _ = at_clobber(x); _ = at_pin_noreorder(x); _ = at_clobber_noreorder(x)
+	_ = noreorder_twice(x); _ = noreorder_no_slot(x); _ = noreorder_label_slot(x); _ = noreorder_branch_slot(x)
+	_ = noreorder_li_slot(x); _ = noreorder_likely_path(x); _ = noreorder_imm_disp(p, 4)
 	absolute_j(); absolute_jal(); _ = numeric_branch(x, x); _ = duplicate_label(x); jr_not_diverging(x)
 	_ = u64_in_gpr32_slot(w, x); _ = f32_in_gpr_slot(f, x); _ = gpr_in_fpr_slot(x, f); _ = f64_in_single_slot(d, f)
 	_ = f32_in_double_slot(f, d); _ = f64_in_word_slot(d); _ = too_many_operands(x, x); _ = too_few_operands(x)

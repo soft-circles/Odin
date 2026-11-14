@@ -934,6 +934,56 @@ class Traps(unittest.TestCase):
                             want = a if taken(a, b) else (a + 1) & 0xFFFFFFFF
                             self.assertEqual(run_mips(offset, words, (a, b)), want)
 
+    NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_at_scratch", "noreorder_mult_in_slot")
+
+    def test_noreorder_slots_assemble_as_written(self):
+        # #noreorder: the instruction after a branch is its delay slot, exactly as
+        # written. A plain slot runs on both edges, a branch-likely's on the taken
+        # edge only (annulled otherwise), and $1 is usable under `.set noat`.
+        expect = {
+            "noreorder_filled":     [0x10850002, 0x00801025, 0x24820001],              # beq a0,a1,+2; move v0,a0; addiu
+            "noreorder_likely":     [0x00001025, 0x2484FFFF, 0x5C80FFFE, 0x24420008],  # move; addiu; bgtzl a0,-2; addiu v0,v0,8
+            "noreorder_at_scratch": [0x24810005, 0x00211021],                          # addiu at,a0,5; addu v0,at,at
+            "noreorder_mult_in_slot": [0x00000000, 0x14800001, 0x00840019, 0x00001012],  # nop; bnez a0,+1; multu a0,a0; mflo v0
+        }
+        require_o64_objects(self)
+        for target in TARGETS:
+            symbols = elf32be_symbols(build_object("regress", target))
+            for function, sequence in expect.items():
+                with self.subTest(target=target, function=function):
+                    words = symbols[function][1]
+                    self.assertTrue(find_sequence(words, sequence), [f"{w:08x}" for w in words])
+            offset, words = symbols["noreorder_filled"]
+            for a, b in ((3, 3), (3, 4), (0, 0xFFFFFFFF)):
+                self.assertEqual(run_mips(offset, words, (a, b)), a if a == b else (a + 1) & 0xFFFFFFFF)
+            offset, words = symbols["noreorder_likely"]
+            for n in (0, 1, 2, 5, 0xFFFFFFFD):
+                want = 8 * (n - 1) if 1 <= n < 0x80000000 else 0
+                self.assertEqual(run_mips(offset, words, (n,)), want, f"n={n}")
+            offset, words = symbols["noreorder_at_scratch"]
+            for a in (0, 7, 0xFFFFFFFF):
+                self.assertEqual(run_mips(offset, words, (a,)), (2 * (a + 5)) & 0xFFFFFFFF)
+
+    def test_noreorder_directives_wrap_only_noreorder_templates(self):
+        # The directives wrap exactly the #noreorder bodies, HI/LO padding included
+        # (a #noreorder branch is one word, so a multu in its slot gets one leading
+        # nop); every other template keeps LLVM's `.set reorder` and no directive.
+        ir = build_ir("regress")[1]
+        self.assertEqual(calls_in(ir, "noreorder_mult_in_slot"),
+                         [(False, r"\09.set noreorder\0A\09.set noat\0A\09nop\0A\09bnez $1, 1f\0A\09multu $1, $1"
+                                  r"\0A1:\0A\09mflo $0\0A\09nop\0A\09nop\0A\09.set at\0A\09.set reorder",
+                           "=&r,r,~{hi},~{lo},~{$1}")])
+        for function in self.NOREORDER:
+            for _, text, _ in calls_in(ir, function):
+                with self.subTest(function=function):
+                    self.assertTrue(text.startswith(r"\09.set noreorder\0A\09.set noat\0A"), text)
+                    self.assertTrue(text.endswith(r"\0A\09.set at\0A\09.set reorder"), text)
+        for package in ("regress", "fixture", "coverage"):
+            for function, _, text, _ in asm_calls(build_ir(package)[1]):
+                if function not in self.NOREORDER:
+                    with self.subTest(package=package, function=function):
+                        self.assertNotIn(".set", text)
+
     def test_labels_forward_backward_and_numeric(self):
         # Trap: labels. Template labels become numeric locals (`1:`, `1f`, `2b`), so the
         # same template can be inlined twice without duplicate-symbol errors.
@@ -1017,6 +1067,17 @@ CHECK_ERRORS = {
     "at_operand":          "Register %at ($1) is reserved for the assembler, which uses it to expand macros",
     "at_pin":              "Register %at ($1) is reserved for the assembler, which uses it to expand macros",
     "at_clobber":          "Register %at ($1) is reserved for the assembler, which uses it to expand macros",
+    # a #noreorder body may name %at; a pin or clobber still may not
+    "at_pin_noreorder":    "Register %at ($1) is reserved for the assembler, which uses it to expand macros",
+    "at_clobber_noreorder": "Register %at ($1) is reserved for the assembler, which uses it to expand macros",
+    "noreorder_twice":     "#noreorder has already been defined as an asm specification",
+    "noreorder_no_slot":   "'bnez' ends a #noreorder template without a delay-slot instruction; write the instruction for its slot (a 'nop' if nothing fits)",
+    "noreorder_label_slot": "A label cannot mark the delay slot of 'bnez' in a #noreorder template; put the slot instruction right after the branch and the label after it",
+    "noreorder_branch_slot": "'b' cannot sit in the delay slot of 'bnez': a branch or jump in a delay slot is UNPREDICTABLE on the VR4300",
+    "noreorder_li_slot":   "'li' cannot fill the delay slot of 'bnez' in a #noreorder template: this 'li' assembles to two instructions ('lui' + 'ori')",
+    # a branch-likely's slot runs on the taken path only, so r is unset when a == 0
+    "noreorder_likely_path": "'asm' output parameter 'r' is not assigned on all paths through this template; its value is undefined",
+    "noreorder_imm_disp":  "'lw' cannot fill the delay slot of 'bnez' in a #noreorder template: a memory operand with a $ immediate displacement may assemble to several instructions",
     "absolute_j":          "'j' operand-0 has an invalid kind, expected a label operand",
     "absolute_jal":        "'jal' operand-0 has an invalid kind, expected a label operand",
     "numeric_branch":      "'beq' operand-2 has an invalid kind, expected a label operand",

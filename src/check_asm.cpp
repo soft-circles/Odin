@@ -181,6 +181,51 @@ gb_internal char const *asm_hook_register_unavailable_reason(AsmCtx *, String co
 	return nullptr;
 }
 
+// char const *literal_register_reject_reason_in_body(Register r, bool noreorder_body) const;
+//
+// Returns nullptr, or why the literal register `r`, which is in the table, cannot be
+// named here, phrased to follow "Register %<name> ". `noreorder_body` is true while the
+// body of a #noreorder template is checked (asm_check_noreorder_body). A table without
+// the member accepts every register it has.
+template <typename AsmCtx>
+gb_internal auto asm_hook_literal_register_reject_reason_in_body(AsmCtx *asm_ctx, typename AsmCtx::Register r, bool noreorder_body, int)
+	-> decltype(asm_ctx->literal_register_reject_reason_in_body(r, noreorder_body)) {
+	return asm_ctx->literal_register_reject_reason_in_body(r, noreorder_body);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_literal_register_reject_reason_in_body(AsmCtx *, typename AsmCtx::Register, bool, long) {
+	return nullptr;
+}
+
+// u8 delay_slot_flags(u16 mnemonic, Clobber const &clobber) const;
+// char const *delay_slot_multiword_reason(u16 mnemonic, i64 const *imm) const;
+//
+// Delay slots of a #noreorder template (MIPS only; check_asm_cfg_build). The first
+// returns AsmDelaySlotFlag bits for the matched form: whether the next instruction
+// is its delay slot, runs on the taken path only (branch-likely), or is followed by a
+// return (a linking call). The second returns why an instruction may assemble to more
+// than one word and so cannot fill a slot, or nullptr; `imm` is its last operand's
+// constant value, or nullptr when that is not a constant. A table without them has
+// no delay slots.
+template <typename AsmCtx>
+gb_internal auto asm_hook_delay_slot_flags(AsmCtx *asm_ctx, u16 m, typename AsmCtx::Clobber const &clobber, int)
+	-> decltype(asm_ctx->delay_slot_flags(m, clobber)) {
+	return asm_ctx->delay_slot_flags(m, clobber);
+}
+template <typename AsmCtx>
+gb_internal u8 asm_hook_delay_slot_flags(AsmCtx *, u16, typename AsmCtx::Clobber const &, long) {
+	return 0;
+}
+template <typename AsmCtx>
+gb_internal auto asm_hook_delay_slot_multiword_reason(AsmCtx *asm_ctx, u16 m, i64 const *imm, int)
+	-> decltype(asm_ctx->delay_slot_multiword_reason(m, imm)) {
+	return asm_ctx->delay_slot_multiword_reason(m, imm);
+}
+template <typename AsmCtx>
+gb_internal char const *asm_hook_delay_slot_multiword_reason(AsmCtx *, u16, i64 const *, long) {
+	return nullptr;
+}
+
 // bool register_is_float(Register r) const;
 //
 // Returns true when the literal register `r` belongs to a scalar floating-point file, so
@@ -1431,6 +1476,10 @@ gb_internal bool check_register(AsmCtx *asm_ctx, Operand *operand, AstAsmRegiste
 
 	auto r = asm_ctx->register_lookup(name);
 	if (r) {
+		if (char const *reason = asm_hook_literal_register_reject_reason_in_body(asm_ctx, r, asm_check_noreorder_body, 0)) {
+			error(asm_reg->name, "Register %%%.*s %s", LIT(name), reason);
+			return false;
+		}
 		operand->mode = Addressing_Value;
 
 		u16 width_in_bits = asm_ctx->reg_size(r);
@@ -2804,6 +2853,41 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			facts->is_conditional = conditional;
 			facts->is_terminal = halt || (control && !conditional);
 		}
+		{
+			// Delay slots, used only for a #noreorder template (check_asm_cfg_build).
+			facts->delay_slot = asm_hook_delay_slot_flags(asm_ctx, instr->mnemonic, clobber, 0);
+
+			i64 imm = 0;
+			bool imm_known = false;
+			if (operands.count > 0) {
+				Operand const &last_op = operands[operands.count-1];
+				if (last_op.mode == Addressing_Constant && last_op.value.kind == ExactValue_Integer) {
+					imm = exact_value_to_i64(last_op.value);
+					imm_known = true;
+				}
+			}
+			facts->slot_reject_reason = asm_hook_delay_slot_multiword_reason(asm_ctx, instr->mnemonic, imm_known ? &imm : nullptr, 0);
+
+			// A $-immediate displacement is not range-checked, so the assembler may expand
+			// the access into several words through the destination or $at.
+			for_array(i, operands) {
+				Ast *e = operands[i].expr;
+				if (facts->slot_reject_reason != nullptr || e == nullptr || e->kind != Ast_AsmMemoryOperand) {
+					continue;
+				}
+				for (Ast *term : e->AsmMemoryOperand.terms) {
+					if (term == nullptr || term->kind != Ast_AsmMemoryTerm) {
+						continue;
+					}
+					Entity *pe = entity_of_node(term->AsmMemoryTerm.operand);
+					if (pe != nullptr && pe->kind == Entity_Variable &&
+					    check_asm_find_kind(pe, ate->decls) == AsmTemplateEntityDecl_Immediate) {
+						facts->slot_reject_reason = "a memory operand with a $ immediate displacement may assemble to several instructions";
+						break;
+					}
+				}
+			}
+		}
 		// NOTE(bill): an output's register is already declared as written.
 		// Clobbering it as well lets LLVM drop the moves into it of an input tied to that output.
 		asm_ctx->clobber_implicit_regs(&ate->clobber_registers_set, produced & ~output_pinned_mask);
@@ -3860,6 +3944,16 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 						error(clobber->name, "#pure has already been defined as an asm specification");
 					}
 					is_pure_annotated = true;
+				} else if (clobber->name.string == "noreorder") {
+					if (entity->AsmTemplate.is_noreorder) {
+						error(clobber->name, "#noreorder has already been defined as an asm specification");
+					} else if (entity->AsmTemplate.arch == AsmTemplateArch_Rsp) {
+						error(clobber->name, "#noreorder is redundant on an @(rsp) template: its delay slots are always explicit");
+					} else if (asm_check_arch() != TargetArch_mips32be) {
+						error(clobber->name, "#noreorder is only valid on MIPS CPU templates (-target:n64 or -target:freestanding_mips32be)");
+					} else {
+						entity->AsmTemplate.is_noreorder = true;
+					}
 				} else {
 					error(clobber->name, "Unknown clobber directive '#%.*s'", LIT(clobber->name.string));
 				}
@@ -4076,6 +4170,9 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 	operands.allocator = heap_allocator();
 	array_reserve(&operands, 16);
 	defer (array_free(&operands));
+
+	// %at is nameable in a #noreorder body only (asm_hook_literal_register_reject_reason_in_body).
+	AsmCheckNoreorderBodyScope noreorder_body_scope(ate->is_noreorder);
 
 	u8 previous_prefix = 0;
 	Ast *previous_prefix_instr = nullptr; // for a good error location

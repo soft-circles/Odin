@@ -3042,7 +3042,8 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 
 				if (name.string == "volatile" ||
 				    name.string == "align_stack" ||
-				    name.string == "pure") {
+				    name.string == "pure" ||
+				    name.string == "noreorder") {
 					Ast *clobber = alloc_ast_node(f, Ast_AsmClobber);
 					clobber->AsmClobber.token = hash;
 					clobber->AsmClobber.name  = name;
@@ -3056,7 +3057,7 @@ gb_internal Ast *parse_asm_template(AstFile *f) {
 					clobber->AsmClobber.value = value;
 					array_add(&clobbers, clobber);
 				} else {
-					syntax_error(name, "Expected #clobber, #preserve, #volatile, #align_stack, or #pure, got '%.*s'", LIT(name.string));
+					syntax_error(name, "Expected #clobber, #preserve, #volatile, #align_stack, #pure, or #noreorder, got '%.*s'", LIT(name.string));
 				}
 			} else {
 				syntax_error(f->curr_token, "Expected am asm specification which begins with a identifier, got '%.*s'", LIT(f->curr_token.string));
