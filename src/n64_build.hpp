@@ -3,6 +3,7 @@
 // copy them field by field.
 struct N64BuildSettings {
 	String sdk_root;
+	String sdk_description; // the SDK description file; see n64_load_sdk_description
 	String title;
 	String region;
 	String save_type;

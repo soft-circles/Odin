@@ -75,7 +75,8 @@ odin build <package> -target:n64 [N64 options]
 Applications provide ordinary Odin source and `main :: proc()`. Preserve
 option names, `-n64-inst` precedence over `N64_INST`, output naming, retained
 intermediate behavior, and atomic placement. Do not require a project Makefile,
-C entry point, or new manifest.
+C entry point, or new manifest: an SDK description is optional, and without one
+the build uses the SDK root's `odin-n64.sdk` or the built-in libdragon one.
 
 The internal N64 module exposes two request/result operations:
 
@@ -85,8 +86,9 @@ n64_package_rom(N64BuildRequest) -> N64BuildResult
 ```
 
 `N64PrepareBuildRequest` contains already-parsed command, mode, relocation,
-linker, and ROM settings. `N64BuildRequest` contains those settings plus final
-output paths, compiled object paths, and flattened foreign libraries. The
+linker, and ROM settings. `N64BuildRequest` contains those settings plus the
+loaded `N64SdkDescription`, final output paths, compiled object paths, and
+flattened foreign libraries. The
 module must not read `build_context`, `LinkerData`, or `Entity`. Keep
 intermediate names, tool arguments, process details, and cleanup order private
 to it.
@@ -102,17 +104,37 @@ authority.
 
 Hard SDK gates are:
 
-- all required headers, libraries, linker script, and packaging tools exist;
-- required tools are executable;
-- `mkdfs` is present when assets are requested;
-- `n64metadata` is present when metadata is requested.
+- the SDK description parses, declares a linker script and `n64tool`, and
+  spells every path absolute;
+- every file it requires exists, and the GCC runtime is unique when it names
+  `{gcc}`;
+- the tools of the steps the build runs are executable, except those
+  `-n64-pack` runs;
+- it declares an executable `mkdfs` when assets are requested, `n64metadata`
+  when metadata is requested, and `ed64romconfig` when a save type, RTC or
+  controllers are.
+
+The SDK description is trusted the way `-n64-inst` is: the user picks it with
+`-n64-sdk`, or by picking an SDK root that holds `odin-n64.sdk` (through
+`-n64-inst`, `N64_INST` or `<odin root>/n64`), and it can name tools and link
+inputs outside the SDK root. The files and tools it declares as paths must be
+absolute, so the working directory cannot change which of them a build
+validates, links or runs
+(`test_sdk_description_errors_name_the_file_and_line`). A bare
+`linker-script` name and the words of `libraries`, `link-flags` and
+`system-libraries` reach ld.lld as written, which finds `-T<name>` in the
+working directory before the `-L` directories, as libdragon's `-Tn64.ld` did
+before descriptions existed. `-n64-pack` never
+stops the declared `n64sym` from being checked
+(`test_n64_pack_still_checks_the_declared_n64sym`).
 
 The compiler does not inspect revision, clean-state, recipe-hash or toolchain
 version metadata. SDK compatibility is exercised by compilation, packaging
 and the ABI/runtime tests.
 
-Each packaging tool is started with `posix_spawn`, an absolute path inside the
-validated SDK (or, for RSP microcode, the LLVM bindir below), and a fixed
+Each packaging tool is started with `posix_spawn`, the absolute path the
+validated SDK description declares (or, for RSP microcode, the LLVM bindir
+below), and a fixed
 argument vector rather than a shell command. Its
 environment drops inherited `PATH`, `SHELL`, every `N64_*` variable and the
 variables GCC reads for search paths, its own programs and dependency output
@@ -165,6 +187,8 @@ instead of GCC's tools. It then runs the steps of libdragon's `n64.mk` recipe fo
 `odin-n64.z64` goal in order: the `ld.lld` link, `n64sym`, a copy and
 `llvm-strip -s`, `n64elfcompress -c 1`, `mkdfs` when assets are present,
 `n64tool --toc`, `ed64romconfig` and `n64metadata` when metadata is present.
+A step whose tool the SDK description leaves out does not run; the link takes
+its startup objects, libraries and linker script from the description.
 The link passes `ld.lld` the arguments `collect2` gets from `mips64-elf-g++`: the GCC
 runtime's `crti.o` and `crtbegin.o` first, `crtend.o` and `crtn.o` last, `-lstdc++ -lm -lc -lgcc`
 after the inputs, and `-z max-page-size=4096` so the LOAD segments keep GNU ld's offsets.
@@ -175,8 +199,9 @@ copy `N64_C_AND_CXX_FLAGS` and `N64_LDFLAGS`, and the defaults
 `--category N`, `--regionfree` and `-c 1` copy the recipe's `?=` defaults.
 `n64tool --toc` records each input's basename in the ROM, so keep the
 `odin-n64.*` names. When a libdragon bump changes those recipe lines, mirror
-the change in `src/n64_build.cpp` and compare ELF, symbol and ROM hashes with
-a build made by the SDK's own `n64.mk`.
+the change in `src/n64_build.cpp`, whose `n64_libdragon_sdk_description` holds
+libdragon's link and tools, and in N64_BUILD.md's copy of it, and compare ELF,
+symbol and ROM hashes with a build made by the SDK's own `n64.mk`.
 
 Compiler object and foreign inputs are linked in place. Compiler object paths
 are sorted first because their original hash-map order is not stable between

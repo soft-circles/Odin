@@ -35,6 +35,9 @@ gb_internal bool n64_prepare_build_from_context(String const &init_filename) {
 			build_context.n64.sdk_root = path_to_full_path(permanent_allocator(), bundled);
 		}
 	}
+	if (n64_rom && build_context.n64.sdk_root.len > 0 && build_context.n64.sdk_description.len == 0) {
+		build_context.n64.sdk_description = n64_default_sdk_description(build_context.n64.sdk_root);
+	}
 	if (n64_rom && build_context.n64.title.len == 0) {
 		// Default the ROM title to the main package's directory name, not the
 		// -out file name, so `-out:build/rom.z64` keeps the project's name.
@@ -53,7 +56,7 @@ gb_internal bool n64_prepare_build_from_context(String const &init_filename) {
 
 	N64PrepareBuildRequest request = {};
 	request.is_n64_target = build_context.metrics.os == TargetOs_n64;
-	request.n64_options_given = build_context.n64_inst_given || build_context.n64_rom_options_given;
+	request.n64_options_given = build_context.n64_sdk_given || build_context.n64_rom_options_given;
 	request.rom_options_given = build_context.n64_rom_options_given;
 	request.command_does_build = (build_context.command_kind & Command__does_build) != 0;
 	request.is_build_command = build_context.command_kind == Command_build;

@@ -422,6 +422,7 @@ enum BuildFlagKind {
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
 	BuildFlag_N64Inst,
+	BuildFlag_N64Sdk,
 	BuildFlag_N64Title,
 	BuildFlag_N64Region,
 	BuildFlag_N64SaveType,
@@ -792,6 +793,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_N64Inst,                 str_lit("n64-inst"),                  BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Sdk,                  str_lit("n64-sdk"),                   BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Title,                str_lit("n64-title"),                 BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Region,               str_lit("n64-region"),                BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64SaveType,             str_lit("n64-save-type"),             BuildFlagParam_String,  Command__does_build);
@@ -1475,7 +1477,15 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_N64Inst:
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (n64_parse_existing_path(STR_LIT("-n64-inst"), value.value_string, true, &build_context.n64.sdk_root)) {
-								build_context.n64_inst_given = true;
+								build_context.n64_sdk_given = true;
+							} else {
+								bad_flags = true;
+							}
+							break;
+						case BuildFlag_N64Sdk:
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (n64_parse_existing_path(STR_LIT("-n64-sdk"), value.value_string, false, &build_context.n64.sdk_description)) {
+								build_context.n64_sdk_given = true;
 							} else {
 								bad_flags = true;
 							}
@@ -3652,8 +3662,12 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Names the asm template that becomes the RSP overlay entry for -build-mode:rsp-asm.");
 		}
 		if (print_flag("-n64-inst:<directory>")) {
-			print_usage_line(2, "Sets the installed libdragon SDK root for -target:n64.");
+			print_usage_line(2, "Sets the installed N64 SDK root for -target:n64.");
 			print_usage_line(2, "Takes precedence over the N64_INST environment variable.");
+		}
+		if (print_flag("-n64-sdk:<file>")) {
+			print_usage_line(2, "Names the SDK description of -target:n64: its startup objects, linker script and packaging tools.");
+			print_usage_line(2, "Defaults to the SDK root's odin-n64.sdk, else to libdragon's built-in description.");
 		}
 		if (print_flag("-n64-title:<string>")) {
 			print_usage_line(2, "Sets the 1-20 character N64 ROM title.");
@@ -3679,7 +3693,8 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 		if (print_flag("-n64-pack:<executable>")) {
 			print_usage_line(2, "Runs <executable> --n64-tool <tool> <arguments> in place of the SDK's mkdfs, n64tool,");
-			print_usage_line(2, "ed64romconfig and n64elfcompress, which the SDK then need not provide.");
+			print_usage_line(2, "ed64romconfig and n64elfcompress, for each of them the SDK description declares,");
+			print_usage_line(2, "which the SDK then need not provide.");
 		}
 		if (print_flag("-n64-cflags:<string>")) {
 			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c and .S sources.");

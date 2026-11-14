@@ -564,7 +564,7 @@ struct BuildContext {
 	String resource_filepath;
 	String pdb_filepath;
 	N64BuildSettings n64;
-	bool   n64_inst_given;
+	bool   n64_sdk_given;
 	bool   n64_rom_options_given;
 
 	u64 vet_flags;

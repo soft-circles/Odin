@@ -21,6 +21,10 @@ The focused command above remains available when this stage fails. The
 full layer runs it with the selected SDK and does not accept its
 end-to-end skip.
 
+The SDK description tests run the stub tools against an SDK that owns its
+startup, linker script and packaging tools, pin each description diagnostic, and
+check that N64_BUILD.md's copy of libdragon's description runs the built-in one's
+commands.
 The SDK discovery tests cover required files/tools and custom SDKs with absent,
 unrecognized or locally modified version metadata. A stub link driver that
 exits with an error proves the compiler reaches packaging and preserves its

@@ -30,8 +30,54 @@ struct N64ForeignLibrary {
 	Slice<String> paths;
 };
 
+enum N64Step {
+	N64Step_n64sym,
+	N64Step_n64elfcompress,
+	N64Step_mkdfs,
+	N64Step_n64tool,
+	N64Step_ed64romconfig,
+	N64Step_n64metadata,
+	N64Step_COUNT,
+};
+
+gb_global char const *n64_step_names[N64Step_COUNT] = {
+	"n64sym", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig", "n64metadata",
+};
+
+// Whether -n64-pack runs the step in place of the SDK description's tool.
+gb_internal bool n64_step_runs_pack(N64BuildSettings const &settings, N64Step step) {
+	bool packable = step == N64Step_n64elfcompress || step == N64Step_mkdfs || step == N64Step_n64tool ||
+	                step == N64Step_ed64romconfig;
+	return packable && settings.pack.len > 0;
+}
+
+// raw is the word as the description spells it, for diagnostics; value has its placeholders expanded.
+struct N64SdkWord {
+	String raw;
+	String value;
+};
+
+struct N64SdkDescription {
+	String path;
+	String gcc_runtime;
+	bool   names_gcc;
+	Array<N64SdkWord> require;
+	Array<String> startup;
+	Array<String> library_dirs;
+	Array<String> libraries;
+	String linker_script;
+	Array<String> link_flags;
+	Array<String> system_libraries;
+	Array<String> finish;
+	Array<String> sdk_libraries;
+	N64SdkWord tools[N64Step_COUNT];
+	String rom_files_dir;
+	String rom_files_suffix;
+};
+
 struct N64BuildRequest {
 	N64BuildSettings settings;
+	N64SdkDescription sdk;
 	bool show_system_calls;
 	bool keep_temp_files;
 	String output_filename;
@@ -128,45 +174,304 @@ gb_internal String n64_gcc_runtime_dir(String const &sdk_root) {
 	return found;
 }
 
-gb_internal bool n64_validate_sdk_root(String const &sdk_root, bool packaging_tools) {
-	Array<String> required_files = {};
-	array_init(&required_files, temporary_allocator());
-	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragon.a"));
-	array_add(&required_files, STR_LIT("mips64-elf/lib/libdragonsys.a"));
-	array_add(&required_files, STR_LIT("mips64-elf/lib/n64.ld"));
-	array_add(&required_files, STR_LIT("mips64-elf/lib/libc.a"));
-	array_add(&required_files, STR_LIT("mips64-elf/lib/libm.a"));
-	array_add(&required_files, STR_LIT("mips64-elf/lib/libstdc++.a"));
-	Array<String> required_tools = {};
-	array_init(&required_tools, temporary_allocator());
-	if (packaging_tools) {
-		array_add(&required_tools, STR_LIT("bin/ed64romconfig"));
-		array_add(&required_tools, STR_LIT("bin/n64elfcompress"));
-		array_add(&required_tools, STR_LIT("bin/n64tool"));
-	}
-	array_add(&required_tools, STR_LIT("bin/n64sym"));
+// ---- SDK description --------------------------------------------------------
+// An SDK description declares what an N64 SDK supplies to a ROM build: the files it requires, the startup objects and
+// linker script of its link, and the tool each packaging step runs. -n64-sdk names one; without it the SDK root's
+// odin-n64.sdk is used, else n64_libdragon_sdk_description, which declares libdragon as n64.mk builds a ROM.
+// Each line is a key followed by whitespace-separated words, in which {sdk} is the SDK root, {dir} the description's
+// directory and {gcc} the SDK's single lib/gcc/mips64-elf/<version> directory. A '#' starts a comment line.
 
+// libdragon's SDK description: the link mips64-elf-g++ drives with n64.mk's N64_LDFLAGS, and n64.mk's ROM recipe. When
+// a libdragon bump changes either, mirror it here and in N64_BUILD.md.
+gb_global char const n64_libdragon_sdk_description[] =
+	"require {sdk}/mips64-elf/lib/libdragon.a {sdk}/mips64-elf/lib/libdragonsys.a {sdk}/mips64-elf/lib/n64.ld\n"
+	"require {sdk}/mips64-elf/lib/libc.a {sdk}/mips64-elf/lib/libm.a {sdk}/mips64-elf/lib/libstdc++.a\n"
+	"startup {gcc}/crti.o {gcc}/crtbegin.o\n"
+	"library-dir {gcc} {sdk}/mips64-elf/lib\n"
+	"libraries -ldragon -lm -ldragonsys\n"
+	"linker-script n64.ld\n"
+	"link-flags --gc-sections --wrap __do_global_ctors -z max-page-size=4096\n"
+	"system-libraries -lstdc++ -lm -lc -lgcc\n"
+	"finish {gcc}/crtend.o {gcc}/crtn.o\n"
+	"sdk-library c m dragon dragonsys\n"
+	"tool n64sym {sdk}/bin/n64sym\n"
+	"tool n64elfcompress {sdk}/bin/n64elfcompress\n"
+	"tool mkdfs {sdk}/bin/mkdfs\n"
+	"tool n64tool {sdk}/bin/n64tool\n"
+	"tool ed64romconfig {sdk}/bin/ed64romconfig\n"
+	"tool n64metadata {sdk}/bin/n64metadata\n"
+	"rom-files {sdk}/mips64-elf/include .version\n";
+
+// The SDK root's odin-n64.sdk, or an empty path for the built-in libdragon description.
+gb_internal String n64_default_sdk_description(String const &sdk_root) {
+	String declared = n64_path_join(permanent_allocator(), sdk_root, STR_LIT("odin-n64.sdk"));
+	char const *declared_c = alloc_cstring(temporary_allocator(), declared);
+	if (gb_file_exists(declared_c) && !path_is_directory(declared)) {
+		return declared;
+	}
+	return {};
+}
+
+// A required file or tool as diagnostics name it: relative to the SDK root when the description spells it so.
+gb_internal String n64_sdk_display(N64SdkWord const &word) {
+	if (string_starts_with(word.raw, STR_LIT("{sdk}/"))) {
+		return substring(word.raw, 6, word.raw.len);
+	}
+	return word.value;
+}
+
+gb_internal void n64_split_words(Array<String> *words, String const &text) {
+	isize start = -1;
+	for (isize index = 0; index <= text.len; index += 1) {
+		bool space = index == text.len || gb_char_is_space(cast(char)text[index]);
+		if (!space && start < 0) {
+			start = index;
+		} else if (space && start >= 0) {
+			array_add(words, substring(text, start, index));
+			start = -1;
+		}
+	}
+}
+
+gb_internal bool n64_expand_sdk_word(N64SdkDescription *description, String const &sdk_root, String const &raw, String *value) {
+	gbString expanded = gb_string_make(permanent_allocator(), "");
+	for (isize index = 0; index < raw.len; index += 1) {
+		if (raw[index] != '{') {
+			expanded = gb_string_append_length(expanded, &raw.text[index], 1);
+			continue;
+		}
+		isize close = string_index_byte(substring(raw, index, raw.len), '}');
+		if (close < 0) {
+			return false;
+		}
+		String name = substring(raw, index+1, index+close);
+		String replacement = {};
+		if (name == "sdk") {
+			replacement = sdk_root;
+		} else if (name == "dir") {
+			replacement = directory_from_path(description->path);
+		} else if (name == "gcc") {
+			if (!description->names_gcc) {
+				description->names_gcc = true;
+				description->gcc_runtime = n64_gcc_runtime_dir(sdk_root);
+			}
+			replacement = description->gcc_runtime;
+		} else {
+			return false;
+		}
+		expanded = gb_string_append_length(expanded, replacement.text, replacement.len);
+		index += close;
+	}
+	*value = make_string(cast(u8 *)expanded, gb_string_length(expanded));
+	return true;
+}
+
+gb_internal bool n64_load_sdk_description(N64BuildSettings const &settings, N64SdkDescription *description) {
+	gbAllocator a = permanent_allocator();
+	*description = {};
+	description->path = settings.sdk_description;
+	array_init(&description->require, a);
+	Array<String> *word_lists[] = {
+		&description->startup, &description->library_dirs, &description->libraries, &description->link_flags,
+		&description->system_libraries, &description->finish, &description->sdk_libraries,
+	};
+	char const *word_keys[] = {"startup", "library-dir", "libraries", "link-flags", "system-libraries", "finish", "sdk-library"};
+	for (Array<String> *list : word_lists) {
+		array_init(list, a);
+	}
+
+	String text = make_string_c(n64_libdragon_sdk_description);
+	if (description->path.len == 0) {
+		description->path = STR_LIT("libdragon (built in)");
+	} else {
+		gbFileContents contents = gb_file_read_contents(a, false, alloc_cstring(temporary_allocator(), description->path));
+		if (contents.data == nullptr) {
+			gb_printf_err("N64 SDK description %.*s cannot be read\n", LIT(description->path));
+			return false;
+		}
+		text = make_string(cast(u8 *)contents.data, contents.size);
+	}
+	String path = description->path;
+	isize line_number = 0;
+	while (text.len > 0) {
+		line_number += 1;
+		isize newline = string_index_byte(text, '\n');
+		String line = newline < 0 ? text : substring(text, 0, newline);
+		text = newline < 0 ? String{} : substring(text, newline+1, text.len);
+		line = string_trim_whitespace(line);
+		if (line.len == 0 || line[0] == '#') {
+			continue;
+		}
+		Array<String> words = {};
+		array_init(&words, temporary_allocator());
+		n64_split_words(&words, line);
+		String key = words[0];
+		Array<N64SdkWord> values = {};
+		array_init(&values, a);
+		isize first_expanded = key == "tool" ? 2 : 1;
+		for (isize index = 1; index < words.count; index += 1) {
+			N64SdkWord word = {words[index], words[index]};
+			if (index >= first_expanded && !n64_expand_sdk_word(description, settings.sdk_root, words[index], &word.value)) {
+				gb_printf_err("N64 SDK description %.*s:%td: unknown placeholder in '%.*s'\n", LIT(path), line_number, LIT(words[index]));
+				return false;
+			}
+			array_add(&values, word);
+		}
+		// Paths the build opens or runs are absolute, so a description cannot reach a file through the working
+		// directory; a linker script without a directory is found through library-dir. A {gcc} word is left to the
+		// GCC runtime diagnostic when the SDK has no single runtime.
+		bool paths = key == "require" || key == "startup" || key == "finish" || key == "library-dir" || key == "tool" ||
+		             key == "rom-files" || key == "linker-script";
+		for (isize index = 0; paths && index < values.count; index += 1) {
+			N64SdkWord const &word = values[index];
+			bool path_word = key == "tool" ? index == 1 : key == "rom-files" ? index == 0 :
+			                 key == "linker-script" ? string_index_byte(word.raw, '/') >= 0 : true;
+			bool unresolved_gcc = description->names_gcc && description->gcc_runtime.len == 0 &&
+			                      string_contains_string(word.raw, STR_LIT("{gcc}"));
+			if (path_word && !unresolved_gcc && (word.value.len == 0 || word.value[0] != '/')) {
+				gb_printf_err("N64 SDK description %.*s:%td: '%.*s' must be an absolute path; start it with /, {sdk}, {dir} or {gcc}\n",
+				              LIT(path), line_number, LIT(word.raw));
+				return false;
+			}
+		}
+
+		bool known = false;
+		for (isize list = 0; list < gb_count_of(word_keys); list += 1) {
+			if (key == make_string_c(word_keys[list])) {
+				known = true;
+				for (N64SdkWord const &word : values) {
+					array_add(word_lists[list], word.value);
+				}
+			}
+		}
+		if (key == "require") {
+			known = true;
+			for (N64SdkWord const &word : values) {
+				array_add(&description->require, word);
+			}
+		} else if (key == "linker-script") {
+			known = true;
+			if (values.count != 1 || description->linker_script.len > 0) {
+				gb_printf_err("N64 SDK description %.*s:%td: 'linker-script' takes one path and appears once\n", LIT(path), line_number);
+				return false;
+			}
+			description->linker_script = values[0].value;
+		} else if (key == "rom-files") {
+			known = true;
+			if (values.count != 2 || description->rom_files_dir.len > 0) {
+				gb_printf_err("N64 SDK description %.*s:%td: 'rom-files' takes a directory and a file name suffix and appears once\n",
+				              LIT(path), line_number);
+				return false;
+			}
+			description->rom_files_dir = values[0].value;
+			description->rom_files_suffix = values[1].value;
+		} else if (key == "tool") {
+			known = true;
+			if (values.count != 2) {
+				gb_printf_err("N64 SDK description %.*s:%td: 'tool' takes a packaging step and one path\n", LIT(path), line_number);
+				return false;
+			}
+			isize step = -1;
+			for (isize index = 0; index < N64Step_COUNT; index += 1) {
+				if (values[0].raw == make_string_c(n64_step_names[index])) {
+					step = index;
+				}
+			}
+			if (step < 0) {
+				gb_printf_err("N64 SDK description %.*s:%td: unknown packaging step '%.*s'\n", LIT(path), line_number, LIT(values[0].raw));
+				return false;
+			}
+			if (description->tools[step].value.len > 0) {
+				gb_printf_err("N64 SDK description %.*s:%td: 'tool %s' appears twice\n", LIT(path), line_number, n64_step_names[step]);
+				return false;
+			}
+			description->tools[step] = values[1];
+		}
+		if (!known) {
+			gb_printf_err("N64 SDK description %.*s:%td: unknown key '%.*s'\n", LIT(path), line_number, LIT(key));
+			return false;
+		}
+		if (values.count == 0) {
+			gb_printf_err("N64 SDK description %.*s:%td: '%.*s' takes at least one word\n", LIT(path), line_number, LIT(key));
+			return false;
+		}
+	}
+	if (description->linker_script.len == 0) {
+		gb_printf_err("N64 SDK description %.*s: declares no linker-script\n", LIT(path));
+		return false;
+	}
+	if (description->tools[N64Step_n64tool].value.len == 0) {
+		gb_printf_err("N64 SDK description %.*s: declares no n64tool, which writes the ROM\n", LIT(path));
+		return false;
+	}
+	return true;
+}
+
+gb_internal bool n64_sdk_declares(N64SdkDescription const &description, N64Step step) {
+	return description.tools[step].value.len > 0;
+}
+
+// Checks what the description requires, and the tool of each step the build runs unless -n64-pack runs it.
+gb_internal bool n64_validate_sdk(N64SdkDescription const &description, N64BuildSettings const &settings) {
+	String const &sdk_root = settings.sdk_root;
 	bool valid = true;
-	for (String const &relative_path : required_files) {
-		String path = n64_path_join(temporary_allocator(), sdk_root, relative_path);
-		if (!gb_file_exists(alloc_cstring(temporary_allocator(), path)) || path_is_directory(path)) {
-			gb_printf_err("N64 SDK %.*s is missing required file: %.*s\n", LIT(sdk_root), LIT(relative_path));
+	for (N64SdkWord const &file : description.require) {
+		if (!gb_file_exists(alloc_cstring(temporary_allocator(), file.value)) || path_is_directory(file.value)) {
+			gb_printf_err("N64 SDK %.*s is missing required file: %.*s\n", LIT(sdk_root), LIT(n64_sdk_display(file)));
 			valid = false;
 		}
 	}
-	for (String const &relative_path : required_tools) {
-		String path = n64_path_join(temporary_allocator(), sdk_root, relative_path);
-		if (!n64_sdk_tool_is_executable(path)) {
-			gb_printf_err("N64 SDK %.*s is missing required executable tool: %.*s\n", LIT(sdk_root), LIT(relative_path));
+	N64Step unconditional_steps[] = {N64Step_n64sym, N64Step_n64elfcompress, N64Step_n64tool, N64Step_ed64romconfig};
+	for (N64Step step : unconditional_steps) {
+		if (!n64_sdk_declares(description, step) || n64_step_runs_pack(settings, step)) {
+			continue;
+		}
+		if (!n64_sdk_tool_is_executable(description.tools[step].value)) {
+			gb_printf_err("N64 SDK %.*s is missing required executable tool: %.*s\n",
+			              LIT(sdk_root), LIT(n64_sdk_display(description.tools[step])));
 			valid = false;
 		}
 	}
-	if (n64_gcc_runtime_dir(sdk_root).len == 0) {
+	if (description.names_gcc && description.gcc_runtime.len == 0) {
 		gb_printf_err("N64 SDK %.*s needs exactly one GCC runtime: lib/gcc/mips64-elf/<version>/ with %s\n",
 		              LIT(sdk_root), "crti.o, crtbegin.o, crtend.o, crtn.o and libgcc.a");
 		valid = false;
 	}
-	return valid;
+	if (!valid) {
+		return false;
+	}
+
+	struct Optional { bool requested; char const *option; N64Step step; };
+	bool header = settings.save_type.len > 0 || settings.rtc;
+	char const *header_option = settings.save_type.len > 0 ? "-n64-save-type" : "-n64-rtc";
+	for (String const &controller : settings.controllers) {
+		if (!header && controller.len > 0) {
+			header = true;
+			header_option = "-n64-controllers";
+		}
+	}
+	Optional optional[] = {
+		{settings.assets.len > 0,   "-n64-assets",   N64Step_mkdfs},
+		{settings.metadata.len > 0, "-n64-metadata", N64Step_n64metadata},
+		{header,                    header_option,   N64Step_ed64romconfig},
+	};
+	for (Optional const &entry : optional) {
+		if (!entry.requested) {
+			continue;
+		}
+		if (!n64_sdk_declares(description, entry.step)) {
+			gb_printf_err("%s requires the SDK description to declare a %s tool: %.*s\n",
+			              entry.option, n64_step_names[entry.step], LIT(description.path));
+			return false;
+		}
+		N64SdkWord const &tool = description.tools[entry.step];
+		if (!n64_step_runs_pack(settings, entry.step) && !n64_sdk_tool_is_executable(tool.value)) {
+			gb_printf_err("%s requires the executable N64 SDK tool %.*s in %.*s\n",
+			              entry.option, LIT(n64_sdk_display(tool)), LIT(sdk_root));
+			return false;
+		}
+	}
+	return true;
 }
 
 // The ROM links with the LLVM fork's ld.lld and strips with its llvm-strip; n64sym runs its llvm-objdump and
@@ -220,7 +525,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 	return false;
 #else
 	if (request.lto_kind != LTO_None) {
-		gb_printf_err("-target:n64 does not support LTO in the libdragon build pipeline\n");
+		gb_printf_err("-target:n64 does not support LTO in the integrated N64 build\n");
 		return false;
 	}
 	if (request.reloc_mode != RelocMode_Static) {
@@ -228,7 +533,7 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		return false;
 	}
 	if (request.no_crt || request.no_entry_point) {
-		gb_printf_err("-target:n64 executable builds do not support -no-crt or -no-entry-point; libdragon's crt0 and n64.ld own startup\n");
+		gb_printf_err("-target:n64 executable builds do not support -no-crt or -no-entry-point; the SDK description's startup objects and linker script own startup\n");
 		return false;
 	}
 	if (request.linker_choice != Linker_Default) {
@@ -253,26 +558,14 @@ gb_internal bool n64_prepare_build(N64PrepareBuildRequest const &request) {
 		return false;
 	}
 	bool packs = request.settings.pack.len > 0;
-	if (!n64_validate_sdk_root(sdk_root, !packs) || !n64_validate_llvm_rom_tools()) {
+	N64SdkDescription description = {};
+	if (!n64_load_sdk_description(request.settings, &description) || !n64_validate_sdk(description, request.settings) ||
+	    !n64_validate_llvm_rom_tools()) {
 		return false;
 	}
 	if (packs && !n64_sdk_tool_is_executable(request.settings.pack)) {
 		gb_printf_err("-n64-pack must name an executable, got %.*s\n", LIT(request.settings.pack));
 		return false;
-	}
-	if (request.settings.assets.len > 0 && !packs) {
-		String tool = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("bin/mkdfs"));
-		if (!n64_sdk_tool_is_executable(tool)) {
-			gb_printf_err("-n64-assets requires the executable N64 SDK tool bin/mkdfs in %.*s\n", LIT(sdk_root));
-			return false;
-		}
-	}
-	if (request.settings.metadata.len > 0) {
-		String tool = n64_path_join(temporary_allocator(), sdk_root, STR_LIT("bin/n64metadata"));
-		if (!n64_sdk_tool_is_executable(tool)) {
-			gb_printf_err("-n64-metadata requires the executable N64 SDK tool bin/n64metadata in %.*s\n", LIT(sdk_root));
-			return false;
-		}
 	}
 	return true;
 #endif
@@ -290,8 +583,14 @@ gb_internal bool n64_create_symlink(String const &source_path, String const &lin
 	) == 0;
 }
 
-gb_internal bool n64_foreign_input_is_sdk_library(String const &input) {
-	return input == "c" || input == "m" || input == "dragon" || input == "dragonsys";
+// A foreign import of a library the SDK description's link already names, such as "c", adds no input.
+gb_internal bool n64_foreign_input_is_sdk_library(N64BuildRequest const &request, String const &input) {
+	for (String const &library : request.sdk.sdk_libraries) {
+		if (input == library) {
+			return true;
+		}
+	}
+	return false;
 }
 
 gb_internal bool n64_foreign_input_is_source(String const &input) {
@@ -310,10 +609,15 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 	for (N64ForeignLibrary const &library : request.foreign_libraries) {
 		for (String const &path : library.paths) {
 			String input = string_trim_whitespace(path);
-			if (n64_foreign_input_is_sdk_library(input)) {
+			if (n64_foreign_input_is_sdk_library(request, input)) {
 				continue;
 			}
 			String extension = path_extension(input, false);
+			if (extension.len == 0 && string_index_byte(input, '/') < 0) {
+				gb_printf_err("N64 foreign import '%.*s' names a library that the SDK description %.*s does not declare with sdk-library\n",
+				              LIT(input), LIT(request.sdk.path));
+				return false;
+			}
 			bool source = n64_foreign_input_is_source(input);
 			if (!source &&
 			    !str_eq_ignore_case(extension, STR_LIT("o")) &&
@@ -471,13 +775,12 @@ gb_internal String n64_sdk_path(N64BuildSettings const &settings, char const *re
 	return n64_path_join(permanent_allocator(), settings.sdk_root, make_string_c(relative_path));
 }
 
-// Starts argv with -n64-pack's `<pack> --n64-tool <tool>` when given, else with the SDK's bin/<tool>.
-gb_internal void n64_packaging_tool(N64Argv *argv, N64BuildSettings const &settings, char const *tool) {
-	if (settings.pack.len > 0) {
-		n64_arg(argv, settings.pack); n64_arg(argv, "--n64-tool"); n64_arg(argv, tool);
+// Starts argv with -n64-pack's `<pack> --n64-tool <step>` for a step it runs, else with the SDK description's tool.
+gb_internal void n64_packaging_tool(N64Argv *argv, N64BuildRequest const &request, N64Step step) {
+	if (n64_step_runs_pack(request.settings, step)) {
+		n64_arg(argv, request.settings.pack); n64_arg(argv, "--n64-tool"); n64_arg(argv, n64_step_names[step]);
 	} else {
-		gbAllocator a = permanent_allocator();
-		n64_arg(argv, n64_path_join(a, settings.sdk_root, concatenate_strings(a, STR_LIT("bin/"), make_string_c(tool))));
+		n64_arg(argv, request.sdk.tools[step].value);
 	}
 }
 
@@ -770,7 +1073,7 @@ gb_internal i32 n64_compile_foreign_sources(N64BuildRequest *request, N64Interme
 		for_array(path_index, library.paths) {
 			String input = string_trim_whitespace(library.paths[path_index]);
 			paths[path_index] = library.paths[path_index];
-			if (n64_foreign_input_is_sdk_library(input) || !n64_foreign_input_is_source(input)) {
+			if (n64_foreign_input_is_sdk_library(*request, input) || !n64_foreign_input_is_source(input)) {
 				continue;
 			}
 			if (count == 0 && mkdir(alloc_cstring(a, files.foreign), 0755) != 0 && errno != EEXIST) {
@@ -798,39 +1101,41 @@ gb_internal i32 n64_compile_foreign_sources(N64BuildRequest *request, N64Interme
 }
 
 gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &files, char **env) {
-	N64BuildSettings const &s = request->settings;
 	// Compiler object paths come from a hash map whose order is not stable
 	// between runs; sort them so the link, and so the ROM, is reproducible.
 	array_sort(request->object_paths, string_cmp);
 
+	N64SdkDescription const &sdk = request->sdk;
 	gbAllocator a = permanent_allocator();
-	String runtime = n64_gcc_runtime_dir(s.sdk_root);
 	N64Argv argv = {};
 	array_init(&argv, a);
-	// The link mips64-elf-g++ drove (collect2 with n64.mk's N64_LDFLAGS), with the crt objects and libraries it added.
+	// The link mips64-elf-g++ drove for libdragon (collect2 with n64.mk's N64_LDFLAGS), with the SDK description's
+	// startup objects, libraries and linker script in the places the driver put libdragon's.
 	n64_arg(&argv, n64_llvm_tool("ld.lld"));
 	n64_arg(&argv, "-EB");
 	n64_arg(&argv, "-o"); n64_arg(&argv, files.elf);
-	n64_arg(&argv, n64_path_join(a, runtime, STR_LIT("crti.o")));
-	n64_arg(&argv, n64_path_join(a, runtime, STR_LIT("crtbegin.o")));
-	n64_arg(&argv, concatenate_strings(a, STR_LIT("-L"), runtime));
-	n64_arg(&argv, concatenate_strings(a, STR_LIT("-L"), n64_sdk_path(s, "mips64-elf/lib")));
+	for (String const &object : sdk.startup) {
+		n64_arg(&argv, object);
+	}
+	for (String const &directory : sdk.library_dirs) {
+		n64_arg(&argv, concatenate_strings(a, STR_LIT("-L"), directory));
+	}
 	for (String const &object : request->object_paths) {
 		n64_arg(&argv, object);
 	}
 	for (N64ForeignLibrary const &library : request->foreign_libraries) {
 		for (String const &path : library.paths) {
 			String input = string_trim_whitespace(path);
-			if (!n64_foreign_input_is_sdk_library(input)) {
+			if (!n64_foreign_input_is_sdk_library(*request, input)) {
 				n64_arg(&argv, input);
 			}
 		}
 	}
-	char const *ldflags[] = {
-		"-ldragon", "-lm", "-ldragonsys", "-Tn64.ld", "--gc-sections", "--wrap", "__do_global_ctors",
-		"-z", "max-page-size=4096",
-	};
-	for (char const *flag : ldflags) {
+	for (String const &library : sdk.libraries) {
+		n64_arg(&argv, library);
+	}
+	n64_arg(&argv, concatenate_strings(a, STR_LIT("-T"), sdk.linker_script));
+	for (String const &flag : sdk.link_flags) {
 		n64_arg(&argv, flag);
 	}
 	n64_arg(&argv, concatenate_strings(a, STR_LIT("-Map="), files.map));
@@ -839,12 +1144,12 @@ gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &f
 	for (N64ForeignLibrary const &library : request->foreign_libraries) {
 		n64_add_linker_words(&argv, library.extra_linker_flags);
 	}
-	char const *libraries[] = {"-lstdc++", "-lm", "-lc", "-lgcc"};
-	for (char const *library : libraries) {
+	for (String const &library : sdk.system_libraries) {
 		n64_arg(&argv, library);
 	}
-	n64_arg(&argv, n64_path_join(a, runtime, STR_LIT("crtend.o")));
-	n64_arg(&argv, n64_path_join(a, runtime, STR_LIT("crtn.o")));
+	for (String const &object : sdk.finish) {
+		n64_arg(&argv, object);
+	}
 	return n64_run_tool("link", argv, env, request->show_system_calls);
 }
 
@@ -858,26 +1163,29 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	// n64sym --all elf elf.sym
 	// n64sym runs $N64_INST/bin/mips64-elf-objdump and mips64-elf-addr2line, so it gets N64_INST naming a relative
 	// directory inside the intermediates whose bin holds llvm-objdump and llvm-addr2line under those names.
+	bool symbols = n64_sdk_declares(request.sdk, N64Step_n64sym);
 	String sym_bin = n64_path_join(a, files.sym_sdk, STR_LIT("bin"));
-	for (String const &directory : {files.sym_sdk, sym_bin}) {
-		if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
-			gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
-			return 1;
+	if (symbols) {
+		for (String const &directory : {files.sym_sdk, sym_bin}) {
+			if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
+				gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
+				return 1;
+			}
 		}
-	}
-	for (auto const &tool : n64_sym_tools) {
-		String link = n64_path_join(a, sym_bin, make_string_c(tool[0]));
-		n64_remove_file_if_present(link);
-		if (!n64_create_symlink(n64_llvm_tool(tool[1]), link)) {
-			gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(link), LIT(n64_llvm_tool(tool[1])), strerror(errno));
-			return 1;
+		for (auto const &tool : n64_sym_tools) {
+			String link = n64_path_join(a, sym_bin, make_string_c(tool[0]));
+			n64_remove_file_if_present(link);
+			if (!n64_create_symlink(n64_llvm_tool(tool[1]), link)) {
+				gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(link), LIT(n64_llvm_tool(tool[1])), strerror(errno));
+				return 1;
+			}
 		}
+		array_init(&argv, a);
+		n64_arg(&argv, request.sdk.tools[N64Step_n64sym].value); n64_arg(&argv, "--all");
+		n64_arg(&argv, "odin-n64.elf"); n64_arg(&argv, "odin-n64.elf.sym");
+		result = n64_run_tool("sym", argv, n64_sanitized_environment("N64_INST=n64sym"), show, false, alloc_cstring(a, files.dir));
+		if (result != 0) return result;
 	}
-	array_init(&argv, a);
-	n64_arg(&argv, n64_sdk_path(s, "bin/n64sym")); n64_arg(&argv, "--all");
-	n64_arg(&argv, "odin-n64.elf"); n64_arg(&argv, "odin-n64.elf.sym");
-	result = n64_run_tool("sym", argv, n64_sanitized_environment("N64_INST=n64sym"), show, false, alloc_cstring(a, files.dir));
-	if (result != 0) return result;
 
 	// cp elf elf.stripped; strip -s elf.stripped
 	if (!gb_file_copy(alloc_cstring(a, files.elf), alloc_cstring(a, files.stripped), false)) {
@@ -889,16 +1197,18 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	if ((result = n64_run_tool("strip", argv, env, show)) != 0) return result;
 
 	// n64elfcompress -o <dir>/ -c 1 elf.stripped   (rewrites the file in place)
-	array_init(&argv, a);
-	n64_packaging_tool(&argv, s, "n64elfcompress");
-	n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, files.dir, STR_LIT("/")));
-	n64_arg(&argv, "-c"); n64_arg(&argv, "1"); n64_arg(&argv, files.stripped);
-	if ((result = n64_run_tool("elfcompress", argv, env, show)) != 0) return result;
+	if (n64_sdk_declares(request.sdk, N64Step_n64elfcompress)) {
+		array_init(&argv, a);
+		n64_packaging_tool(&argv, request, N64Step_n64elfcompress);
+		n64_arg(&argv, "-o"); n64_arg(&argv, concatenate_strings(a, files.dir, STR_LIT("/")));
+		n64_arg(&argv, "-c"); n64_arg(&argv, "1"); n64_arg(&argv, files.stripped);
+		if ((result = n64_run_tool("elfcompress", argv, env, show)) != 0) return result;
+	}
 
 	// mkdfs dfs <assets> >/dev/null
 	if (s.assets.len > 0) {
 		array_init(&argv, a);
-		n64_packaging_tool(&argv, s, "mkdfs"); n64_arg(&argv, files.dfs); n64_arg(&argv, s.assets);
+		n64_packaging_tool(&argv, request, N64Step_mkdfs); n64_arg(&argv, files.dfs); n64_arg(&argv, s.assets);
 		if ((result = n64_run_tool("mkdfs", argv, env, show, true)) != 0) return result;
 	}
 
@@ -906,7 +1216,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	String title = s.title.len > 0 ? s.title : n64_sanitized_rom_title(request.output_name);
 	n64_remove_file_if_present(files.rom_tmp);
 	array_init(&argv, a);
-	n64_packaging_tool(&argv, s, "n64tool");
+	n64_packaging_tool(&argv, request, N64Step_n64tool);
 	n64_arg(&argv, "--toc"); n64_arg(&argv, "--title"); n64_arg(&argv, title);
 	n64_arg(&argv, "--category"); n64_arg(&argv, "N");
 	if (s.region.len > 0) { n64_arg(&argv, "--region"); n64_arg(&argv, s.region); }
@@ -916,17 +1226,20 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	}
 	n64_arg(&argv, "--output"); n64_arg(&argv, files.rom_tmp);
 	n64_arg(&argv, "--align"); n64_arg(&argv, "256"); n64_arg(&argv, files.stripped);
-	n64_arg(&argv, files.sym);
+	if (n64_sdk_declares(request.sdk, N64Step_n64sym)) {
+		n64_arg(&argv, files.sym);
+	}
 	if (s.assets.len > 0) {
 		n64_arg(&argv, files.dfs);
 	}
-	// N64_TOOLFILES = $(wildcard <sdk>/mips64-elf/include/*.version), sorted like make's glob.
+	// The SDK description's rom-files, as libdragon's N64_TOOLFILES = $(wildcard <sdk>/mips64-elf/include/*.version),
+	// sorted like make's glob.
 	Array<FileInfo> include_files = {};
 	Array<String> version_files = {};
 	array_init(&version_files, a);
-	if (read_directory(n64_sdk_path(s, "mips64-elf/include"), &include_files) == ReadDirectory_None) {
+	if (request.sdk.rom_files_dir.len > 0 && read_directory(request.sdk.rom_files_dir, &include_files) == ReadDirectory_None) {
 		for (FileInfo const &file : include_files) {
-			if (!file.is_dir && string_ends_with(file.name, STR_LIT(".version"))) {
+			if (!file.is_dir && string_ends_with(file.name, request.sdk.rom_files_suffix)) {
 				array_add(&version_files, file.fullpath);
 			}
 		}
@@ -937,25 +1250,27 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	}
 	if ((result = n64_run_tool("n64tool", argv, env, show)) != 0) return result;
 
-	// ed64romconfig N64_ED64ROMCONFIGFLAGS z64.tmp (always runs: --regionfree is a default)
-	array_init(&argv, a);
-	n64_packaging_tool(&argv, s, "ed64romconfig");
-	if (s.save_type.len > 0) { n64_arg(&argv, "--savetype"); n64_arg(&argv, s.save_type); }
-	if (s.rtc) { n64_arg(&argv, "--rtc"); }
-	n64_arg(&argv, "--regionfree");
-	char const *controller_flags[4] = {"--controller1", "--controller2", "--controller3", "--controller4"};
-	for (isize index = 0; index < 4; index += 1) {
-		if (s.controllers[index].len > 0) {
-			n64_arg(&argv, controller_flags[index]); n64_arg(&argv, s.controllers[index]);
+	// ed64romconfig N64_ED64ROMCONFIGFLAGS z64.tmp (runs whenever the SDK declares it: --regionfree is a default)
+	if (n64_sdk_declares(request.sdk, N64Step_ed64romconfig)) {
+		array_init(&argv, a);
+		n64_packaging_tool(&argv, request, N64Step_ed64romconfig);
+		if (s.save_type.len > 0) { n64_arg(&argv, "--savetype"); n64_arg(&argv, s.save_type); }
+		if (s.rtc) { n64_arg(&argv, "--rtc"); }
+		n64_arg(&argv, "--regionfree");
+		char const *controller_flags[4] = {"--controller1", "--controller2", "--controller3", "--controller4"};
+		for (isize index = 0; index < 4; index += 1) {
+			if (s.controllers[index].len > 0) {
+				n64_arg(&argv, controller_flags[index]); n64_arg(&argv, s.controllers[index]);
+			}
 		}
+		n64_arg(&argv, files.rom_tmp);
+		if ((result = n64_run_tool("ed64romconfig", argv, env, show)) != 0) return result;
 	}
-	n64_arg(&argv, files.rom_tmp);
-	if ((result = n64_run_tool("ed64romconfig", argv, env, show)) != 0) return result;
 
 	// n64metadata [-v] z64.tmp ini   (companion files resolve against the INI's own directory)
 	if (s.metadata.len > 0) {
 		array_init(&argv, a);
-		n64_arg(&argv, n64_sdk_path(s, "bin/n64metadata"));
+		n64_packaging_tool(&argv, request, N64Step_n64metadata);
 		if (show) { n64_arg(&argv, "-v"); }
 		n64_arg(&argv, files.rom_tmp); n64_arg(&argv, s.metadata);
 		if ((result = n64_run_tool("n64metadata", argv, env, show)) != 0) return result;
@@ -964,7 +1279,7 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 }
 
 gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
-	if (!n64_validate_link_inputs(request)) {
+	if (!n64_load_sdk_description(request.settings, &request.sdk) || !n64_validate_link_inputs(request)) {
 		return {1, {}};
 	}
 	N64Intermediates files = {};
