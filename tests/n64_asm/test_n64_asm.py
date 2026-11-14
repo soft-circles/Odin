@@ -934,7 +934,8 @@ class Traps(unittest.TestCase):
                             want = a if taken(a, b) else (a + 1) & 0xFFFFFFFF
                             self.assertEqual(run_mips(offset, words, (a, b)), want)
 
-    NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_at_scratch", "noreorder_mult_in_slot")
+    NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_jump_slot", "noreorder_at_scratch",
+                 "noreorder_mult_in_slot")
 
     def test_noreorder_slots_assemble_as_written(self):
         # #noreorder: the instruction after a branch is its delay slot, exactly as
@@ -943,6 +944,7 @@ class Traps(unittest.TestCase):
         expect = {
             "noreorder_filled":     [0x10850002, 0x00801025, 0x24820001],              # beq a0,a1,+2; move v0,a0; addiu
             "noreorder_likely":     [0x00001025, 0x2484FFFF, 0x5C80FFFE, 0x24420008],  # move; addiu; bgtzl a0,-2; addiu v0,v0,8
+            "noreorder_jump_slot":  [0x14800003, 0x00801025, 0x10000002, 0x24820003, 0x24820004],  # bnez; move; b; addiu; addiu
             "noreorder_at_scratch": [0x24810005, 0x00211021],                          # addiu at,a0,5; addu v0,at,at
             "noreorder_mult_in_slot": [0x00000000, 0x14800001, 0x00840019, 0x00001012],  # nop; bnez a0,+1; multu a0,a0; mflo v0
         }
@@ -960,6 +962,9 @@ class Traps(unittest.TestCase):
             for n in (0, 1, 2, 5, 0xFFFFFFFD):
                 want = 8 * (n - 1) if 1 <= n < 0x80000000 else 0
                 self.assertEqual(run_mips(offset, words, (n,)), want, f"n={n}")
+            offset, words = symbols["noreorder_jump_slot"]
+            for a in (0, 1, 0xFFFFFFFF):
+                self.assertEqual(run_mips(offset, words, (a,)), 3 if a == 0 else (a + 4) & 0xFFFFFFFF)
             offset, words = symbols["noreorder_at_scratch"]
             for a in (0, 7, 0xFFFFFFFF):
                 self.assertEqual(run_mips(offset, words, (a,)), (2 * (a + 5)) & 0xFFFFFFFF)

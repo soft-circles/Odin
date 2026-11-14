@@ -143,6 +143,20 @@ package n64_asm_regress
 	return r
 }
 
+// The slot of an unconditional `b` is reachable and runs: 3 when a == 0, else a + 4.
+@(export) noreorder_jump_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		bnez a, .skip
+		move r, a
+		b .end
+		addiu r, a, 3
+	.skip:
+		addiu r, a, 4
+	.end:
+	}
+	return t(a)
+}
+
 // Under `.set noat` a #noreorder body may use $1 as a scratch.
 @(export) noreorder_at_scratch :: proc "contextless" (a: u32) -> u32 {
 	t :: asm(a: u32) -> (r: u32) [#noreorder] {

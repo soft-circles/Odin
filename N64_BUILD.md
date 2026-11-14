@@ -382,10 +382,12 @@ The contract, detailed in [CPU asm templates](MIPS_ASM.md), is:
 
 - Registers use ABI names (`%t0`, `%a1`), FPR names (`%f12`), COP0 names
   (`%c0_status`) and `%hi`, `%lo`, `%fcc0`. FPR names fill FPU slots and pin
-  `f32`/`f64` parameters. `%at` is reserved for the assembler.
+  `f32`/`f64` parameters. `%at` is reserved for the assembler, except as a
+  scratch in the body of a `#noreorder` template.
 - FPU mnemonics spell `.` as `_`: `add_s`, `cvt_d_w`, `c_olt_d`.
 - Write branches without a delay-slot instruction; the assembler fills each
-  slot with a `nop`. Branch and jump targets are template labels only.
+  slot with a `nop`. A `#noreorder` template fills its own slots instead.
+  Branch and jump targets are template labels only.
 - CP0 and HI/LO hazards inside a template are not filled. Write their `nop`s
   explicitly. The generator pads HI/LO hazards that would straddle the
   template boundary.
@@ -459,9 +461,9 @@ spaces are supported.
 - Odin validates and drives the SDK but does not install or update it.
 - Asset conversion beyond raw DragonFS directory packaging remains an external
   project concern.
-- CPU `asm` templates do not fill CP0 or HI/LO hazards inside a template,
-  cannot reserve a branch delay slot for a useful instruction, and cannot name
-  `%at`.
+- CPU `asm` templates do not fill CP0 or HI/LO hazards inside a template.
+  Only a `#noreorder` template can put a useful instruction in a branch delay
+  slot or name `%at`.
 
 ## Canonical samples and evidence
 
