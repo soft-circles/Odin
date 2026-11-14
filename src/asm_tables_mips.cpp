@@ -1221,7 +1221,9 @@ struct Asm_mips {
 		if (imm == nullptr) {
 			return "'li' of a $ immediate parameter may assemble to two instructions ('lui' + 'ori')";
 		}
-		i64 v = *imm;
+		// LLVM reads li's immediate as 32 bits, sign-extended: 0xFFFFFFFF is
+		// `addiu r, $0, -1`.
+		i64 v = cast(i64)cast(i32)cast(u32)*imm;
 		bool one_word = (-32768 <= v && v <= 65535) || ((v & 0xFFFF) == 0);
 		if (!one_word) {
 			return "this 'li' assembles to two instructions ('lui' + 'ori')";
