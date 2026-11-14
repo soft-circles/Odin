@@ -77,11 +77,11 @@ binary is the compiler used by the commands below.
 
 The setup example uses libdragon revision
 `c79a52b42ac790e06e797aede43914dd8754cd5f` as a default. Odin checks that the
-selected SDK contains the required libraries, linker script and executable
-tools. Other revisions and local changes are allowed; build errors
+selected SDK contains the files and executable tools that its
+[SDK description](#sdk-descriptions) requires. Other revisions and local changes are allowed; build errors
 and the ABI/runtime tests expose compatibility problems. SDK version metadata
 are not required. Odin does not read the SDK's `n64.mk`; it runs the same
-packaging steps itself.
+packaging steps itself, as libdragon's SDK description declares them.
 
 1. Install the libdragon GCC toolchain by following the official
    [installation guide](https://github.com/DragonMinded/libdragon/wiki/Installing-libdragon)
@@ -133,6 +133,53 @@ odin build . -target:n64 \
 the `n64` directory in its root (`ODIN_ROOT`, or the directory that holds the
 `odin` executable) if that directory exists, so an SDK installed or linked
 there needs no configuration. Odin does not download or update the SDK.
+
+## SDK descriptions
+
+An SDK description declares what an SDK supplies to a ROM build: the files it
+requires, the startup objects, libraries and linker script of the link, and the
+tool each packaging step runs. `-n64-sdk:<file>` names one. Without it Odin uses
+the SDK root's `odin-n64.sdk` when that file exists, and otherwise
+[`misc/n64/libdragon.sdk`](misc/n64/libdragon.sdk), which declares libdragon as
+`n64.mk` links and packages a ROM.
+
+Each line is a key and its whitespace-separated words; a line starting with
+`#` is a comment. In each word `{sdk}` is the SDK root, `{dir}` the directory
+that holds the description and `{gcc}` the SDK's single
+`lib/gcc/mips64-elf/<version>` directory, which must exist only when a word
+names it. Words cannot contain spaces, but the paths that placeholders stand
+for can.
+
+| Key | Words | Meaning |
+| --- | --- | --- |
+| `require` | paths | Files that must exist before the build starts |
+| `startup` | paths | Link inputs before the Odin objects, such as crt0 |
+| `library-dir` | paths | `-L` directories |
+| `libraries` | words | After the Odin and foreign objects |
+| `linker-script` | one path | Passed as `-T<path>`; required, once |
+| `link-flags` | words | After the linker script |
+| `system-libraries` | words | After `-extra-linker-flags` and the foreign imports' flags |
+| `finish` | paths | Link inputs last |
+| `sdk-library` | names | `foreign import "system:<name>"` libraries the link already names |
+| `tool` | step, path | The tool of a packaging step |
+| `rom-files` | directory, suffix | Files with the suffix in the directory, appended to `n64tool`'s inputs |
+
+ld.lld links `-EB -o <elf>`, then `startup`, `library-dir`, the objects,
+`libraries`, `linker-script`, `link-flags`, the map, `-extra-linker-flags`,
+`system-libraries` and `finish`, in that order. The packaging steps run in a
+fixed order: `n64sym`, then llvm-strip, `n64elfcompress`, `mkdfs`, `n64tool`,
+`ed64romconfig` and `n64metadata`, each with the arguments `n64.mk` gives it.
+`n64tool` writes the ROM, so a description must declare it. A step whose tool
+the description leaves out does not run, and the options that need it
+(`-n64-assets` for `mkdfs`, `-n64-metadata` for `n64metadata`, and
+`-n64-save-type`, `-n64-rtc` and `-n64-controllers` for `ed64romconfig`) are
+rejected. `-n64-pack` runs `n64elfcompress`, `mkdfs`, `n64tool` and
+`ed64romconfig` in place of the declared tools.
+
+The N64 runtime imports `system:c` for `write`, `abort`, `malloc`, `realloc`
+and `free`, and `system:dragon` for `debug_init_emulog`, so an SDK supplies
+those symbols and its description declares `sdk-library c dragon`. Foreign C
+and assembly sources still compile against the SDK's `mips64-elf/include`.
 
 ## Visible quickstart
 

@@ -35,6 +35,9 @@ gb_internal bool n64_prepare_build_from_context(String const &init_filename) {
 			build_context.n64.sdk_root = path_to_full_path(permanent_allocator(), bundled);
 		}
 	}
+	if (n64_rom && build_context.n64.sdk_root.len > 0 && build_context.n64.sdk_description.len == 0) {
+		build_context.n64.sdk_description = n64_default_sdk_description(build_context.n64.sdk_root);
+	}
 	if (n64_rom && build_context.n64.title.len == 0) {
 		// Default the ROM title to the main package's directory name, not the
 		// -out file name, so `-out:build/rom.z64` keeps the project's name.

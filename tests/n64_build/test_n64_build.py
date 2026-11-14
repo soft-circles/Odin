@@ -246,6 +246,8 @@ class N64OptionValidationTests(unittest.TestCase):
 			(f"-n64-metadata:{metadata_directory}", "existing file"),
 			(f"-n64-assets:{self.root / 'missing assets'}", "existing directory"),
 			(f"-n64-metadata:{self.root / 'missing.ini'}", "existing file"),
+			(f"-n64-sdk:{metadata_directory}", "existing file"),
+			(f"-n64-sdk:{self.root / 'missing.sdk'}", "existing file"),
 		)
 		for option, diagnostic in cases:
 			with self.subTest(option=option):
@@ -315,7 +317,7 @@ class N64SdkDiscoveryTests(unittest.TestCase):
 	def test_sdk_falls_back_to_n64_in_the_odin_root(self):
 		odin_root = self.root / "odin root"
 		odin_root.mkdir()
-		for name in ("base", "core", "shared", "vendor"):
+		for name in ("base", "core", "shared", "vendor", "misc"):
 			(odin_root / name).symlink_to(ODIN_ROOT / name, target_is_directory=True)
 		bundled = odin_root / "n64"
 		bundled.mkdir()
@@ -785,6 +787,202 @@ class N64StubPackagingTests(unittest.TestCase):
 		for call in calls:
 			with self.subTest(tool=call["tool"]):
 				self.assertFalse("CCC_OVERRIDE_OPTIONS" in call["env"])
+
+
+	def write_description(self, path: Path, text: str) -> Path:
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_text(text, encoding="utf-8")
+		return path
+
+	def own_sdk(self) -> tuple[Path, Path]:
+		"""An SDK with none of libdragon's files, whose description lives outside it beside its own startup."""
+		sdk = self.root / "own sdk"
+		self.make_stub(sdk / "tools/n64tool")
+		self.make_stub(sdk / "tools/n64sym")
+		(sdk / "lib").mkdir(parents=True)
+		(sdk / "lib/libc.a").touch()
+		startup = self.root / "own startup"
+		startup.mkdir()
+		for name in ("entry.o", "ctors.o", "own.ld"):
+			(startup / name).touch()
+		description = self.write_description(startup / "own sdk.sdk", (
+			"# An SDK that owns its startup\n"
+			"\n"
+			"require {sdk}/lib/libc.a {dir}/own.ld\n"
+			"startup {dir}/entry.o\n"
+			"startup {dir}/ctors.o\n"
+			"library-dir {sdk}/lib {dir}\n"
+			"libraries -lown\n"
+			"linker-script own.ld\n"
+			"link-flags --gc-sections\n"
+			"system-libraries -lc\n"
+			"finish {dir}/entry.o\n"
+			"sdk-library own c dragon\n"
+			"tool n64tool {sdk}/tools/n64tool\n"
+		))
+		return sdk, description
+
+	def own_sdk_build(self, app: Path, output: Path, sdk: Path, *arguments: str):
+		return run_build(app, f"-n64-inst:{sdk}", f"-out:{output}", *arguments,
+		                 extra_env={"ODIN_N64_LLVM_BIN": str(self.llvm)})
+
+	def test_an_sdk_description_supplies_startup_the_linker_script_and_packaging(self):
+		sdk, description = self.own_sdk()
+		startup = description.parent
+		app = create_app(self.root)
+		(app / "main.odin").write_text(
+			"package n64_build_fixture\n\n"
+			"foreign import own \"system:own\"\n\n"
+			"main :: proc() {}\n",
+			encoding="utf-8",
+		)
+		output = app / "own.z64"
+		build = self.intermediates(output)
+
+		result = self.own_sdk_build(app, output, sdk, f"-n64-sdk:{description}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(output.read_bytes(), b"stub rom")
+		calls = self.calls()
+		self.assertEqual(
+			[(call["program"], call["tool"]) for call in calls],
+			[(str(self.llvm / "ld.lld"), "ld.lld"), (str(self.llvm / "llvm-strip"), "llvm-strip"),
+			 (str(sdk / "tools/n64tool"), "n64tool")],
+		)
+		link, strip, rom = calls
+		self.assertEqual(
+			link["argv"][:7],
+			["-EB", "-o", str(build / "odin-n64.elf"), str(startup / "entry.o"), str(startup / "ctors.o"),
+			 f"-L{sdk / 'lib'}", f"-L{startup}"],
+		)
+		objects = link["argv"][7:link["argv"].index("-lown")]
+		self.assertTrue(objects and all(path.endswith(".o") for path in objects), link["argv"])
+		self.assertEqual(
+			link["argv"][7 + len(objects):],
+			["-lown", "-Town.ld", "--gc-sections", f"-Map={build / 'odin-n64.map'}", "--cref", "-lc",
+			 str(startup / "entry.o")],
+		)
+		stripped = build / "odin-n64.elf.stripped"
+		self.assertEqual(strip["argv"], ["-s", str(stripped)])
+		self.assertEqual(
+			rom["argv"],
+			["--toc", "--title", "app", "--category", "N", "--output", str(build / "odin-n64.z64.tmp"),
+			 "--align", "256", str(stripped)],
+		)
+
+	def test_the_sdk_root_declares_its_own_description_and_n64_sdk_overrides_it(self):
+		sdk, description = self.own_sdk()
+		for name in ("entry.o", "ctors.o", "own.ld"):
+			shutil.copy2(description.parent / name, sdk / name)
+		self.write_description(sdk / "odin-n64.sdk", description.read_text(encoding="utf-8").replace(
+			"tool n64tool", "tool n64sym {sdk}/tools/n64sym\ntool n64tool"))
+		other = self.write_description(self.root / "other.sdk", (
+			"linker-script other.ld\nsdk-library c dragon\ntool n64tool {sdk}/tools/n64tool\n"))
+		app = create_app(self.root)
+
+		declared = self.own_sdk_build(app, app / "declared.z64", sdk)
+		declared_calls = self.calls()
+		self.log.unlink()
+		overridden = self.own_sdk_build(app, app / "overridden.z64", sdk, f"-n64-sdk:{other}")
+
+		self.assertEqual(declared.returncode, 0, declared.stdout)
+		self.assertEqual([call["tool"] for call in declared_calls], ["ld.lld", "n64sym", "llvm-strip", "n64tool"])
+		self.assertIn("-Town.ld", declared_calls[0]["argv"])
+		self.assertEqual(declared_calls[0]["argv"][3:5], [str(sdk / "entry.o"), str(sdk / "ctors.o")])
+		self.assertEqual(overridden.returncode, 0, overridden.stdout)
+		self.assertEqual([call["tool"] for call in self.calls()], ["ld.lld", "llvm-strip", "n64tool"])
+		self.assertIn("-Tother.ld", self.calls()[0]["argv"])
+		self.assertNotIn("-Town.ld", self.calls()[0]["argv"])
+
+	def test_sdk_description_errors_name_the_file_and_line(self):
+		sdk, _ = self.own_sdk()
+		app = create_app(self.root)
+		cases = (
+			("linker-script own.ld\nlink-flag --gc-sections\ntool n64tool {sdk}/tools/n64tool\n",
+			 ":2: unknown key 'link-flag'"),
+			("linker-script own.ld\ntool n64tool {sdk}/tools/n64tool\ntool n64link {sdk}/tools/n64tool\n",
+			 ":3: unknown packaging step 'n64link'"),
+			("linker-script own.ld\ntool n64tool\n", ":2: 'tool' takes a packaging step and one path"),
+			("linker-script own.ld\nlinker-script other.ld\ntool n64tool {sdk}/tools/n64tool\n",
+			 ":2: 'linker-script' takes one path and appears once"),
+			("linker-script own.ld\nstartup {sdk}/{gc}/crt0.o\ntool n64tool {sdk}/tools/n64tool\n",
+			 ":2: unknown placeholder in '{sdk}/{gc}/crt0.o'"),
+			("tool n64tool {sdk}/tools/n64tool\n", ": declares no linker-script"),
+			("linker-script own.ld\n", ": declares no n64tool"),
+		)
+		for index, (text, diagnostic) in enumerate(cases):
+			with self.subTest(diagnostic=diagnostic):
+				description = self.write_description(self.root / f"broken {index}.sdk", text)
+				result = self.own_sdk_build(app, app / "broken.z64", sdk, f"-n64-sdk:{description}")
+				self.assertNotEqual(result.returncode, 0, result.stdout)
+				self.assertIn(f"N64 SDK description {description}{diagnostic}", result.stdout)
+				self.assertEqual(self.calls(), [])
+
+	def test_a_description_names_what_it_requires_that_is_missing(self):
+		sdk, description = self.own_sdk()
+		(description.parent / "own.ld").unlink()
+		(sdk / "tools/n64tool").chmod(0o644)
+		app = create_app(self.root)
+
+		result = self.own_sdk_build(app, app / "missing.z64", sdk, f"-n64-sdk:{description}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"is missing required file: {description.parent / 'own.ld'}", result.stdout)
+		self.assertIn("is missing required executable tool: tools/n64tool", result.stdout)
+		self.assertNotIn("libdragon.a", result.stdout)
+		self.assertNotIn("GCC runtime", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def test_a_system_library_the_description_does_not_declare_is_named(self):
+		sdk, description = self.own_sdk()
+		app = create_app(self.root)
+		(app / "main.odin").write_text(
+			"package n64_build_fixture\n\n"
+			"foreign import other \"system:other\"\n\n"
+			"foreign other {\n\tother_value :: proc \"c\" () -> i32 ---\n}\n\n"
+			"main :: proc() { other_value() }\n",
+			encoding="utf-8",
+		)
+
+		result = self.own_sdk_build(app, app / "other.z64", sdk, f"-n64-sdk:{description}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 foreign import 'other' names a library that the SDK description {description} does not declare "
+		              "with sdk-library", result.stdout)
+
+	def test_rom_options_need_the_tool_their_step_runs(self):
+		sdk, description = self.own_sdk()
+		app = create_app(self.root)
+		assets = app / "assets"
+		assets.mkdir()
+		metadata = app / "metadata.ini"
+		metadata.write_text("[meta]\n", encoding="utf-8")
+		cases = (
+			(f"-n64-assets:{assets}", "-n64-assets requires the SDK description to declare a mkdfs tool"),
+			(f"-n64-metadata:{metadata}", "-n64-metadata requires the SDK description to declare a n64metadata tool"),
+			("-n64-save-type:sram256k", "-n64-save-type requires the SDK description to declare a ed64romconfig tool"),
+			("-n64-rtc", "-n64-rtc requires the SDK description to declare a ed64romconfig tool"),
+			("-n64-controllers:n64", "-n64-controllers requires the SDK description to declare a ed64romconfig tool"),
+		)
+		for option, diagnostic in cases:
+			with self.subTest(option=option):
+				result = self.own_sdk_build(app, app / "options.z64", sdk, f"-n64-sdk:{description}", option)
+				self.assertNotEqual(result.returncode, 0, result.stdout)
+				self.assertIn(diagnostic, result.stdout)
+				self.assertEqual(self.calls(), [])
+
+	def test_n64_pack_runs_only_the_steps_the_description_declares(self):
+		sdk, description = self.own_sdk()
+		(sdk / "tools/n64tool").unlink()
+		app = create_app(self.root)
+
+		result = self.own_sdk_build(app, app / "packed.z64", sdk, f"-n64-sdk:{description}", f"-n64-pack:{self.pack}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(
+			[(Path(call["program"]).name, call["tool"]) for call in self.calls()],
+			[("ld.lld", "ld.lld"), ("llvm-strip", "llvm-strip"), ("stub pack", "n64tool")],
+		)
 
 
 class N64EndToEndBuildTests(unittest.TestCase):
