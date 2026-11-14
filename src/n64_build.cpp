@@ -329,7 +329,7 @@ gb_internal bool n64_load_sdk_description(N64BuildSettings const &settings, N64S
 			bool unresolved_gcc = description->names_gcc && description->gcc_runtime.len == 0 &&
 			                      string_contains_string(word.raw, STR_LIT("{gcc}"));
 			if (path_word && !unresolved_gcc && (word.value.len == 0 || word.value[0] != '/')) {
-				gb_printf_err("N64 SDK description %.*s:%td: '%.*s' must be an absolute path; start it with {sdk} or {dir}\n",
+				gb_printf_err("N64 SDK description %.*s:%td: '%.*s' must be an absolute path; start it with /, {sdk}, {dir} or {gcc}\n",
 				              LIT(path), line_number, LIT(word.raw));
 				return false;
 			}

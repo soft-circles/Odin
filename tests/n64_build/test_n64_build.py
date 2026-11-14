@@ -919,11 +919,11 @@ class N64StubPackagingTests(unittest.TestCase):
 			("linker-script own.ld\nstartup {sdk/crt0.o\ntool n64tool {sdk}/tools/n64tool\n",
 			 ":2: unknown placeholder in '{sdk/crt0.o'"),
 			("linker-script own.ld\nstartup crt0.o\ntool n64tool {sdk}/tools/n64tool\n",
-			 ":2: 'crt0.o' must be an absolute path; start it with {sdk} or {dir}"),
+			 ":2: 'crt0.o' must be an absolute path; start it with /, {sdk}, {dir} or {gcc}"),
 			("linker-script own.ld\ntool n64tool tools/n64tool\n",
-			 ":2: 'tools/n64tool' must be an absolute path; start it with {sdk} or {dir}"),
+			 ":2: 'tools/n64tool' must be an absolute path; start it with /, {sdk}, {dir} or {gcc}"),
 			("linker-script ld/own.ld\ntool n64tool {sdk}/tools/n64tool\n",
-			 ":1: 'ld/own.ld' must be an absolute path; start it with {sdk} or {dir}"),
+			 ":1: 'ld/own.ld' must be an absolute path; start it with /, {sdk}, {dir} or {gcc}"),
 		)
 		for index, (text, diagnostic) in enumerate(cases):
 			with self.subTest(diagnostic=diagnostic):

@@ -168,9 +168,13 @@ Each line is a key and its whitespace-separated words; a line starting with
 that holds the description and `{gcc}` the SDK's single
 `lib/gcc/mips64-elf/<version>` directory, which must exist only when a word
 names it. Words cannot contain spaces, but the paths that placeholders stand
-for can. Every path must be absolute once expanded, so start it with `{sdk}`
-or `{dir}`; only a `linker-script` without a directory is searched for in the
-`library-dir` directories.
+for can. Every word of `require`, `startup`, `finish`, `library-dir`, a
+`tool`'s path and `rom-files`'s directory must be an absolute path once
+expanded, so start it with `/`, `{sdk}`, `{dir}` or `{gcc}`; so must a
+`linker-script` with a directory. ld.lld finds a `linker-script` without one,
+as it does `-T<name>`: in the working directory first, then in the
+`library-dir` directories. Words of `libraries`, `link-flags` and
+`system-libraries` reach ld.lld as written.
 
 | Key | Words | Meaning |
 | --- | --- | --- |

@@ -108,18 +108,23 @@ Hard SDK gates are:
   spells every path absolute;
 - every file it requires exists, and the GCC runtime is unique when it names
   `{gcc}`;
-- the tools of the steps it declares are executable, except those `-n64-pack`
-  runs;
+- the tools of the steps the build runs are executable, except those
+  `-n64-pack` runs;
 - it declares an executable `mkdfs` when assets are requested, `n64metadata`
   when metadata is requested, and `ed64romconfig` when a save type, RTC or
   controllers are.
 
 The SDK description is trusted the way `-n64-inst` is: the user picks it with
-`-n64-sdk`, or by picking an SDK root that holds `odin-n64.sdk`, and it can
-name tools and link inputs outside the SDK root. No environment variable
-selects it. Its paths must be absolute, so the working directory cannot
-change what a build opens or runs
-(`test_sdk_description_errors_name_the_file_and_line`), and `-n64-pack` never
+`-n64-sdk`, or by picking an SDK root that holds `odin-n64.sdk` (through
+`-n64-inst`, `N64_INST` or `<odin root>/n64`), and it can name tools and link
+inputs outside the SDK root. The files and tools it declares as paths must be
+absolute, so the working directory cannot change which of them a build
+validates, links or runs
+(`test_sdk_description_errors_name_the_file_and_line`). A bare
+`linker-script` name and the words of `libraries`, `link-flags` and
+`system-libraries` reach ld.lld as written, which finds `-T<name>` in the
+working directory before the `-L` directories, as libdragon's `-Tn64.ld` did
+before descriptions existed. `-n64-pack` never
 stops the declared `n64sym` from being checked
 (`test_n64_pack_still_checks_the_declared_n64sym`).
 
