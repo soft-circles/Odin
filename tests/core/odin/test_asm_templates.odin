@@ -316,6 +316,96 @@ t :: asm() {
 	testing.expect(t, file.syntax_error_count > 0, "a register list without commas should not parse")
 }
 
+@test
+test_parse_asm_noreorder_option :: proc(t: ^testing.T) {
+	// As in the compiler: `#noreorder` (fork PRs #89 and #90) is a template option like
+	// `#volatile`, recorded as an Asm_Clobber without a value, alone or among the others.
+	context.allocator = context.temp_allocator
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	file := ast.File{
+		fullpath = "test.odin",
+		src = `
+package main
+
+alone :: asm(a: u32) -> (r: u32) [#noreorder] {
+	addiu %at, a, 5
+	addu r, %at, %zero
+}
+
+likely :: asm(n: i32) -> (r: i32, c: i32) [n -> c, #noreorder] {
+	move r, %zero
+.loop:
+	addiu c, c, -1
+	bgtzl c, .loop
+	addiu r, r, 8
+}
+
+// Syntax only: the checker rejects #pure with #volatile.
+all :: asm(a: u32) -> (r: u32) [#volatile, #noreorder, #align_stack, #pure, #clobber %t0, #preserve %s0] {
+	addiu %at, a, 5
+	addu r, %at, %zero
+}
+`,
+	}
+	p := parser.default_parser()
+	p.err = log_parse_error
+	testing.expect(t, parser.parse_file(&p, &file), "#noreorder templates should parse")
+	testing.expect_value(t, file.syntax_error_count, 0)
+
+	alone := find_template(&file, "alone")
+	if testing.expect(t, alone != nil, "the 'alone' template should parse") {
+		testing.expect_value(t, len(alone.specs), 0)
+		if testing.expect_value(t, len(alone.clobbers), 1) {
+			testing.expect_value(t, alone.clobbers[0].name, "noreorder")
+			testing.expect(t, alone.clobbers[0].value == nil, "#noreorder takes no value")
+		}
+	}
+
+	likely := find_template(&file, "likely")
+	if testing.expect(t, likely != nil, "the 'likely' template should parse") {
+		testing.expect_value(t, len(likely.specs), 1)
+		if testing.expect_value(t, len(likely.clobbers), 1) {
+			testing.expect_value(t, likely.clobbers[0].name, "noreorder")
+			testing.expect(t, likely.clobbers[0].value == nil, "#noreorder takes no value")
+		}
+		testing.expect_value(t, len(likely.instructions), 5)
+	}
+
+	all := find_template(&file, "all")
+	if testing.expect(t, all != nil, "the 'all' template should parse") {
+		names := [?]string{"volatile", "noreorder", "align_stack", "pure", "clobber", "preserve"}
+		if testing.expect_value(t, len(all.clobbers), len(names)) {
+			for name, i in names {
+				testing.expect_value(t, all.clobbers[i].name, name)
+				testing.expect_value(t, all.clobbers[i].value != nil, name == "clobber" || name == "preserve")
+			}
+		}
+	}
+}
+
+@test
+test_parse_asm_unknown_option :: proc(t: ^testing.T) {
+	// As in the compiler: an option outside the list is a syntax error.
+	context.allocator = context.temp_allocator
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	file := ast.File{
+		fullpath = "test.odin",
+		src = `
+package main
+
+t :: asm() [#reorder] {
+	nop
+}
+`,
+	}
+	p := parser.default_parser()
+	p.err = proc(pos: tokenizer.Pos, format: string, args: ..any) {}
+	parser.parse_file(&p, &file)
+	testing.expect_value(t, file.syntax_error_count, 1)
+}
+
 log_parse_error :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 	message := fmt.tprintf(format, ..args)
 	log.errorf("%s(%d:%d): %s", pos.file, pos.line, pos.column, message)
