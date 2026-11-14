@@ -139,16 +139,38 @@ there needs no configuration. Odin does not download or update the SDK.
 An SDK description declares what an SDK supplies to a ROM build: the files it
 requires, the startup objects, libraries and linker script of the link, and the
 tool each packaging step runs. `-n64-sdk:<file>` names one. Without it Odin uses
-the SDK root's `odin-n64.sdk` when that file exists, and otherwise
-[`misc/n64/libdragon.sdk`](misc/n64/libdragon.sdk), which declares libdragon as
-`n64.mk` links and packages a ROM.
+the SDK root's `odin-n64.sdk` when that file exists, and otherwise its built-in
+description of libdragon, which declares libdragon as `n64.mk` links and
+packages a ROM:
+
+```text
+require {sdk}/mips64-elf/lib/libdragon.a {sdk}/mips64-elf/lib/libdragonsys.a {sdk}/mips64-elf/lib/n64.ld
+require {sdk}/mips64-elf/lib/libc.a {sdk}/mips64-elf/lib/libm.a {sdk}/mips64-elf/lib/libstdc++.a
+startup {gcc}/crti.o {gcc}/crtbegin.o
+library-dir {gcc} {sdk}/mips64-elf/lib
+libraries -ldragon -lm -ldragonsys
+linker-script n64.ld
+link-flags --gc-sections --wrap __do_global_ctors -z max-page-size=4096
+system-libraries -lstdc++ -lm -lc -lgcc
+finish {gcc}/crtend.o {gcc}/crtn.o
+sdk-library c m dragon dragonsys
+tool n64sym {sdk}/bin/n64sym
+tool n64elfcompress {sdk}/bin/n64elfcompress
+tool mkdfs {sdk}/bin/mkdfs
+tool n64tool {sdk}/bin/n64tool
+tool ed64romconfig {sdk}/bin/ed64romconfig
+tool n64metadata {sdk}/bin/n64metadata
+rom-files {sdk}/mips64-elf/include .version
+```
 
 Each line is a key and its whitespace-separated words; a line starting with
 `#` is a comment. In each word `{sdk}` is the SDK root, `{dir}` the directory
 that holds the description and `{gcc}` the SDK's single
 `lib/gcc/mips64-elf/<version>` directory, which must exist only when a word
 names it. Words cannot contain spaces, but the paths that placeholders stand
-for can.
+for can. Every path must be absolute once expanded, so start it with `{sdk}`
+or `{dir}`; only a `linker-script` without a directory is searched for in the
+`library-dir` directories.
 
 | Key | Words | Meaning |
 | --- | --- | --- |
@@ -174,12 +196,14 @@ the description leaves out does not run, and the options that need it
 (`-n64-assets` for `mkdfs`, `-n64-metadata` for `n64metadata`, and
 `-n64-save-type`, `-n64-rtc` and `-n64-controllers` for `ed64romconfig`) are
 rejected. `-n64-pack` runs `n64elfcompress`, `mkdfs`, `n64tool` and
-`ed64romconfig` in place of the declared tools.
+`ed64romconfig` in place of the declared tools, so a description still declares
+each step it wants to run.
 
 The N64 runtime imports `system:c` for `write`, `abort`, `malloc`, `realloc`
 and `free`, and `system:dragon` for `debug_init_emulog`, so an SDK supplies
-those symbols and its description declares `sdk-library c dragon`. Foreign C
-and assembly sources still compile against the SDK's `mips64-elf/include`.
+those symbols and its description declares at least `sdk-library c dragon`.
+Foreign C and assembly sources still compile against the SDK's
+`mips64-elf/include`, and the packaging steps keep `n64.mk`'s arguments.
 
 ## Visible quickstart
 

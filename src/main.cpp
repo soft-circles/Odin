@@ -1477,7 +1477,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_N64Inst:
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (n64_parse_existing_path(STR_LIT("-n64-inst"), value.value_string, true, &build_context.n64.sdk_root)) {
-								build_context.n64_inst_given = true;
+								build_context.n64_sdk_given = true;
 							} else {
 								bad_flags = true;
 							}
@@ -1485,7 +1485,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_N64Sdk:
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (n64_parse_existing_path(STR_LIT("-n64-sdk"), value.value_string, false, &build_context.n64.sdk_description)) {
-								build_context.n64_inst_given = true;
+								build_context.n64_sdk_given = true;
 							} else {
 								bad_flags = true;
 							}
@@ -3667,7 +3667,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 		if (print_flag("-n64-sdk:<file>")) {
 			print_usage_line(2, "Names the SDK description of -target:n64: its startup objects, linker script and packaging tools.");
-			print_usage_line(2, "Defaults to the SDK root's odin-n64.sdk, else to libdragon's, misc/n64/libdragon.sdk.");
+			print_usage_line(2, "Defaults to the SDK root's odin-n64.sdk, else to libdragon's built-in description.");
 		}
 		if (print_flag("-n64-title:<string>")) {
 			print_usage_line(2, "Sets the 1-20 character N64 ROM title.");
