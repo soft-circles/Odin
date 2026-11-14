@@ -390,7 +390,9 @@ The rules the author takes on:
     may expand into several instructions.
 - Hazards stay the author's job, as in the default mode: COP0 hazards, and the
   HI/LO hazard inside the template. The boundary padding counts a branch as
-  one instruction and its slot as the next.
+  one instruction and its slot as the next. A template with an `mfhi` or
+  `mflo` in a delay slot always ends with two `nop`s, because the taken edge
+  may leave the template straight after the read.
 
 The checker models the slots when it tracks definitions and reachability. A
 write in a plain slot counts on both edges, and a write in a branch-likely's
