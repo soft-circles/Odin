@@ -55,6 +55,8 @@ noreorder_no_slot   :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a,
 noreorder_label_slot :: asm(a: u32) -> (r: u32) [#noreorder] { bnez a, .x; .x: move r, a }
 noreorder_branch_slot :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; b .x; nop; .x: }
 noreorder_li_slot   :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; li r, 0x12345678; .x: }
+// -32769 after sign extension: one below what one addiu holds
+noreorder_li_slot_low :: asm(a: u32) -> (r: u32) [#noreorder] { move r, a; bnez a, .x; li r, 0xFFFF7FFF; .x: }
 noreorder_likely_path :: asm(a: u32) -> (r: u32) [#noreorder] { bnezl a, .x; move r, a; .x: }
 noreorder_imm_disp  :: asm(p: rawptr, $D: int) -> (r: u32) [#noreorder] { move r, %zero; bnez p, .x; lw r, [p + D]; .x: }
 
@@ -102,7 +104,7 @@ use :: proc "contextless" (x: u32, w: u64, f: f32, d: f64, p: rawptr) {
 	unknown_mnemonic(p); _ = mnemonic_typo(x); _ = unknown_cp0(); _ = cp0_typo()
 	_ = at_operand(x); _ = at_pin(x); _ = at_clobber(x); _ = at_pin_noreorder(x); _ = at_clobber_noreorder(x)
 	_ = noreorder_twice(x); _ = noreorder_no_slot(x); _ = noreorder_label_slot(x); _ = noreorder_branch_slot(x)
-	_ = noreorder_li_slot(x); _ = noreorder_likely_path(x); _ = noreorder_imm_disp(p, 4)
+	_ = noreorder_li_slot(x); _ = noreorder_li_slot_low(x); _ = noreorder_likely_path(x); _ = noreorder_imm_disp(p, 4)
 	absolute_j(); absolute_jal(); _ = numeric_branch(x, x); _ = duplicate_label(x); jr_not_diverging(x)
 	_ = u64_in_gpr32_slot(w, x); _ = f32_in_gpr_slot(f, x); _ = gpr_in_fpr_slot(x, f); _ = f64_in_single_slot(d, f)
 	_ = f32_in_double_slot(f, d); _ = f64_in_word_slot(d); _ = too_many_operands(x, x); _ = too_few_operands(x)

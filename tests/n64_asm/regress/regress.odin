@@ -205,3 +205,15 @@ package n64_asm_regress
 	}
 	return t(a)
 }
+
+// 0xFFFF8000 is the lowest 32-bit value one addiu holds (-32768, sign-extended).
+@(export) noreorder_li_min_in_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		move r, a
+		bnez a, .x
+		li r, 0xFFFF8000
+		move r, %zero
+	.x:
+	}
+	return t(a)
+}

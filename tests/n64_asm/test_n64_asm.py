@@ -935,7 +935,8 @@ class Traps(unittest.TestCase):
                             self.assertEqual(run_mips(offset, words, (a, b)), want)
 
     NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_jump_slot", "noreorder_at_scratch",
-                 "noreorder_mult_in_slot", "noreorder_mflo_in_slot", "noreorder_li_in_slot")
+                 "noreorder_mult_in_slot", "noreorder_mflo_in_slot", "noreorder_li_in_slot",
+                 "noreorder_li_min_in_slot")
 
     def test_noreorder_slots_assemble_as_written(self):
         # #noreorder: the instruction after a branch is its delay slot, exactly as
@@ -967,6 +968,12 @@ class Traps(unittest.TestCase):
                 self.assertEqual(run_mips(offset, words, (a,)), 3 if a == 0 else (a + 4) & 0xFFFFFFFF)
             offset, words = symbols["noreorder_li_in_slot"]
             self.assertTrue(find_sequence(words, [0x14800002, 0x2402FFFF]), [f"{w:08x}" for w in words])  # bnez; li v0,-1
+            for a in (0, 1, 0xFFFFFFFF):
+                self.assertEqual(run_mips(offset, words, (a,)), 0 if a == 0 else 0xFFFFFFFF, f"a={a}")
+            offset, words = symbols["noreorder_li_min_in_slot"]
+            self.assertTrue(find_sequence(words, [0x14800002, 0x24028000]), [f"{w:08x}" for w in words])  # bnez; li v0,-32768
+            for a in (0, 1):
+                self.assertEqual(run_mips(offset, words, (a,)), 0 if a == 0 else 0xFFFF8000, f"a={a}")
             offset, words = symbols["noreorder_at_scratch"]
             for a in (0, 7, 0xFFFFFFFF):
                 self.assertEqual(run_mips(offset, words, (a,)), (2 * (a + 5)) & 0xFFFFFFFF)
@@ -1086,6 +1093,7 @@ CHECK_ERRORS = {
     "noreorder_label_slot": "A label cannot mark the delay slot of 'bnez' in a #noreorder template; put the slot instruction right after the branch and the label after it",
     "noreorder_branch_slot": "'b' cannot sit in the delay slot of 'bnez': a branch or jump in a delay slot is UNPREDICTABLE on the VR4300",
     "noreorder_li_slot":   "'li' cannot fill the delay slot of 'bnez' in a #noreorder template: this 'li' assembles to two instructions ('lui' + 'ori')",
+    "noreorder_li_slot_low": "'li' cannot fill the delay slot of 'bnez' in a #noreorder template: this 'li' assembles to two instructions ('lui' + 'ori')",
     # a branch-likely's slot runs on the taken path only, so r is unset when a == 0
     "noreorder_likely_path": "'asm' output parameter 'r' is not assigned on all paths through this template; its value is undefined",
     "noreorder_imm_disp":  "'lw' cannot fill the delay slot of 'bnez' in a #noreorder template: a memory operand with a $ immediate displacement may assemble to several instructions",
