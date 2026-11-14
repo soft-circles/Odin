@@ -379,6 +379,7 @@ struct Entity {
 			bool is_volatile;
 			bool is_align_stack;
 			bool is_pure;
+			bool is_noreorder; // MIPS: the body owns its delay slots (`.set noreorder`, `.set noat`)
 
 			bool has_observable_side_effect;
 

@@ -49,13 +49,15 @@ holds these and the other templates the tests encode.
 
 Operand order is the assembler's: destination first. Each instruction occupies
 one line, or instructions are separated by `;`. Parameters, results, register
-pins (`[r = %v1]`) and `#clobber` work as on the other asm targets.
+pins (`[r = %v1]`) and `#clobber` work as on the other asm targets. MIPS adds
+one option, [`#noreorder`](#noreorder-templates), for templates that fill
+their own delay slots.
 
 ### Registers
 
 | Class | Names |
 | --- | --- |
-| GPR | `%zero`, `%v0`–`%v1`, `%a0`–`%a3`, `%t0`–`%t9`, `%s0`–`%s7`, `%k0`, `%k1`, `%gp`, `%sp`, `%fp` (alias `%s8`), `%ra` |
+| GPR | `%zero`, `%v0`–`%v1`, `%a0`–`%a3`, `%t0`–`%t9`, `%s0`–`%s7`, `%k0`, `%k1`, `%gp`, `%sp`, `%fp` (alias `%s8`), `%ra`; `%at` in the body of a `#noreorder` template only |
 | FPR | `%f0`–`%f31` (FR=1: 32 independent 64-bit registers); literal operands in FPU slots, pins and `#clobber`, see below |
 | COP0 | `%c0_index`, `%c0_random`, `%c0_entrylo0`, `%c0_entrylo1`, `%c0_context`, `%c0_pagemask`, `%c0_wired`, `%c0_badvaddr`, `%c0_count`, `%c0_entryhi`, `%c0_compare`, `%c0_status`, `%c0_cause`, `%c0_epc`, `%c0_prid`, `%c0_config`, `%c0_lladdr`, `%c0_watchlo`, `%c0_watchhi`, `%c0_xcontext`, `%c0_perr`, `%c0_cacheerr`, `%c0_taglo`, `%c0_taghi`, `%c0_errorepc` |
 | COP1 control | `%fcr0` (FIR), `%fcr31` (FCSR) |
@@ -64,11 +66,11 @@ pins (`[r = %v1]`) and `#clobber` work as on the other asm targets.
 Numeric names such as `%4` cannot be written. `%s8` and `%fp` are the same
 register; a pin or clobber of either covers both.
 
-`%at` is not a register name on this target. LLVM wraps every inline-asm block
-in `.set at` and `.set macro`, so the assembler may expand `li`, a large memory
-offset or an out-of-range immediate through `$at`. LLVM also allocates `$at` to
-operands. Without a `$at` clobber, LLVM miscompiles a store through a large
-offset:
+`%at` is reserved outside `#noreorder` bodies. LLVM wraps every inline-asm
+block in `.set at` and `.set macro`, so the assembler may expand `li`, a large
+memory offset or an out-of-range immediate through `$at`. LLVM also allocates
+`$at` to operands. Without a `$at` clobber, LLVM miscompiles a store through a
+large offset:
 
 ```text
 sll   at,a1,0x0        # value to store placed in $at
@@ -77,9 +79,11 @@ addu  at,at,v0
 sw    at,-25536(at)    # stores the address, not the value
 ```
 
-Every template therefore clobbers `$1`, and a template can neither pin nor name
-it. Writing `%at` anywhere, including a pin or `#clobber`, is reported as
-`Register %at ($1) is reserved for the assembler, which uses it to expand macros (large offsets, li, ...); every MIPS asm template clobbers it, so it cannot be named in one`.
+Every template therefore clobbers `$1`, and no template can pin it or declare
+it in `#clobber`. Only the body of a `#noreorder` template, which is assembled
+under `.set noat`, may name `%at`, as a scratch register that needs no
+declaration. Anywhere else, including a pin or `#clobber`, `%at` is reported as
+`Register %at ($1) is reserved for the assembler, which uses it to expand macros (large offsets, li, ...); every MIPS asm template clobbers it, so only the body of a #noreorder template, which is assembled under '.set noat', can name it`.
 GCC treats `$at` as reserved, so C inline asm never meets this.
 
 COP0 and COP1 control registers fill only the slots of `mfc0`/`mtc0`,
@@ -319,11 +323,11 @@ labels (`1:`, `1b`, `1f`).
 - A numeric or absolute target cannot be written. `j 0x80000400` is an
   operand-kind error.
 
-LLVM assembles every template under `.set reorder`, and the template grammar
-cannot change that. The assembler puts a `nop` in every branch and jump delay
-slot. Write branches without a delay-slot instruction. The instruction after a
-branch runs after the branch resolves, on the fall-through path only; an
-explicit `nop` there is an extra instruction, not the slot.
+By default, LLVM assembles every template under `.set reorder`. The assembler
+puts a `nop` in every branch and jump delay slot. Write branches without a
+delay-slot instruction. The instruction after a branch runs after the branch
+resolves, on the fall-through path only; an explicit `nop` there is an extra
+instruction, not the slot.
 
 ```odin
 count_down :: asm(n: u32) -> (r: u32) {
@@ -336,7 +340,71 @@ count_down :: asm(n: u32) -> (r: u32) {
 
 The assembled loop is `addiu`, `bnez`, `nop`. Branch-likely forms are accepted,
 but their slot also holds the assembler's `nop`, so they behave like the plain
-branch.
+branch. To fill delay slots, declare the template `#noreorder`.
+
+### `#noreorder` templates
+
+`#noreorder` hands every delay slot to the author, for hand-scheduled code
+such as libdragon's `.S` decoders. The backend wraps the body in
+`.set noreorder` and `.set noat`, and closes it with `.set at` and
+`.set reorder`. The assembler then emits each instruction as written. Inside
+the wrapped body:
+
+- The instruction written after every branch, jump and call (`b*`, `j`,
+  `jal`, `jr`, `jalr`, `bc1*`) is its delay slot. `eret` has none.
+- A plain branch's slot runs whether or not the branch is taken. A
+  branch-likely's (`beql`, `bgtzl`, `bc1tl`, ...) runs only when it is taken
+  and is annulled on fall-through.
+- `%at` is a free scratch register. A macro that would need `$at`, such as a
+  store through a large `$`-immediate displacement, is an assembler error
+  instead of a silent expansion.
+
+```odin
+sum8 :: asm(n: i32) -> (r: i32, c: i32) [n -> c, #noreorder] {
+	move r, %zero
+.loop:
+	addiu c, c, -1
+	bgtzl c, .loop
+	addiu r, r, 8    // the slot: runs on each taken branch only
+}
+```
+
+This assembles to `move`, `addiu`, `bgtzl`, `addiu` with no `nop`. Without
+`#noreorder` the same source assembles to `bgtzl; nop; addiu`, which adds 8
+once, on fall-through.
+
+The rules the author takes on:
+
+- Fill every slot. Write a `nop` where nothing fits. The compiler never puts
+  code inside the block: LLVM sees the template as one opaque string, and the
+  only instructions the backend adds are the HI/LO-hazard `nop`s and the
+  `mthi`/`mtlo`/`mfhi`/`mflo` moves at its edges, outside any slot. The checker
+  rejects a template whose last branch has no slot instruction, since that
+  slot would hold the compiler's next instruction.
+- A slot holds exactly one machine instruction. `odin check` rejects:
+  - a branch or jump in a slot, which the VR4300 leaves UNPREDICTABLE;
+  - a label on a slot;
+  - an `li` whose constant needs `lui` + `ori`, or whose source is a
+    `$`-immediate parameter;
+  - a memory operand with a `$`-immediate displacement, which the assembler
+    may expand into several instructions.
+- Hazards stay the author's job, as in the default mode: COP0 hazards, and the
+  HI/LO hazard inside the template. The boundary padding counts a branch as
+  one instruction and its slot as the next.
+
+The checker models the slots when it tracks definitions and reachability. A
+write in a plain slot counts on both edges, and a write in a branch-likely's
+slot on the taken edge only. So `bnezl a, .x; move r, a; .x:` reports
+`'asm' output parameter 'r' is not assigned on all paths through this template`.
+
+`#noreorder` is accepted on MIPS CPU templates only. `@(rsp)` templates always
+have explicit delay slots.
+
+Neither mode lets a template read the `%ra` its enclosing procedure was
+entered with. `%ra` is tracked, so a read that no instruction in the template
+produced is an error. A template is inlined into its caller and does not see
+the caller's entry state. In a `"naked"` export, `move %t4, %ra` is therefore
+rejected with `implicitly reads %ra, but nothing in this template produces a value for it`.
 
 ### Hazards inside a template are not filled
 
@@ -374,7 +442,11 @@ and registers come with a did-you-mean suggestion.
 
 - MIPS IV, MIPS32, MIPS32r2 and MIPS64(r2) instructions, including the
   `mfc0`/`mtc0` select form, unless their LLVM feature is enabled.
-- `%at` in any position.
+- `%at` in a pin, a `#clobber`, or the body of a template without `#noreorder`.
+- In a `#noreorder` template: a branch with no delay-slot instruction, a label
+  on a slot, a branch or jump in a slot, and a slot instruction that may
+  assemble to more than one word. See
+  [`#noreorder` templates](#noreorder-templates).
 - Absolute or numeric branch and jump targets.
 - Immediates outside their slot's range, `cache` operations the VR4300 does
   not implement, and memory displacements outside -32768–32767.
@@ -406,7 +478,8 @@ odin build . -target:n64 -build-mode:llvm-ir -use-single-module
 ```
 
 Literal registers appear as `$$N`, operands as `$N`, and every constraint
-string ends with `~{$1}`:
+string ends with `~{$1}`. A `#noreorder` template's string starts with
+`\09.set noreorder\0A\09.set noat` and ends with `\09.set at\0A\09.set reorder`:
 
 ```text
 call void asm sideeffect "\09cache 21, 0($0)", "r,~{memory},~{$1}"(ptr %7)
@@ -441,7 +514,9 @@ so an instruction without a coverage procedure fails. Integer branch forms
 also run through a small MIPS interpreter, taken and not taken, with delay
 slots. It checks that every IR constraint string clobbers `$1`, the inferred
 volatile and memory effects, numeric pins and clobbers, HI/LO and `%fcc0`
-clobbers, and numeric local labels; one test per MIPS-specific trap lives in
+clobbers, numeric local labels, and `#noreorder` templates: their filled and
+branch-likely slots assemble exactly as written and run correctly in the
+interpreter, and only they carry `.set` directives. One test per MIPS-specific trap lives in
 [regress](tests/n64_asm/regress/regress.odin). It also checks that `odin check`
 rejects every [checker case](tests/n64_asm/bad_check/bad_check.odin) and every
 [later-ISA mnemonic](tests/n64_asm/bad_features/bad_features.odin), with the

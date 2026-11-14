@@ -22,6 +22,21 @@ struct AsmCheckTarget {
 };
 gb_thread_local AsmCheckTarget asm_check_target_current;
 
+// True while the instructions of a #noreorder template are checked: its body is
+// assembled under `.set noat`, so a table may let it name the assembler temporary.
+gb_thread_local bool asm_check_noreorder_body;
+
+struct AsmCheckNoreorderBodyScope {
+	bool prev;
+	AsmCheckNoreorderBodyScope(bool on) {
+		prev = asm_check_noreorder_body;
+		asm_check_noreorder_body = on;
+	}
+	~AsmCheckNoreorderBodyScope() {
+		asm_check_noreorder_body = prev;
+	}
+};
+
 gb_internal TargetArchKind asm_check_arch(void) {
 	return asm_check_target_current.set ? asm_check_target_current.arch : build_context.metrics.arch;
 }
@@ -63,9 +78,20 @@ gb_internal i32 asm_reg_index_from_bit(u16 bit) {
 	return -1;
 }
 
+// How a block of a #noreorder template relates to a branch-likely and its delay slot,
+// which runs on the taken path only and so is a block of its own.
+enum AsmBlockSlot : u8 {
+	AsmBlockSlot_None,
+	AsmBlockSlot_LikelyBranch, // ends in a branch-likely: taken -> the slot block (next), not taken -> the one after it
+	AsmBlockSlot_LikelySlot,   // that branch's delay slot alone: -> the branch's target (and, for a call, the return)
+};
+
 struct AsmBlock {
 	i32        first; // instruction index
 	i32        last;
+	i32        term;  // the instruction whose control transfer ends the block: `last`, or under
+	                  // #noreorder the branch before `last` when `last` is its delay slot
+	AsmBlockSlot slot;
 
 	Array<i32> succs;
 
@@ -106,6 +132,11 @@ struct AsmInstructionFacts {
 
 	Entity *branch_target;
 	i32     block_id;
+
+	// #noreorder templates only (MIPS): AsmDelaySlotFlag bits, and why the instruction
+	// cannot fill a delay slot (it may assemble to more than one word), or nullptr.
+	u8          delay_slot;
+	char const *slot_reject_reason;
 };
 
 gb_internal u16 asm_full_kill_mask(AsmInstructionFacts *f) {
@@ -275,9 +306,37 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 
 	bool need_leader = true;
 
+	// #noreorder (MIPS): the instruction after a branch, jump or call is its delay slot.
+	// A plain branch's slot runs on both edges, so it ends the branch's block, and the
+	// block's edges are the branch's (`term`). A branch-likely's slot runs on the taken
+	// edge only, so it is a block of its own between the branch and its fall-through.
+	bool noreorder = entity->AsmTemplate.is_noreorder;
+	AstAsmInstruction   *slot_owner       = nullptr; // the branch whose slot comes next
+	AsmInstructionFacts *slot_owner_facts = nullptr;
+	i32                  slot_owner_index = -1;
+	Ast *                slot_gap         = nullptr; // a label or directive between the branch and its slot
+
 	// Build basic blocks over the template body. A leader is: the first instruction, any
 	// instruction preceded by a label, and any instruction following a control transfer.
 	for (Ast *node : at->instructions) {
+		if (slot_owner != nullptr && node->kind != Ast_AsmInstruction && slot_gap == nullptr) {
+			slot_gap = node; // reported at the next instruction, or as a missing slot at the end
+		}
+		if (slot_owner != nullptr && slot_gap != nullptr && node->kind == Ast_AsmInstruction) {
+			// A label or directive between a branch and its slot would put a branch
+			// target or data in the slot.
+			if (slot_gap->kind == Ast_AsmLabelDecl) {
+				error(slot_gap, "A label cannot mark the delay slot of '%.*s' in a #noreorder template; "
+				                "put the slot instruction right after the branch and the label after it",
+				      LIT(slot_owner->name->Ident.token.string));
+			} else {
+				error(slot_gap, "The delay slot of '%.*s' in a #noreorder template must hold an instruction",
+				      LIT(slot_owner->name->Ident.token.string));
+			}
+			slot_owner = nullptr;
+			slot_owner_facts = nullptr;
+			slot_gap = nullptr;
+		}
 		if (node->kind == Ast_AsmLabelDecl) {
 			// Every label between two instructions names the block the *next* instruction
 			// opens; consecutive labels share it. A trailing label maps to blocks.count.
@@ -296,11 +355,18 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 		AsmInstructionFacts *facts = instr->facts;
 		// Prefixes and pseudo-macro ops (li/la) carry no facts and never branch.
 
-		if (need_leader || cfg->blocks.count == 0) {
+		bool is_slot = slot_owner != nullptr;
+		bool likely_slot = is_slot && slot_owner_facts != nullptr && (slot_owner_facts->delay_slot & AsmDelaySlot_Likely) != 0;
+
+		if (need_leader || cfg->blocks.count == 0 || likely_slot) {
 			AsmBlock b = {};
 			b.first = cast(i32)cfg->insts.count;
 			b.last  = cast(i32)cfg->insts.count;
+			b.term  = cast(i32)cfg->insts.count;
 			b.succs.allocator = heap_allocator();
+			if (likely_slot) {
+				b.slot = AsmBlockSlot_LikelySlot;
+			}
 			array_add(&cfg->blocks, b);
 			need_leader = false;
 		}
@@ -309,23 +375,72 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 		i32 ii = cast(i32)cfg->insts.count;
 		array_add(&cfg->insts, instr);
 		cfg->blocks[bi].last = ii;
+		cfg->blocks[bi].term = is_slot ? slot_owner_index : ii;
+
+		if (is_slot) {
+			String owner_name = slot_owner->name->Ident.token.string;
+			if (facts != nullptr && facts->is_control) {
+				error(instr->name, "'%.*s' cannot sit in the delay slot of '%.*s': a branch or jump in a delay slot is "
+				                   "UNPREDICTABLE on the VR4300",
+				      LIT(instr->name->Ident.token.string), LIT(owner_name));
+			} else if (facts != nullptr && facts->slot_reject_reason != nullptr) {
+				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in a #noreorder template: %s",
+				      LIT(instr->name->Ident.token.string), LIT(owner_name), facts->slot_reject_reason);
+			}
+			slot_owner = nullptr;
+			slot_owner_facts = nullptr;
+			need_leader = true;
+			if (facts != nullptr) {
+				facts->block_id = bi;
+			}
+			continue;
+		}
 
 		if (facts != nullptr) {
 			facts->block_id = bi;
 			if (facts->is_control) {
 				need_leader = true;
 			}
+			if (noreorder && (facts->delay_slot & AsmDelaySlot_Has) != 0) {
+				slot_owner       = instr;
+				slot_owner_facts = facts;
+				slot_owner_index = ii;
+				need_leader      = false; // the slot joins this block, or opens its own (likely)
+				if ((facts->delay_slot & AsmDelaySlot_Likely) != 0) {
+					cfg->blocks[bi].slot = AsmBlockSlot_LikelyBranch;
+				}
+			}
 		}
+	}
+	if (slot_owner != nullptr) {
+		error(slot_owner->name, "'%.*s' ends a #noreorder template without a delay-slot instruction; "
+		                        "write the instruction for its slot (a 'nop' if nothing fits)",
+		      LIT(slot_owner->name->Ident.token.string));
 	}
 
 	for_array(bi, cfg->blocks) { // Calculate the edges for the blocks
 		AsmBlock *b = &cfg->blocks[bi];
 
-		AstAsmInstruction   *last = cfg->insts[b->last];
+		AstAsmInstruction   *last = cfg->insts[b->term];
 		AsmInstructionFacts *lf   = last->facts;
+
+		if (b->slot == AsmBlockSlot_LikelyBranch) {
+			// Taken: the delay slot, its own block next. Not taken: the slot is annulled.
+			if (bi+1 < cfg->blocks.count) {
+				array_add(&b->succs, cast(i32)bi+1);
+			}
+			if (bi+2 < cfg->blocks.count) {
+				array_add(&b->succs, cast(i32)bi+2);
+			}
+			continue;
+		}
 
 		i32  branch_succ = -1;
 		bool fallthrough = true;
+		if (b->slot == AsmBlockSlot_LikelySlot) {
+			// Only a linking branch-likely comes back here, to after the slot.
+			fallthrough = lf != nullptr && (lf->delay_slot & AsmDelaySlot_Links) != 0;
+		}
 
 		if (lf != nullptr && lf->is_control) {
 			if (lf->branch_target != nullptr) {
@@ -374,8 +489,23 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 
 gb_internal bool check_asm_cfg_block_leaves(AsmCfg *cfg, i32 bi) {
 	AsmBlock const      *b    = &cfg->blocks[bi];
-	AstAsmInstruction   *last = cfg->insts[b->last];
+	AstAsmInstruction   *last = cfg->insts[b->term];
 	AsmInstructionFacts *lf   = last->facts;
+
+	if (b->slot == AsmBlockSlot_LikelyBranch) {
+		// The taken edge leaves through the slot block; not taken falls past it.
+		return bi+2 >= cast(i32)cfg->blocks.count;
+	}
+	if (b->slot == AsmBlockSlot_LikelySlot) {
+		if (lf != nullptr && lf->branch_target != nullptr) {
+			i32 t = asm_cfg_label_block_index(lf->branch_target);
+			if (t >= 0 && t >= cast(i32)cfg->blocks.count) {
+				return true;
+			}
+		}
+		bool returns = lf != nullptr && (lf->delay_slot & AsmDelaySlot_Links) != 0;
+		return returns && bi+1 >= cast(i32)cfg->blocks.count;
+	}
 
 	if (lf != nullptr && lf->branch_target != nullptr) {
 		i32 t = asm_cfg_label_block_index(lf->branch_target);
@@ -733,8 +863,11 @@ gb_internal void check_asm_cfg_analyse(AsmCtx *asm_ctx, AsmCfg *cfg, CheckerCont
 		defer (slice_free(&block_is_targeted, heap_allocator()));
 
 		for_array(bi, cfg->blocks) {
-			AstAsmInstruction   *last = cfg->insts[cfg->blocks[bi].last];
+			AstAsmInstruction   *last = cfg->insts[cfg->blocks[bi].term];
 			AsmInstructionFacts *lf   = last->facts;
+			if (cfg->blocks[bi].slot == AsmBlockSlot_LikelyBranch) {
+				continue; // its target is reached through its slot block
+			}
 			if (lf != nullptr && lf->branch_target != nullptr) {
 				i32 t = asm_cfg_label_block_index(lf->branch_target);
 				if (0 <= t && t < cast(i32)cfg->blocks.count) {

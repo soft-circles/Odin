@@ -26,14 +26,24 @@
 //
 //   * $at is allocatable in LLVM, but assembler macros (large memory offsets,
 //     `li`, out-of-range immediates) expand through $at. Every template
-//     clobbers `~{$1}`, and `%at` is not a register name here at all, so it can
-//     neither be pinned nor written in a template.
+//     clobbers `~{$1}`. `%at` can be neither pinned nor clobbered, and only the
+//     body of a #noreorder template may name it
+//     (literal_register_reject_reason_in_body).
 //
 //   * Delay slots: `.set reorder` makes the assembler put a `nop` in every
 //     branch/jump delay slot. Write branches without a delay-slot instruction;
 //     the instruction after a branch runs after it, on the fall-through path
 //     only. Branch-likely forms (`beql`, `bc1tl`, ...) are accepted but get the
 //     same nop, so they behave like the plain branch.
+//
+//   * `#noreorder` makes the backend wrap the body in `.set noreorder; .set
+//     noat` ... `.set at; .set reorder`. The instruction after every branch,
+//     jump and call (not eret) is then its delay slot, as written. The checker
+//     (check_asm_cfg_build) requires that instruction to exist, to carry no
+//     label, to be no branch or jump, and to assemble to one word (no wide
+//     `li`, no $-immediate displacement: delay_slot_multiword_reason). It runs
+//     on both edges of a plain branch and on the taken edge only of a
+//     branch-likely, which the control-flow graph models (AsmBlockSlot).
 //
 //   * The HI/LO hazard (an `mfhi`/`mflo` followed within two instructions by
 //     anything that writes HI or LO: `mult`/`div` and their unsigned and
@@ -98,6 +108,13 @@
 // template that writes a literal %t0 must pin it to an output or scratch, or
 // `#clobber %t0`; the checker reports the write otherwise
 // (register_write_needs_clobber).
+
+// delay_slot_flags bits, read by check_asm_cfg_build for #noreorder templates.
+enum AsmDelaySlotFlag : u8 {
+	AsmDelaySlot_Has    = 1<<0, // the next instruction is this one's delay slot
+	AsmDelaySlot_Likely = 1<<1, // ... and runs on the taken path only
+	AsmDelaySlot_Links  = 1<<2, // a call: control returns after the delay slot
+};
 
 #define ASM_MIPS_MNEMONICS(X) \
 	/* system, cache, COP0 */ \
@@ -176,9 +193,10 @@
 	X(NMADD_S, "nmadd_s") X(NMADD_D, "nmadd_d") X(NMSUB_S, "nmsub_s") X(NMSUB_D, "nmsub_d") \
 	X(RECIP_S, "recip_s") X(RECIP_D, "recip_d") X(RSQRT_S, "rsqrt_s") X(RSQRT_D, "rsqrt_d")
 
-// ENUM, name, class, number. %at ($1) is deliberately absent: see the header.
+// ENUM, name, class, number. %at ($1) is a name only a #noreorder template's body
+// may use: see literal_register_reject_reason_in_body and the header.
 #define ASM_MIPS_REGISTERS(X) \
-	X(ZERO, "zero", GPR, 0) \
+	X(ZERO, "zero", GPR, 0) X(AT, "at", GPR, 1) \
 	X(V0, "v0", GPR, 2)   X(V1, "v1", GPR, 3) \
 	X(A0, "a0", GPR, 4)   X(A1, "a1", GPR, 5)   X(A2, "a2", GPR, 6)   X(A3, "a3", GPR, 7) \
 	X(T0, "t0", GPR, 8)   X(T1, "t1", GPR, 9)   X(T2, "t2", GPR, 10)  X(T3, "t3", GPR, 11) \
@@ -976,6 +994,9 @@ struct Asm_mips {
 		if (r == REG_RA) {
 			return false; // tracked (ClobberReg_RA)
 		}
+		if (r == REG_AT) {
+			return false; // every template clobbers $1 (emit_target_clobbers)
+		}
 		u16 cls = reg_class(register_codes[r]);
 		return cls == REG_CLASS_GPR || cls == REG_CLASS_FPR;
 	}
@@ -1047,6 +1068,9 @@ struct Asm_mips {
 	char const *pin_reject_reason(Register r) const {
 		if (r == REG_INVALID) {
 			return nullptr;
+		}
+		if (r == REG_AT) {
+			return "every MIPS asm template clobbers $1 for the assembler";
 		}
 		switch (reg_class(register_codes[r])) {
 		case REG_CLASS_FCC:
@@ -1154,13 +1178,53 @@ struct Asm_mips {
 		return false; // %hi / %lo are never explicit operands
 	}
 
-	// Optional checker hook. Why a register name that is not in the table is
-	// unavailable, phrased to follow "Register %<name> ", for a better message
-	// than "Unknown register" (check_register).
-	char const *register_unavailable_reason(String const &name) const {
-		if (name == "at") {
+	// Optional checker hook. Why the literal register `r` cannot be named here,
+	// phrased to follow "Register %<name> ", or nullptr. `noreorder_body` is true
+	// only for an instruction operand of a #noreorder template, which the
+	// backend assembles under `.set noat`; pins and clobbers pass false.
+	char const *literal_register_reject_reason_in_body(Register r, bool noreorder_body) const {
+		if (r == REG_AT && !noreorder_body) {
 			return "($1) is reserved for the assembler, which uses it to expand macros (large offsets, li, ...); "
-			       "every MIPS asm template clobbers it, so it cannot be named in one";
+			       "every MIPS asm template clobbers it, so only the body of a #noreorder template, "
+			       "which is assembled under '.set noat', can name it";
+		}
+		return nullptr;
+	}
+
+	// Delay slots, for #noreorder templates (check_asm_cfg_build). Every branch,
+	// jump and call has one; eret does not. The slot of a branch-likely runs on
+	// the taken path only. A linking form returns to the instruction after its slot.
+	u8 delay_slot_flags(u16 m, Clobber const &clobber) const {
+		if (!has_delay_slot(m, clobber)) {
+			return 0;
+		}
+		u8 flags = AsmDelaySlot_Has;
+		switch (m) {
+		case M_BEQL: case M_BNEL: case M_BLEZL: case M_BGTZL: case M_BLTZL: case M_BGEZL:
+		case M_BLTZALL: case M_BGEZALL: case M_BEQZL: case M_BNEZL: case M_BC1FL: case M_BC1TL:
+			flags |= AsmDelaySlot_Likely;
+			break;
+		}
+		if ((clobber.side_effects & SideEffectFlag_CALL) != 0) {
+			flags |= AsmDelaySlot_Links;
+		}
+		return flags;
+	}
+
+	// Why an instruction cannot fill a delay slot because the assembler may
+	// expand it into more than one word, or nullptr. `imm` is the constant source
+	// of `li`, or nullptr when it is a $-immediate parameter.
+	char const *delay_slot_multiword_reason(u16 m, i64 const *imm) const {
+		if (m != M_LI) {
+			return nullptr;
+		}
+		if (imm == nullptr) {
+			return "'li' of a $ immediate parameter may assemble to two instructions ('lui' + 'ori')";
+		}
+		i64 v = *imm;
+		bool one_word = (-32768 <= v && v <= 65535) || ((v & 0xFFFF) == 0);
+		if (!one_word) {
+			return "this 'li' assembles to two instructions ('lui' + 'ori')";
 		}
 		return nullptr;
 	}

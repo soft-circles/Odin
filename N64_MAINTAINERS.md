@@ -256,8 +256,10 @@ To add an instruction:
 
 Preserve these guarantees:
 
-- Every MIPS template clobbers `~{$1}`, and `%at` is not in the register table.
-  LLVM allocates `$at` to operands while assembler macros expand through it.
+- Every MIPS template clobbers `~{$1}`. LLVM allocates `$at` to operands while
+  assembler macros expand through it. `%at` is in the register table, but
+  `literal_register_reject_reason_in_body` rejects it everywhere except the
+  body of a `#noreorder` template, which is assembled under `.set noat`.
 - Pins and clobbers use numeric constraints: pins `{$4}`, `{hi}`, `{lo}`;
   clobbers `~{$8}`, `~{$f4}`, `~{$fcc0}`, `~{hi}`, `~{lo}`. A named GPR
   constraint such as `{$t1}` asserts in LLVM's Mips backend. FPR pins lower
@@ -265,10 +267,16 @@ Preserve these guarantees:
 - Literal registers are written `$$N`/`$$fN`; `$N` is an operand reference.
 - Labels are numeric locals (`N:`, `Nb`, `Nf`). Branch and jump targets are
   template labels only.
-- Delay slots belong to the assembler under `.set reorder`. Nothing in the
-  table or backend inserts or expects an explicit slot instruction. Hazards
-  inside a template are not filled; the generator only pads HI/LO hazards that
-  would straddle the template boundary.
+- By default, delay slots belong to the assembler under `.set reorder`, and
+  nothing in the table or backend inserts or expects an explicit slot
+  instruction. A `#noreorder` template is wrapped in `.set noreorder; .set
+  noat` and owns its slots: `check_asm_cfg_build` models them
+  (`AsmBlockSlot`, from the table's `delay_slot_flags`) and rejects a missing
+  slot, a label on one, a branch in one, and a slot instruction that may
+  assemble to more than one word (`delay_slot_multiword_reason`). The default
+  output must stay free of `.set` directives. Hazards inside a template are
+  not filled; the generator only pads HI/LO hazards that would straddle the
+  template boundary, counting a `#noreorder` branch as one word.
 - `%ra`, `%hi`, `%lo` and `%fcc0` stay tracked: their writes clobber
   automatically and unproduced reads are errors.
   `implicit_register_writes_are_full_width` makes each implicit write define
@@ -298,7 +306,8 @@ Table hooks the generic checker asks for (all optional, SFINAE-detected in
 `check_asm.cpp`; a table without one keeps the old behaviour): `register_is_float`
 types a literal FPR as `f32`/`f64`; `literal_register_reject_reason` and
 `pin_reject_reason` reject wrong-class literals and impossible pins at check
-time; `register_unavailable_reason` explains `%at`; `pinned_integer_operand_min_bits`
+time; `literal_register_reject_reason_in_body` explains `%at`; `delay_slot_flags`
+and `delay_slot_multiword_reason` describe `#noreorder` delay slots; `pinned_integer_operand_min_bits`
 on the generator widens narrow pinned operands to 32 bits, since LLVM's MIPS
 backend asserts on an i8/i16 explicit-register constraint.
 

@@ -117,3 +117,63 @@ package n64_asm_regress
 	}
 	t(v)
 }
+
+// #noreorder: the author fills every delay slot. A plain branch's slot runs on
+// both edges: r = a when a == b, else a + 1.
+@(export) noreorder_filled :: proc "contextless" (a, b: u32) -> u32 {
+	t :: asm(a: u32, b: u32) -> (r: u32) [#noreorder] {
+		beq a, b, .done
+		move r, a
+		addiu r, a, 1
+	.done:
+	}
+	return t(a, b)
+}
+
+// A branch-likely's slot runs on the taken path only: 8 * (n - 1) for n >= 1, else 0.
+@(export) noreorder_likely :: proc "contextless" (n: i32) -> i32 {
+	t :: asm(n: i32) -> (r: i32, c: i32) [n -> c, #noreorder] {
+		move r, %zero
+	.loop:
+		addiu c, c, -1
+		bgtzl c, .loop
+		addiu r, r, 8
+	}
+	r, _ := t(n)
+	return r
+}
+
+// The slot of an unconditional `b` is reachable and runs: 3 when a == 0, else a + 4.
+@(export) noreorder_jump_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		bnez a, .skip
+		move r, a
+		b .end
+		addiu r, a, 3
+	.skip:
+		addiu r, a, 4
+	.end:
+	}
+	return t(a)
+}
+
+// Under `.set noat` a #noreorder body may use $1 as a scratch.
+@(export) noreorder_at_scratch :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		addiu %at, a, 5
+		addu r, %at, %at
+	}
+	return t(a)
+}
+
+// The HI/LO boundary padding counts a #noreorder branch as one word: the multu in
+// its slot is the template's second instruction, so one nop goes before it.
+@(export) noreorder_mult_in_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		bnez a, .x
+		multu a, a
+	.x:
+		mflo r
+	}
+	return t(a)
+}
