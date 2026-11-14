@@ -177,3 +177,31 @@ package n64_asm_regress
 	}
 	return t(a)
 }
+
+// An mflo in a delay slot: the taken edge leaves right after it, so two nops
+// follow the body although the program-order tail is two instructions long.
+@(export) noreorder_mflo_in_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		multu a, a
+		nop
+		nop
+		bnez a, .end
+		mflo r
+		addiu r, r, 1
+		addiu r, r, 1
+	.end:
+	}
+	return t(a) * a
+}
+
+// li of 0xFFFFFFFF is one word (addiu r, $0, -1), so it may fill a slot.
+@(export) noreorder_li_in_slot :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#noreorder] {
+		move r, a
+		bnez a, .x
+		li r, 0xFFFFFFFF
+		move r, %zero
+	.x:
+	}
+	return t(a)
+}

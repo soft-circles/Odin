@@ -2348,6 +2348,31 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 		}
 	}
 
+	// Under #noreorder: does a delay slot hold an mfhi/mflo? Its branch may jump
+	// to the end (or near it) right after the read, so the backward count in
+	// write_body_epilogue is no bound for that path.
+	bool a_delay_slot_reads_hilo() {
+		bool after_branch = false;
+		for (Ast *node : tmpl_node->instructions) {
+			if (node->kind != Ast_AsmInstruction) {
+				continue;
+			}
+			AstAsmInstruction *in = &node->AsmInstruction;
+			BodyNode b = this->body_node(node);
+			if (after_branch && b.reads_hilo) {
+				return true;
+			}
+			after_branch = false;
+			if (in->mnemonic != 0 && in->valid_form_index >= 0) {
+				auto clobbers = g_asm_mips.clobber_forms(in->mnemonic);
+				if (in->valid_form_index < clobbers.count) {
+					after_branch = g_asm_mips.has_delay_slot(in->mnemonic, clobbers[in->valid_form_index]);
+				}
+			}
+		}
+		return false;
+	}
+
 	// ... and at its end: nops so that HILO_HAZARD_DISTANCE instructions follow
 	// the last HI/LO read (the moved-out results' mfhi/mflo, else the body's).
 	void write_body_epilogue(Slice<i32> const &op_number) override {
@@ -2371,6 +2396,11 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 				}
 				seen += b.words;
 			}
+		}
+		if (!moves && tmpl_entity->AsmTemplate.is_noreorder && this->a_delay_slot_reads_hilo()) {
+			// The taken edge leaves with no words after that slot's read, whatever
+			// the program-order count above says: pad fully.
+			after = 0;
 		}
 		for (int n = after; n < HILO_HAZARD_DISTANCE; n++) {
 			write_cstr("\n\tnop");

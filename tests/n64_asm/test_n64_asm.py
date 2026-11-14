@@ -935,7 +935,7 @@ class Traps(unittest.TestCase):
                             self.assertEqual(run_mips(offset, words, (a, b)), want)
 
     NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_jump_slot", "noreorder_at_scratch",
-                 "noreorder_mult_in_slot")
+                 "noreorder_mult_in_slot", "noreorder_mflo_in_slot", "noreorder_li_in_slot")
 
     def test_noreorder_slots_assemble_as_written(self):
         # #noreorder: the instruction after a branch is its delay slot, exactly as
@@ -965,6 +965,8 @@ class Traps(unittest.TestCase):
             offset, words = symbols["noreorder_jump_slot"]
             for a in (0, 1, 0xFFFFFFFF):
                 self.assertEqual(run_mips(offset, words, (a,)), 3 if a == 0 else (a + 4) & 0xFFFFFFFF)
+            offset, words = symbols["noreorder_li_in_slot"]
+            self.assertTrue(find_sequence(words, [0x14800002, 0x2402FFFF]), [f"{w:08x}" for w in words])  # bnez; li v0,-1
             offset, words = symbols["noreorder_at_scratch"]
             for a in (0, 7, 0xFFFFFFFF):
                 self.assertEqual(run_mips(offset, words, (a,)), (2 * (a + 5)) & 0xFFFFFFFF)
@@ -978,6 +980,10 @@ class Traps(unittest.TestCase):
                          [(False, r"\09.set noreorder\0A\09.set noat\0A\09nop\0A\09bnez $1, 1f\0A\09multu $1, $1"
                                   r"\0A1:\0A\09mflo $0\0A\09nop\0A\09nop\0A\09.set at\0A\09.set reorder",
                            "=&r,r,~{hi},~{lo},~{$1}")])
+        # An mflo in a slot may leave on the taken edge right after the read: full padding.
+        [(_, text, _)] = calls_in(ir, "noreorder_mflo_in_slot")
+        self.assertTrue(text.endswith(r"\0A\09mflo $0\0A\09addiu $0, $0, 1\0A\09addiu $0, $0, 1\0A1:"
+                                      r"\0A\09nop\0A\09nop\0A\09.set at\0A\09.set reorder"), text)
         for function in self.NOREORDER:
             for _, text, _ in calls_in(ir, function):
                 with self.subTest(function=function):
