@@ -4532,7 +4532,7 @@ parse_asm_template :: proc(p: ^Parser) -> ^ast.Expr {
 				hash := expect_token(p, .Hash)
 				name := expect_token(p, .Ident)
 				switch name.text {
-				case "volatile", "align_stack", "pure":
+				case "volatile", "align_stack", "pure", "noreorder":
 					clobber := ast.new(ast.Asm_Clobber, hash.pos, end_pos(name))
 					clobber.token = hash
 					clobber.name  = name.text
@@ -4545,7 +4545,7 @@ parse_asm_template :: proc(p: ^Parser) -> ^ast.Expr {
 					clobber.value = value
 					append(&clobbers_dyn, clobber)
 				case:
-					error(p, name.pos, "expected #clobber, #preserve, #volatile, #align_stack, or #pure, got '%s'", name.text)
+					error(p, name.pos, "expected #clobber, #preserve, #volatile, #align_stack, #pure, or #noreorder, got '%s'", name.text)
 				}
 			case:
 				error(p, p.curr_tok.pos, "expected an 'asm' specification which begins with an identifier, got '%s'", p.curr_tok.text)
