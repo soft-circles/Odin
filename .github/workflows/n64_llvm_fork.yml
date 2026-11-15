@@ -36,13 +36,13 @@ jobs:
     env:
       # The prebuilt LLVM fork for linux-amd64, release LLVM_FORK_TAG of soft-circles/Odin64, asset
       # LLVM_FORK_KEY.tar.zst. Source of truth: Odin64's toolchain.lock.toml [llvm] commit
-      # (61c3a66050a43a529293b7b6fe0d03811a1ff8c6); Odin64's tools/toolchain/llvm-key.sh names the key and tag
+      # (1e824becb54e16ba10c6c4da26ca19f49c5cdbcf); Odin64's tools/toolchain/llvm-key.sh names the key and tag
       # (ODIN64_LLVM_PLATFORM=linux-amd64) and tools/toolchain/llvm-prebuilt.sh publishes the asset and its .sha256.
       # Bump the key, tag and SHA-256 together when that pin moves.
       LLVM_FORK_REPOSITORY: soft-circles/Odin64
-      LLVM_FORK_TAG: toolchain-llvm-linux-amd64-61c3a66050a4-7f9d1726d264e598
-      LLVM_FORK_KEY: odin64-llvm-v1-linux-amd64-61c3a66050a4-7f9d1726d264e598
-      LLVM_FORK_SHA256: ac2346f8b091e1f644ed3b1155b410f70d3670b194bcd58bcaa358169d002f04
+      LLVM_FORK_TAG: toolchain-llvm-linux-amd64-1e824becb54e-7f9d1726d264e598
+      LLVM_FORK_KEY: odin64-llvm-v1-linux-amd64-1e824becb54e-7f9d1726d264e598
+      LLVM_FORK_SHA256: 2c5150c9d0fdc54e817ff81892555b5ff57dd5d77a245b7302500d0152dde284
       N64_REQUIRE_O64_FORK: "1"
     steps:
       - uses: actions/checkout@v7
