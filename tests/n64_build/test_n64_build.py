@@ -37,7 +37,7 @@ REQUIRED_SDK_TOOLS = (
 
 
 ROM_LLVM_TOOLS = ("ld.lld", "llvm-strip", "llvm-objdump", "llvm-addr2line")
-CLANG_TARGET_FLAGS = ("--target=mips64-elf", "-march=mips3", "-mabi=o64", "-mno-abicalls", "-fno-pic", "-G0")
+CLANG_TARGET_FLAGS = ("--target=mips64-elf", "-march=mips3", "-mabi=o64", "-mno-abicalls", "-fno-pic")
 
 
 def llvm_bindir() -> Path | None:
@@ -896,6 +896,7 @@ class N64StubPackagingTests(unittest.TestCase):
 		self.assertEqual([(call["tool"], call["argv"][-1]) for call in compiles],
 		                 [("clang", "helper.c"), ("mips64-elf-g++", "util.cpp"), ("clang", "vr4300.S")])
 		self.assertEqual(compiles[0]["argv"][1:1 + len(CLANG_TARGET_FLAGS)], list(CLANG_TARGET_FLAGS))
+		self.assertFalse([arg for arg in compiles[0]["argv"] if arg.startswith("-G")], "ROM sources take clang's -G 8")
 		self.assertNotIn("-ftrapping-math", compiles[0]["argv"])
 
 	def test_a_cpp_source_needs_a_cxx_tool(self):
