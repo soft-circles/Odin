@@ -70,6 +70,12 @@ class GpSmallData(unittest.TestCase):
     def test_float_constant_through_gp(self):
         self.assertRegex(function_body(self.asm, "scale"), r"\blwc1\s+\$f\d+, %gp_rel\(\$CPI\d+_\d+\)\(\$gp\)")
 
+    def test_select_of_two_small_addresses(self):
+        body = function_body(self.asm, "address_of_either")
+        self.assertRegex(body, r"\baddiu\s+\$\d+, \$zero, %gp_rel\(\"n64_gp_small_data::counter\"\)")
+        self.assertRegex(body, r"\baddiu\s+\$\d+, \$zero, %gp_rel\(\"n64_gp_small_data::ticks\"\)")
+        self.assertRegex(body, r"\baddu\s+\$2, \$gp, \$\d+")
+
     def test_nine_bytes_stay_absolute(self):
         body = function_body(self.asm, "bump_nine")
         self.assertIn('%hi("n64_gp_small_data::nine', body)

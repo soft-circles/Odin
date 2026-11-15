@@ -47,3 +47,8 @@ address_of_c_zero :: proc "c" () -> rawptr {
 scale :: proc "c" (x: f32) -> f32 {
 	return x * 1.2345
 }
+
+@(export)
+address_of_either :: proc "c" (first: bool) -> rawptr {
+	return first ? &counter : &ticks
+}

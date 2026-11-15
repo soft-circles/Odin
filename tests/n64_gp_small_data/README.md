@@ -13,6 +13,8 @@ fixture builds at `-o:speed` and checks that:
 - a 4-byte and an 8-byte global, and a 4-byte foreign one, are read and written as
   `%gp_rel(...)($gp)`, and the defined ones are in `.sbss`;
 - a float constant loads from the constant pool through `$gp`;
+- a choice between two small globals' addresses builds, as `$gp` plus the
+  chosen `%gp_rel` offset (the LLVM fork selects that offset on its own);
 - a 9-byte global, a global with its own `link_section` and a zero-sized foreign
   one keep `%hi`/`%lo`;
 - `-target:freestanding_mips32be`, which has no `_gp`, never uses `$gp`.
