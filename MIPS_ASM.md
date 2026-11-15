@@ -280,7 +280,8 @@ For `addiu a, a, 1` with an untied input `a`, tie it to an output
 Writes to `%zero`, `%k0`, `%k1`, `%gp` and `%sp` are not checked and add no
 clobber. A write to `%zero` is discarded. The others are reserved for the
 kernel, the global pointer and the stack, so restore them before the
-template ends.
+template ends. On `-target:n64`, compiled code reads globals of 8 bytes or
+less through `%gp`, so only boot code that sets it to `_gp` may change it.
 
 The `rd` of `jalr rd, rs` is a write like any other: a literal `rd` needs a
 pin or `#clobber`. `#clobber` every register the callee may change, as with
