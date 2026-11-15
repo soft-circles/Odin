@@ -187,7 +187,7 @@ as it does `-T<name>`: in the working directory first, then in the
 | `system-libraries` | words | After `-extra-linker-flags` and the foreign imports' flags |
 | `finish` | paths | Link inputs last |
 | `sdk-library` | names | `foreign import "system:<name>"` libraries the link already names |
-| `tool` | step, path | The tool of a packaging step |
+| `tool` | step, path | The tool of a packaging step, or `cc` and `c++`, which compile foreign sources |
 | `rom-files` | directory, suffix | Files with the suffix in the directory, appended to `n64tool`'s inputs |
 
 ld.lld links `-EB -o <elf>`, then `startup`, `library-dir`, the objects,
@@ -259,7 +259,7 @@ they apply only to executable ROM output.
 | Option | Accepted value | Default when omitted |
 | --- | --- | --- |
 | `-n64-inst:<directory>` | Existing installed SDK root | `N64_INST`, then `<odin root>/n64` if that directory exists |
-| `-n64-title:<title>` | 1–20 ASCII letters, digits, spaces, `-`, `_`, `.`, or `!` | Main package directory name, sanitized and truncated to 20 characters; `Odin N64` if empty |
+| `-n64-title:<title>` | 1–20 printable ASCII characters | Main package directory name, sanitized and truncated to 20 characters; `Odin N64` if empty |
 | `-n64-region:<letter>` | One ASCII letter, case-insensitive | No fixed region code; libdragon's region-free header remains enabled |
 | `-n64-save-type:<type>` | One save type listed below | No declared save hardware (`none`) |
 | `-n64-rtc` | Flag with no value | RTC declaration disabled |
@@ -309,7 +309,7 @@ therefore do not accept ROM configuration options.
 
 ## Foreign C and assembly sources
 
-A foreign import on `-target:n64` may name `.c` and `.S` sources as well as
+A foreign import on `-target:n64` may name `.c`, `.cpp` and `.S` sources as well as
 objects. Paths resolve against the importing file, as object paths do:
 
 ```odin
@@ -328,6 +328,16 @@ LLVM the compiler was built against, or from the directory
 `ODIN_N64_LLVM_BIN` names. Any other `.S` file is VR4300 assembly
 and gets `clang` with `N64_ASFLAGS`. Each compile runs in the source's directory, so
 `#include "..."` and `__FILE__` see the paths `n64.mk` would give them.
+
+An SDK description can compile sources with the SDK's own compilers instead:
+`tool cc <path>` compiles `.c` and VR4300 `.S` sources, and `tool c++ <path>`
+compiles `.cpp` sources, for example with `{sdk}/bin/mips64-elf-gcc` and
+`{sdk}/bin/mips64-elf-g++`. They get `n64.mk`'s `N64_CFLAGS`, `N64_CXXFLAGS` and
+`N64_ASFLAGS` exactly, `-march=vr4300` and `-ftrapping-math` included, then
+`-n64-cflags`. `llvm-objcopy` then rewrites each object, because ld.lld rejects
+the symbol table GNU as writes. RSP microcode still builds with the LLVM fork's
+tools. A `.cpp` source needs a description that declares `tool c++`; without
+`tool cc`, `.c` and `.S` sources get `clang` as above.
 
 `-n64-cflags` appends flags to every source of the build, for example
 warnings, include directories or defines:

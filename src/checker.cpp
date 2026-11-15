@@ -6422,10 +6422,10 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 
 		for (String const &path : fl->fullpaths) {
 			String ext = path_extension(path);
-			// The N64 build compiles foreign .c sources itself (n64_compile_foreign_sources).
-			bool n64_source = build_context.metrics.os == TargetOs_n64 && ext == ".c";
+			// The N64 build compiles foreign .c and .cpp sources itself (n64_compile_foreign_sources), .cpp with the SDK description's c++ tool.
+			bool n64_source = build_context.metrics.os == TargetOs_n64 && (ext == ".c" || ext == ".cpp");
 			if ((str_eq_ignore_case(ext, ".c") && !n64_source) ||
-			    str_eq_ignore_case(ext, ".cpp") ||
+			    (str_eq_ignore_case(ext, ".cpp") && !n64_source) ||
 			    str_eq_ignore_case(ext, ".cxx") ||
 			    str_eq_ignore_case(ext, ".h") ||
 			    str_eq_ignore_case(ext, ".hpp") ||

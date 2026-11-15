@@ -200,10 +200,14 @@ class N64OptionValidationTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(diagnostic, result.stdout)
 
-	def test_title_is_bounded_and_makefile_safe(self):
-		for value in ("", "x" * 21, "unsafe$title", "unsafe#title"):
+	def test_title_is_bounded_and_printable_ascii(self):
+		for value in ("", "x" * 21, "tab\ttitle", "caf\u00e9"):
 			with self.subTest(value=value):
 				self.assert_invalid_option(f"-n64-title:{value}", "n64-title")
+
+	def test_a_title_may_use_any_printable_ascii(self):
+		result = run_build(self.app, "-n64-title:C++ $#\"'!~")
+		self.assertNotIn("n64-title", result.stdout)
 
 	def test_region_is_exactly_one_ascii_letter(self):
 		self.assert_invalid_option("-n64-region:", "n64-region")
@@ -452,7 +456,7 @@ def write(path, data):
 def value_after(flag):
 	return arguments[arguments.index(flag) + 1]
 
-if tool in ("ld.lld", "clang"):
+if tool in ("ld.lld", "clang", "mips64-elf-gcc", "mips64-elf-g++"):
 	write(value_after("-o"), b"stub object")
 	for argument in arguments:
 		if argument.startswith("-Map="):
@@ -478,7 +482,7 @@ if behaviour.startswith("exit:"):
 if behaviour.startswith("signal:"):
 	os.kill(os.getpid(), int(behaviour[len("signal:"):]))
 '''
-STUB_LLVM_TOOLS = (*ROM_LLVM_TOOLS, "clang")
+STUB_LLVM_TOOLS = (*ROM_LLVM_TOOLS, "clang", "llvm-objcopy")
 STUB_SDK_TOOLS = (*REQUIRED_SDK_TOOLS, "bin/mkdfs")
 SANITIZED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -790,6 +794,112 @@ class N64StubPackagingTests(unittest.TestCase):
 			with self.subTest(tool=call["tool"]):
 				self.assertFalse("CCC_OVERRIDE_OPTIONS" in call["env"])
 
+
+	def gnu_sdk_description(self, tools: str) -> Path:
+		"""The documented libdragon description with the stub SDK's GCC declared as cc and c++."""
+		guide = (ODIN_ROOT / "N64_BUILD.md").read_text(encoding="utf-8")
+		documented = guide.split("packages a ROM:\n\n```text\n", 1)[1].split("```", 1)[0]
+		for name in ("mips64-elf-gcc", "mips64-elf-g++"):
+			self.make_stub(self.sdk / "bin" / name)
+		return self.write_description(self.root / "gnu.sdk", documented + tools)
+
+	def create_gnu_source_app(self) -> Path:
+		app = self.root / "gnu app"
+		app.mkdir()
+		for name, text in (("helper.c", "int helper(void) { return 1; }\n"), ("util.cpp", "extern \"C\" int util(void) { return 2; }\n"),
+		                   ("vr4300.S", "\t.text\n"), ("rsp_probe.S", "\t.text\n")):
+			(app / name).write_text(text, encoding="utf-8")
+		(app / "main.odin").write_text(
+			"package gnu_app\n\n"
+			"foreign import lib {\"helper.c\", \"util.cpp\", \"vr4300.S\", \"rsp_probe.S\"}\n"
+			"@(default_calling_convention=\"c\")\n"
+			"foreign lib {\n\thelper :: proc() -> i32 ---\n\tutil :: proc() -> i32 ---\n}\n\n"
+			"main :: proc() { helper(); util() }\n",
+			encoding="utf-8",
+		)
+		return app
+
+	def test_cc_and_cxx_tools_compile_vr4300_sources_with_n64_mk_flags(self):
+		description = self.gnu_sdk_description("tool cc {sdk}/bin/mips64-elf-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+		output = app / "gnu.z64"
+		foreign = self.intermediates(output) / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", "-n64-cflags:-DFROM_CFLAGS=1", extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[call["tool"] for call in calls][:9],
+			["mips64-elf-gcc", "llvm-objcopy", "mips64-elf-g++", "llvm-objcopy", "mips64-elf-gcc", "llvm-objcopy",
+			 "clang", "ld.lld", "llvm-objcopy"],
+		)
+		include = self.sdk / "mips64-elf/include"
+		c_and_cxx = [
+			"-march=vr4300", "-mtune=vr4300", "-mabi=o64", f"-I{include}/newlib_overrides", f"-I{include}",
+			"-include", "ktls.h", "-falign-functions=32", "-ffunction-sections", "-fdata-sections", "-g",
+			f"-ffile-prefix-map={app}=", "-ffast-math", "-ftrapping-math", "-fno-associative-math", "-DN64", "-O2",
+			"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
+			"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
+			"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
+			"-Wno-error=unused-local-typedefs", "-Wno-error=unused-const-variable", "-ftrivial-auto-var-init=pattern",
+			"-DLIBDRAGON_PREVIEW=2",
+		]
+		c, c_copy, cxx, cxx_copy, asm, asm_copy, rsp = calls[:7]
+		self.assertEqual(c["program"], str(self.sdk / "bin/mips64-elf-gcc"))
+		self.assertEqual(c["argv"], ["-c", *c_and_cxx, "-std=gnu17", "-DFROM_CFLAGS=1", "-o", str(foreign / "0-helper.o"), "helper.c"])
+		self.assertEqual(c["cwd"], str(app))
+		self.assertEqual(cxx["program"], str(self.sdk / "bin/mips64-elf-g++"))
+		self.assertEqual(cxx["argv"], ["-c", *c_and_cxx, "-std=gnu++17", "-DFROM_CFLAGS=1", "-o", str(foreign / "1-util.o"), "util.cpp"])
+		self.assertEqual(
+			asm["argv"],
+			["-c", "-mtune=vr4300", "-march=vr4300", "-mabi=o64", "-Wa,--fatal-warnings", f"-I{include}",
+			 "-DLIBDRAGON_PREVIEW=2", "-DFROM_CFLAGS=1", "-o", str(foreign / "2-vr4300.o"), "vr4300.S"],
+		)
+		for copy, name in ((c_copy, "0-helper.o"), (cxx_copy, "1-util.o"), (asm_copy, "2-vr4300.o")):
+			self.assertEqual(copy["program"], str(self.llvm / "llvm-objcopy"))
+			self.assertEqual(copy["argv"], [str(foreign / name)])
+		self.assertEqual(rsp["program"], str(self.llvm / "clang"))
+		self.assertIn("-march=mips1", rsp["argv"])
+		link = next(call for call in calls if call["tool"] == "ld.lld" and "-EB" in call["argv"])
+		for name in ("0-helper.o", "1-util.o", "2-vr4300.o", "3-rsp_probe.o"):
+			self.assertIn(str(foreign / name), link["argv"])
+		for call in calls:
+			with self.subTest(tool=call["tool"]):
+				self.assert_sanitized_environment(call)
+
+	def test_without_a_cc_tool_c_and_assembly_sources_keep_clang(self):
+		description = self.gnu_sdk_description("tool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "mixed.z64", f"-n64-sdk:{description}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		compiles = [call for call in self.calls() if call["argv"][-1] in ("helper.c", "util.cpp", "vr4300.S")]
+		self.assertEqual([(call["tool"], call["argv"][-1]) for call in compiles],
+		                 [("clang", "helper.c"), ("mips64-elf-g++", "util.cpp"), ("clang", "vr4300.S")])
+		self.assertEqual(compiles[0]["argv"][1:1 + len(CLANG_TARGET_FLAGS)], list(CLANG_TARGET_FLAGS))
+		self.assertNotIn("-ftrapping-math", compiles[0]["argv"])
+
+	def test_a_cpp_source_needs_a_cxx_tool(self):
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "no-cxx.z64")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 foreign import source {app / 'util.cpp'} requires the SDK description libdragon (built in) "
+		              "to declare a c++ tool", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def test_a_declared_cc_tool_must_be_executable(self):
+		description = self.gnu_sdk_description("tool cc {sdk}/bin/no-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "no-cc.z64", f"-n64-sdk:{description}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 foreign import source {app / 'helper.c'} requires the executable N64 SDK tool bin/no-gcc", result.stdout)
+		self.assertEqual(self.calls(), [])
 
 	def write_description(self, path: Path, text: str) -> Path:
 		path.parent.mkdir(parents=True, exist_ok=True)

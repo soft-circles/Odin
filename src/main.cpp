@@ -695,7 +695,7 @@ gb_internal bool n64_title_is_valid(String const &title) {
 	}
 	for (isize index = 0; index < title.len; index += 1) {
 		u8 c = title[index];
-		if (!gb_char_is_alphanumeric(c) && c != ' ' && c != '-' && c != '_' && c != '.' && c != '!') {
+		if (c < 0x20 || c > 0x7e) {
 			return false;
 		}
 	}
@@ -1494,7 +1494,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String title = string_trim_whitespace(value.value_string);
 							if (!n64_title_is_valid(title)) {
-								gb_printf_err("Invalid -n64-title value '%.*s': expected 1-20 characters using letters, digits, spaces, '-', '_', '.', or '!'\n", LIT(title));
+								gb_printf_err("Invalid -n64-title value '%.*s': expected 1-20 printable ASCII characters\n", LIT(title));
 								bad_flags = true;
 							} else {
 								build_context.n64.title = copy_string(permanent_allocator(), title);
@@ -3697,7 +3697,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "which the SDK then need not provide.");
 		}
 		if (print_flag("-n64-cflags:<string>")) {
-			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c and .S sources.");
+			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c, .cpp and .S sources.");
 			print_usage_line(2, "Split on whitespace with no shell quoting.");
 			print_usage_line(2, "Example: -n64-cflags:\"-Wall -Wextra -Werror\"");
 		}

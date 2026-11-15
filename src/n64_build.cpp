@@ -37,11 +37,13 @@ enum N64Step {
 	N64Step_n64tool,
 	N64Step_ed64romconfig,
 	N64Step_n64metadata,
+	N64Step_cc,
+	N64Step_cxx,
 	N64Step_COUNT,
 };
 
 gb_global char const *n64_step_names[N64Step_COUNT] = {
-	"n64sym", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig", "n64metadata",
+	"n64sym", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig", "n64metadata", "cc", "c++",
 };
 
 // Whether -n64-pack runs the step in place of the SDK description's tool.
@@ -595,12 +597,17 @@ gb_internal bool n64_foreign_input_is_sdk_library(N64BuildRequest const &request
 
 gb_internal bool n64_foreign_input_is_source(String const &input) {
 	String extension = path_extension(input, false);
-	return extension == "c" || extension == "S";
+	return extension == "c" || extension == "cpp" || extension == "S";
 }
 
 // n64.mk assembles a .S source whose file name starts with "rsp" as RSP microcode, and any other .S for the VR4300.
 gb_internal bool n64_foreign_input_is_rsp_source(String const &input) {
 	return path_extension(input, false) == "S" && string_starts_with(remove_directory_from_path(input), STR_LIT("rsp"));
+}
+
+// The SDK description's tool that compiles a VR4300 source, as n64.mk's CC and CXX; without it clang compiles .c and .S.
+gb_internal N64Step n64_source_compiler(String const &input) {
+	return path_extension(input, false) == "cpp" ? N64Step_cxx : N64Step_cc;
 }
 
 // Pure validation, run before the intermediates directory exists so a
@@ -622,7 +629,7 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 			if (!source &&
 			    !str_eq_ignore_case(extension, STR_LIT("o")) &&
 			    !str_eq_ignore_case(extension, STR_LIT("a"))) {
-				gb_printf_err("N64 foreign import input must be a static .o or .a file, or a .c or .S source, got: %.*s\n", LIT(input));
+				gb_printf_err("N64 foreign import input must be a static .o or .a file, or a .c, .cpp or .S source, got: %.*s\n", LIT(input));
 				return false;
 			}
 			if (!gb_file_exists(alloc_cstring(temporary_allocator(), input))) {
@@ -633,7 +640,24 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 				continue;
 			}
 			bool rsp = n64_foreign_input_is_rsp_source(input);
-			char const *source_tools[] = {"clang"};
+			if (!rsp) {
+				N64Step compiler = n64_source_compiler(input);
+				if (compiler == N64Step_cxx && !n64_sdk_declares(request.sdk, N64Step_cxx)) {
+					gb_printf_err("N64 foreign import source %.*s requires the SDK description %.*s to declare a c++ tool\n",
+					              LIT(input), LIT(request.sdk.path));
+					return false;
+				}
+				if (n64_sdk_declares(request.sdk, compiler)) {
+					N64SdkWord const &tool = request.sdk.tools[compiler];
+					if (!n64_sdk_tool_is_executable(tool.value)) {
+						gb_printf_err("N64 foreign import source %.*s requires the executable N64 SDK tool %.*s\n",
+						              LIT(input), LIT(n64_sdk_display(tool)));
+						return false;
+					}
+				}
+			}
+			bool gnu = !rsp && n64_sdk_declares(request.sdk, n64_source_compiler(input));
+			char const *source_tools[] = {gnu ? "llvm-objcopy" : "clang"};
 			char const *rsp_tools[] = {"clang", "ld.lld", "llvm-objcopy"};
 			char const **tools = rsp ? rsp_tools : source_tools;
 			isize tool_count = rsp ? gb_count_of(rsp_tools) : gb_count_of(source_tools);
@@ -758,7 +782,7 @@ struct N64Intermediates {
 	String dfs;
 	String rom_tmp;
 	String sym_sdk;  // n64sym's N64_INST: bin/ links to llvm-objdump and llvm-addr2line
-	String foreign;  // objects built from foreign .c and .S sources; created on demand
+	String foreign;  // objects built from foreign .c, .cpp and .S sources; created on demand
 };
 
 typedef Array<char const *> N64Argv;
@@ -889,16 +913,25 @@ gb_internal void n64_add_clang_target_flags(N64Argv *argv) {
 }
 
 // N64_C_AND_CXX_FLAGS (n64.mk:69-75) without -DLIBDRAGON_PREVIEW, with prefix_map in place of its -ffile-prefix-map.
-// clang cannot honour -ftrapping-math on MIPS and warns about it, which -Werror would fail, so it is left out.
-gb_internal void n64_add_c_and_cxx_flags(N64Argv *argv, N64BuildSettings const &s, String const &prefix_map) {
-	n64_add_clang_target_flags(argv);
+// clang cannot honour -ftrapping-math on MIPS and warns about it, which -Werror would fail, so it is left out; the
+// SDK's GCC (gnu) gets n64.mk's flags as they are.
+gb_internal void n64_add_c_and_cxx_flags(N64Argv *argv, N64BuildSettings const &s, String const &prefix_map, bool gnu) {
+	if (gnu) {
+		n64_arg(argv, "-march=vr4300"); n64_arg(argv, "-mtune=vr4300"); n64_arg(argv, "-mabi=o64");
+	} else {
+		n64_add_clang_target_flags(argv);
+	}
 	n64_arg(argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include/newlib_overrides")));
 	n64_arg(argv, concatenate_strings(permanent_allocator(), STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
 	n64_arg(argv, "-include"); n64_arg(argv, "ktls.h");
 	n64_arg(argv, "-falign-functions=32"); n64_arg(argv, "-ffunction-sections"); n64_arg(argv, "-fdata-sections");
 	n64_arg(argv, "-g"); n64_arg(argv, prefix_map);
+	n64_arg(argv, "-ffast-math");
+	if (gnu) {
+		n64_arg(argv, "-ftrapping-math");
+	}
 	char const *flags[] = {
-		"-ffast-math", "-fno-associative-math", "-DN64", "-O2",
+		"-fno-associative-math", "-DN64", "-O2",
 		"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
 		"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
 		"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
@@ -910,9 +943,9 @@ gb_internal void n64_add_c_and_cxx_flags(N64Argv *argv, N64BuildSettings const &
 }
 
 // ---- Foreign sources --------------------------------------------------------
-// A foreign import may name .c and .S sources. Each one compiles into
+// A foreign import may name .c, .cpp and .S sources. Each one compiles into
 // <intermediates>/foreign by n64.mk's $(BUILD_DIR)/%.o rule for its type, with
-// N64_CFLAGS, N64_ASFLAGS or N64_RSPASFLAGS followed by -n64-cflags, and its
+// N64_CFLAGS, N64_CXXFLAGS, N64_ASFLAGS or N64_RSPASFLAGS followed by -n64-cflags, and its
 // object is linked in the source's place. LIBDRAGON_PREVIEW is n64.mk's 2.
 
 // Quotes text as a GAS string: the file name of a .incbin, or a symbol name GAS takes with any characters.
@@ -1038,22 +1071,31 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 	return n64_run_tool("rsp-wrap", argv, env, show, false, foreign_dir_c);
 }
 
-// Compiles a C or VR4300 assembly source from its own directory, as n64.mk does, so debug paths stay relative.
+// Compiles a C, C++ or VR4300 assembly source from its own directory, as n64.mk does, so debug paths stay relative.
+// The SDK description's cc or c++ tool compiles it when declared, and llvm-objcopy then rewrites the object, whose
+// GNU as symbol table ld.lld rejects; otherwise the LLVM fork's clang compiles .c and .S.
 gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const &source, String const &object, char **env) {
 	N64BuildSettings const &s = request.settings;
 	gbAllocator a = permanent_allocator();
 	String directory = directory_from_path(source);
+	String extension = path_extension(source, false);
+	N64Step compiler = n64_source_compiler(source);
+	bool gnu = n64_sdk_declares(request.sdk, compiler);
 	N64Argv argv = {};
 	array_init(&argv, a);
-	n64_arg(&argv, n64_llvm_tool("clang"));
+	n64_arg(&argv, gnu ? request.sdk.tools[compiler].value : n64_llvm_tool("clang"));
 	n64_arg(&argv, "-c");
-	if (path_extension(source, false) == "c") {
-		// N64_CFLAGS. n64.mk maps "$(CURDIR)" to N64_BACKTRACE_FILE_PREFIX, which is empty by default.
-		n64_add_c_and_cxx_flags(&argv, s, concatenate3_strings(a, STR_LIT("-ffile-prefix-map="), directory, STR_LIT("=")));
-		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2"); n64_arg(&argv, "-std=gnu17");
+	if (extension == "c" || extension == "cpp") {
+		// N64_CFLAGS or N64_CXXFLAGS. n64.mk maps "$(CURDIR)" to N64_BACKTRACE_FILE_PREFIX, which is empty by default.
+		n64_add_c_and_cxx_flags(&argv, s, concatenate3_strings(a, STR_LIT("-ffile-prefix-map="), directory, STR_LIT("=")), gnu);
+		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2"); n64_arg(&argv, extension == "c" ? "-std=gnu17" : "-std=gnu++17");
 	} else {
 		// N64_ASFLAGS
-		n64_add_clang_target_flags(&argv);
+		if (gnu) {
+			n64_arg(&argv, "-mtune=vr4300"); n64_arg(&argv, "-march=vr4300"); n64_arg(&argv, "-mabi=o64");
+		} else {
+			n64_add_clang_target_flags(&argv);
+		}
 		n64_arg(&argv, "-Wa,--fatal-warnings");
 		n64_arg(&argv, concatenate_strings(a, STR_LIT("-I"), n64_sdk_path(s, "mips64-elf/include")));
 		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2");
@@ -1061,10 +1103,16 @@ gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const 
 	n64_add_words(&argv, s.cflags);
 	n64_arg(&argv, "-o"); n64_arg(&argv, object);
 	n64_arg(&argv, remove_directory_from_path(source));
-	return n64_run_tool("cc", argv, env, request.show_system_calls, false, alloc_cstring(a, directory));
+	i32 result = n64_run_tool(extension == "cpp" ? "cxx" : "cc", argv, env, request.show_system_calls, false, alloc_cstring(a, directory));
+	if (result != 0 || !gnu) {
+		return result;
+	}
+	array_init(&argv, a);
+	n64_arg(&argv, n64_llvm_tool("llvm-objcopy")); n64_arg(&argv, object);
+	return n64_run_tool("objcopy", argv, env, request.show_system_calls);
 }
 
-// Builds each foreign .c and .S source and puts its object in the source's place in the request.
+// Builds each foreign .c, .cpp and .S source and puts its object in the source's place in the request.
 gb_internal i32 n64_compile_foreign_sources(N64BuildRequest *request, N64Intermediates const &files, char **env) {
 	gbAllocator a = permanent_allocator();
 	isize count = 0;
