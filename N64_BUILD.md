@@ -189,6 +189,7 @@ as it does `-T<name>`: in the working directory first, then in the
 | `sdk-library` | names | `foreign import "system:<name>"` libraries the link already names |
 | `tool` | step, path | The tool of a packaging step, or `cc` and `c++`, which compile foreign sources |
 | `rom-files` | directory, suffix | Files with the suffix in the directory, appended to `n64tool`'s inputs |
+| `dso-linker-script` | one path | The linker script of `-n64-dso` modules, such as libdragon's `dso.ld` |
 
 ld.lld links `-EB -o <elf>`, then `startup`, `library-dir`, the objects,
 `libraries`, `linker-script`, `link-flags`, the map, `-extra-linker-flags`,
@@ -267,7 +268,8 @@ they apply only to executable ROM output.
 | `-n64-assets:<directory>` | Existing directory | No DragonFS image is added |
 | `-n64-metadata:<file>` | Existing INI file | No extended metadata is added |
 | `-n64-pack:<executable>` | Existing executable, run as `<executable> --n64-tool <tool> <arguments>` in place of the SDK's `mkdfs`, `n64tool`, `ed64romconfig` and `n64elfcompress` | The SDK's own tools run, and it must provide them |
-| `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c` and `.S` sources get only the SDK's flags |
+| `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c`, `.cpp` and `.S` sources get only the SDK's flags |
+| `-n64-dso:<name>=<sources>` | A `.dso` path under `-n64-assets`, then comma-separated `.c`, `.cpp` or VR4300 `.S` sources; repeatable | No DSO modules are built |
 | `-out:<path>` | Output file path, with optional `.z64` suffix | Package-directory name plus `.z64` |
 
 Valid save types are `none`, `eeprom4k`, `eeprom16k`, `sram256k`,
@@ -394,6 +396,29 @@ converts the complete directory into one DragonFS image and embeds it in the
 ROM. Runtime filesystem access is a project concern; the
 [Odin64 DragonFS example](https://github.com/soft-circles/Odin64/tree/main/examples/dragonfs)
 shows checked mount/open/read/close behavior.
+
+### DSO modules
+
+`-n64-dso:<name>=<source>[,<source>...]` builds a libdragon DSO module, as
+`n64.mk`'s `%.dso`, `%.externs` and `%.msym` rules do, into the `-n64-assets`
+directory before `mkdfs` packs it:
+
+```sh
+odin build . -target:n64 -n64-assets:filesystem \
+  -n64-dso:overlay1.dso=overlay1.c -n64-dso:overlay2.dso=overlay2.c
+```
+
+Each module's sources compile like foreign sources, `.c` and `.cpp` with
+`-G 0 -DN64_DSO` added. ld.lld links them with `n64.mk`'s `N64_DSOLDFLAGS` and
+the description's `dso-linker-script`, taking `--omagic` for GNU ld's
+`--nmagic` so the module has the single load segment `n64dso` needs. `n64dso`
+writes `<name>` and `n64sym` writes `<name>.sym` beside it. `n64dso-extern`
+then lists the symbols the modules import, the ROM links with that list as a
+linker script, and `n64dso-msym` writes the ROM's symbol table for them, which
+`n64tool` packs after the DragonFS image. `n64dso-msym` runs the SDK's
+`bin/mips64-elf-readelf`, so it gets the SDK root as `N64_INST`. The option
+needs `-n64-assets`, a `dso-linker-script` and the `n64dso`, `n64dso-extern`,
+`n64dso-msym` and `n64sym` tools.
 
 ## Add extended metadata
 

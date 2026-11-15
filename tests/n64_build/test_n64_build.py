@@ -257,6 +257,23 @@ class N64OptionValidationTests(unittest.TestCase):
 			with self.subTest(option=option):
 				self.assert_invalid_option(option, diagnostic)
 
+	def test_dso_values_name_a_relative_dso_and_existing_vr4300_sources(self):
+		(self.app / "module.c").write_text("int module(void) { return 1; }\n", encoding="utf-8")
+		(self.app / "rsp_module.S").write_text("", encoding="utf-8")
+		cases = (
+			("-n64-dso:module.c", "Invalid -n64-dso value"),
+			("-n64-dso:module.so=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:/abs/module.dso=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:../module.dso=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:module.dso=missing.c", "-n64-dso must name an existing file"),
+			("-n64-dso:module.dso=rsp_module.S", "-n64-dso sources must be .c, .cpp or VR4300 .S files"),
+		)
+		for option, diagnostic in cases:
+			with self.subTest(option=option):
+				self.assert_invalid_option(option, diagnostic)
+		result = run_build(self.app, "-n64-dso:module.dso=module.c", "-n64-dso:module.dso=module.c")
+		self.assertIn("-n64-dso names module.dso twice", result.stdout)
+
 	def test_n64_options_are_rejected_for_host_builds(self):
 		description = self.root / "host.sdk"
 		description.write_text("linker-script n64.ld\n", encoding="utf-8")
@@ -899,6 +916,100 @@ class N64StubPackagingTests(unittest.TestCase):
 
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(f"N64 foreign import source {app / 'helper.c'} requires the executable N64 SDK tool bin/no-gcc", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def dso_sdk_description(self, extra: str = "") -> Path:
+		guide = (ODIN_ROOT / "N64_BUILD.md").read_text(encoding="utf-8")
+		documented = guide.split("packages a ROM:\n\n```text\n", 1)[1].split("```", 1)[0]
+		for name in ("n64dso", "n64dso-extern", "n64dso-msym"):
+			self.make_stub(self.sdk / "bin" / name)
+		(self.sdk / "mips64-elf/lib/dso.ld").touch()
+		return self.write_description(self.root / "dso.sdk", documented + (
+			"dso-linker-script {sdk}/mips64-elf/lib/dso.ld\n"
+			"tool n64dso {sdk}/bin/n64dso\n"
+			"tool n64dso-extern {sdk}/bin/n64dso-extern\n"
+			"tool n64dso-msym {sdk}/bin/n64dso-msym\n"
+		) + extra)
+
+	def create_dso_app(self) -> tuple[Path, Path]:
+		app = create_app(self.root, "dso app")
+		(app / "overlay.c").write_text("int overlay(void) { return 1; }\n", encoding="utf-8")
+		(app / "overlay_asm.S").write_text("\t.text\n", encoding="utf-8")
+		assets = app / "filesystem"
+		assets.mkdir()
+		return app, assets
+
+	def test_dso_modules_build_into_the_assets_and_link_with_externs_and_msym(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "dso.z64"
+		build = self.intermediates(output)
+		foreign = build / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:levels/overlay.dso={app / 'overlay.c'},{app / 'overlay_asm.S'}",
+		                    "-n64-cflags:-DFROM_CFLAGS=1", extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[call["tool"] for call in calls],
+			["clang", "clang", "ld.lld", "n64dso", "n64sym", "n64dso-extern", "ld.lld", "n64sym", "n64dso-msym",
+			 "llvm-strip", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig"],
+		)
+		c, asm, dso_link, n64dso, dso_sym, extern, link, sym, msym, *_ = calls
+		self.assertEqual(c["argv"][-8:], ["-std=gnu17", "-G", "0", "-DN64_DSO", "-DFROM_CFLAGS=1", "-o", str(foreign / "dso0-0-overlay.o"), "overlay.c"])
+		self.assertNotIn("-DN64_DSO", asm["argv"])
+		self.assertEqual(asm["argv"][-3:], ["-o", str(foreign / "dso0-1-overlay_asm.o"), "overlay_asm.S"])
+		elf = build / "dso/0/overlay.elf"
+		self.assertEqual(
+			dso_link["argv"],
+			["-EB", "--emit-relocs", "--unresolved-symbols=ignore-all", "--omagic",
+			 f"-T{self.sdk / 'mips64-elf/lib/dso.ld'}", f"-Map={build / 'dso/0/overlay.map'}", "-o", str(elf),
+			 str(foreign / "dso0-0-overlay.o"), str(foreign / "dso0-1-overlay_asm.o")],
+		)
+		self.assertEqual(n64dso["argv"], ["-o", str(assets / "levels"), "-c", "1", str(elf)])
+		self.assertEqual(dso_sym["argv"], ["--all", str(elf), str(assets / "levels/overlay.dso.sym")])
+		self.assertEqual(dso_sym["env"].get("N64_INST"), "n64sym")
+		externs = build / "odin-n64.externs"
+		self.assertEqual(extern["argv"], ["-o", str(externs), str(assets / "levels/overlay.dso")])
+		self.assertIn(f"-T{externs}", link["argv"])
+		self.assertEqual(link["argv"].index(f"-T{externs}") + 1, link["argv"].index(f"-Map={build / 'odin-n64.map'}"))
+		msym_path = build / "odin-n64.msym"
+		self.assertEqual(msym["argv"], ["-e", str(externs), str(build / "odin-n64.elf"), str(msym_path)])
+		self.assertEqual(msym["env"].get("N64_INST"), str(self.sdk))
+		n64tool = calls[12]
+		self.assertEqual(n64tool["argv"][-4:-2], [str(build / "odin-n64.dfs"), str(msym_path)])
+		self.assertTrue((assets / "levels").is_dir())
+		for call in calls:
+			if call["tool"] != "n64dso-msym":
+				with self.subTest(tool=call["tool"]):
+					self.assert_sanitized_environment(call)
+
+	def test_dso_build_intermediates_are_removed_without_keep_temp_files(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "clean.z64"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={app / 'overlay.c'}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertFalse(self.intermediates(output).exists())
+
+	def test_n64_dso_needs_assets_a_dso_linker_script_and_the_dso_tools(self):
+		app, assets = self.create_dso_app()
+		dso = f"-n64-dso:overlay.dso={app / 'overlay.c'}"
+		description = self.dso_sdk_description()
+		result = self.build(app, app / "no-assets.z64", f"-n64-sdk:{description}", dso)
+		self.assertIn("-n64-dso requires -n64-assets", result.stdout)
+		result = self.build(app, app / "built-in.z64", f"-n64-assets:{assets}", dso)
+		self.assertIn("-n64-dso requires the SDK description to declare an existing dso-linker-script: libdragon (built in)",
+		              result.stdout)
+		(self.sdk / "bin/n64dso-msym").chmod(0o644)
+		result = self.build(app, app / "no-msym.z64", f"-n64-sdk:{description}", f"-n64-assets:{assets}", dso)
+		self.assertIn(f"-n64-dso requires the SDK description to declare an executable n64dso-msym tool: {description}",
+		              result.stdout)
 		self.assertEqual(self.calls(), [])
 
 	def write_description(self, path: Path, text: str) -> Path:

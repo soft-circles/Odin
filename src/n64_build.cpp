@@ -39,11 +39,15 @@ enum N64Step {
 	N64Step_n64metadata,
 	N64Step_cc,
 	N64Step_cxx,
+	N64Step_n64dso,
+	N64Step_n64dso_extern,
+	N64Step_n64dso_msym,
 	N64Step_COUNT,
 };
 
 gb_global char const *n64_step_names[N64Step_COUNT] = {
 	"n64sym", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig", "n64metadata", "cc", "c++",
+	"n64dso", "n64dso-extern", "n64dso-msym",
 };
 
 // Whether -n64-pack runs the step in place of the SDK description's tool.
@@ -68,6 +72,7 @@ struct N64SdkDescription {
 	Array<String> library_dirs;
 	Array<String> libraries;
 	String linker_script;
+	String dso_linker_script;
 	Array<String> link_flags;
 	Array<String> system_libraries;
 	Array<String> finish;
@@ -323,7 +328,7 @@ gb_internal bool n64_load_sdk_description(N64BuildSettings const &settings, N64S
 		// directory; a linker script without a directory is found through library-dir. A {gcc} word is left to the
 		// GCC runtime diagnostic when the SDK has no single runtime.
 		bool paths = key == "require" || key == "startup" || key == "finish" || key == "library-dir" || key == "tool" ||
-		             key == "rom-files" || key == "linker-script";
+		             key == "rom-files" || key == "linker-script" || key == "dso-linker-script";
 		for (isize index = 0; paths && index < values.count; index += 1) {
 			N64SdkWord const &word = values[index];
 			bool path_word = key == "tool" ? index == 1 : key == "rom-files" ? index == 0 :
@@ -358,6 +363,13 @@ gb_internal bool n64_load_sdk_description(N64BuildSettings const &settings, N64S
 				return false;
 			}
 			description->linker_script = values[0].value;
+		} else if (key == "dso-linker-script") {
+			known = true;
+			if (values.count != 1 || description->dso_linker_script.len > 0) {
+				gb_printf_err("N64 SDK description %.*s:%td: 'dso-linker-script' takes one path and appears once\n", LIT(path), line_number);
+				return false;
+			}
+			description->dso_linker_script = values[0].value;
 		} else if (key == "rom-files") {
 			known = true;
 			if (values.count != 2 || description->rom_files_dir.len > 0) {
@@ -441,6 +453,25 @@ gb_internal bool n64_validate_sdk(N64SdkDescription const &description, N64Build
 	}
 	if (!valid) {
 		return false;
+	}
+
+	if (settings.dsos.count > 0) {
+		if (settings.assets.len == 0) {
+			gb_printf_err("-n64-dso requires -n64-assets, the directory its modules are built into\n");
+			return false;
+		}
+		if (description.dso_linker_script.len == 0 || !gb_file_exists(alloc_cstring(temporary_allocator(), description.dso_linker_script))) {
+			gb_printf_err("-n64-dso requires the SDK description to declare an existing dso-linker-script: %.*s\n", LIT(description.path));
+			return false;
+		}
+		N64Step dso_steps[] = {N64Step_n64dso, N64Step_n64dso_extern, N64Step_n64dso_msym, N64Step_n64sym};
+		for (N64Step step : dso_steps) {
+			if (!n64_sdk_declares(description, step) || !n64_sdk_tool_is_executable(description.tools[step].value)) {
+				gb_printf_err("-n64-dso requires the SDK description to declare an executable %s tool: %.*s\n",
+				              n64_step_names[step], LIT(description.path));
+				return false;
+			}
+		}
 	}
 
 	struct Optional { bool requested; char const *option; N64Step step; };
@@ -783,6 +814,9 @@ struct N64Intermediates {
 	String rom_tmp;
 	String sym_sdk;  // n64sym's N64_INST: bin/ links to llvm-objdump and llvm-addr2line
 	String foreign;  // objects built from foreign .c, .cpp and .S sources; created on demand
+	String dso;      // one directory per -n64-dso module, holding its linked ELF and map
+	String externs;  // n64dso-extern's list of the symbols the modules import from the ROM
+	String msym;     // n64dso-msym's table of the ROM's symbols the modules import
 };
 
 typedef Array<char const *> N64Argv;
@@ -878,6 +912,9 @@ gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &out
 	out->rom_tmp  = n64_path_join(a, out->dir, STR_LIT("odin-n64.z64.tmp"));
 	out->sym_sdk  = n64_path_join(a, out->dir, STR_LIT("n64sym"));
 	out->foreign  = n64_path_join(a, out->dir, STR_LIT("foreign"));
+	out->dso      = n64_path_join(a, out->dir, STR_LIT("dso"));
+	out->externs  = n64_path_join(a, out->dir, STR_LIT("odin-n64.externs"));
+	out->msym     = n64_path_join(a, out->dir, STR_LIT("odin-n64.msym"));
 	char const *dir_c = alloc_cstring(temporary_allocator(), out->dir);
 	if (mkdir(dir_c, 0755) != 0 && errno != EEXIST) {
 		gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(out->dir), strerror(errno));
@@ -1074,7 +1111,7 @@ gb_internal i32 n64_assemble_rsp(N64BuildRequest const &request, String const &s
 // Compiles a C, C++ or VR4300 assembly source from its own directory, as n64.mk does, so debug paths stay relative.
 // The SDK description's cc or c++ tool compiles it when declared, and llvm-objcopy then rewrites the object, whose
 // GNU as symbol table ld.lld rejects; otherwise the LLVM fork's clang compiles .c and .S.
-gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const &source, String const &object, char **env) {
+gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const &source, String const &object, char **env, bool dso = false) {
 	N64BuildSettings const &s = request.settings;
 	gbAllocator a = permanent_allocator();
 	String directory = directory_from_path(source);
@@ -1089,6 +1126,10 @@ gb_internal i32 n64_compile_source(N64BuildRequest const &request, String const 
 		// N64_CFLAGS or N64_CXXFLAGS. n64.mk maps "$(CURDIR)" to N64_BACKTRACE_FILE_PREFIX, which is empty by default.
 		n64_add_c_and_cxx_flags(&argv, s, concatenate3_strings(a, STR_LIT("-ffile-prefix-map="), directory, STR_LIT("=")), gnu);
 		n64_arg(&argv, "-DLIBDRAGON_PREVIEW=2"); n64_arg(&argv, extension == "c" ? "-std=gnu17" : "-std=gnu++17");
+		if (dso) {
+			// n64.mk's %.dso CFLAGS and CXXFLAGS.
+			n64_arg(&argv, "-G"); n64_arg(&argv, "0"); n64_arg(&argv, "-DN64_DSO");
+		}
 	} else {
 		// N64_ASFLAGS
 		if (gnu) {
@@ -1148,6 +1189,142 @@ gb_internal i32 n64_compile_foreign_sources(N64BuildRequest *request, N64Interme
 	return 0;
 }
 
+// n64sym runs $N64_INST/bin/mips64-elf-objdump and mips64-elf-addr2line, so it gets N64_INST naming a relative
+// directory inside the intermediates whose bin holds llvm-objdump and llvm-addr2line under those names.
+gb_internal bool n64_prepare_sym_facade(N64Intermediates const &files) {
+	gbAllocator a = permanent_allocator();
+	String sym_bin = n64_path_join(a, files.sym_sdk, STR_LIT("bin"));
+	for (String const &directory : {files.sym_sdk, sym_bin}) {
+		if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
+			gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
+			return false;
+		}
+	}
+	for (auto const &tool : n64_sym_tools) {
+		String link = n64_path_join(a, sym_bin, make_string_c(tool[0]));
+		n64_remove_file_if_present(link);
+		if (!n64_create_symlink(n64_llvm_tool(tool[1]), link)) {
+			gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(link), LIT(n64_llvm_tool(tool[1])), strerror(errno));
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal bool n64_make_directories(String const &path) {
+	for (isize index = 1; index <= path.len; index += 1) {
+		if (index < path.len && path[index] != '/') {
+			continue;
+		}
+		char const *prefix = alloc_cstring(temporary_allocator(), substring(path, 0, index));
+		if (mkdir(prefix, 0755) != 0 && errno != EEXIST) {
+			gb_printf_err("Failed to create directory %s: %s\n", prefix, strerror(errno));
+			return false;
+		}
+	}
+	return true;
+}
+
+// ---- DSO modules ------------------------------------------------------------
+// Each -n64-dso module builds as n64.mk's %.dso rule does: its sources compile with N64_CFLAGS -G 0 -DN64_DSO (or
+// N64_CXXFLAGS, or N64_ASFLAGS), ld.lld links them with N64_DSOLDFLAGS, n64dso writes <name> into -n64-assets and
+// n64sym writes <name>.sym beside it. ld.lld takes --omagic for GNU ld's --nmagic: both give n64dso the single load
+// segment it needs, which ld.lld's --nmagic does not. n64dso-extern then lists what the modules import, for the ROM's
+// link (-T) and for n64dso-msym.
+gb_internal i32 n64_build_dsos(N64BuildRequest const &request, N64Intermediates const &files, char **env) {
+	N64BuildSettings const &s = request.settings;
+	if (s.dsos.count == 0) {
+		return 0;
+	}
+	bool show = request.show_system_calls;
+	gbAllocator a = permanent_allocator();
+	for (String const &directory : {files.foreign, files.dso}) {
+		if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
+			gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
+			return 1;
+		}
+	}
+	if (!n64_prepare_sym_facade(files)) {
+		return 1;
+	}
+	i32 result = 0;
+	N64Argv argv = {};
+	Array<String> modules = {};
+	array_init(&modules, a);
+	for_array(index, s.dsos) {
+		N64Dso const &dso = s.dsos[index];
+		String stem = remove_extension_from_path(remove_directory_from_path(dso.name));
+		gbString numbered = gb_string_make(a, "");
+		numbered = gb_string_append_fmt(numbered, "%td", index);
+		String module_dir = n64_path_join(a, files.dso, make_string_c(numbered));
+		if (mkdir(alloc_cstring(a, module_dir), 0755) != 0 && errno != EEXIST) {
+			gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(module_dir), strerror(errno));
+			return 1;
+		}
+		Array<String> objects = {};
+		array_init(&objects, a);
+		for_array(source_index, dso.sources) {
+			String source = dso.sources[source_index];
+			gbString name = gb_string_make(a, "");
+			name = gb_string_append_fmt(name, "dso%td-%td-%.*s.o", index, source_index,
+			                            LIT(remove_extension_from_path(remove_directory_from_path(source))));
+			String object = n64_path_join(a, files.foreign, make_string_c(name));
+			if ((result = n64_compile_source(request, source, object, env, true)) != 0) return result;
+			array_add(&objects, object);
+		}
+
+		String elf = n64_path_join(a, module_dir, concatenate_strings(a, stem, STR_LIT(".elf")));
+		array_init(&argv, a);
+		n64_arg(&argv, n64_llvm_tool("ld.lld"));
+		n64_arg(&argv, "-EB"); n64_arg(&argv, "--emit-relocs"); n64_arg(&argv, "--unresolved-symbols=ignore-all");
+		n64_arg(&argv, "--omagic"); n64_arg(&argv, concatenate_strings(a, STR_LIT("-T"), request.sdk.dso_linker_script));
+		n64_arg(&argv, concatenate3_strings(a, STR_LIT("-Map="), n64_path_join(a, module_dir, stem), STR_LIT(".map")));
+		n64_arg(&argv, "-o"); n64_arg(&argv, elf);
+		for (String const &object : objects) {
+			n64_arg(&argv, object);
+		}
+		if ((result = n64_run_tool("dso-link", argv, env, show)) != 0) return result;
+
+		String output = n64_path_join(a, s.assets, dso.name);
+		String output_dir = directory_from_path(output);
+		if (!n64_make_directories(output_dir)) {
+			return 1;
+		}
+		array_init(&argv, a);
+		n64_arg(&argv, request.sdk.tools[N64Step_n64dso].value);
+		n64_arg(&argv, "-o"); n64_arg(&argv, output_dir); n64_arg(&argv, "-c"); n64_arg(&argv, "1"); n64_arg(&argv, elf);
+		if ((result = n64_run_tool("n64dso", argv, env, show)) != 0) return result;
+
+		array_init(&argv, a);
+		n64_arg(&argv, request.sdk.tools[N64Step_n64sym].value); n64_arg(&argv, "--all");
+		n64_arg(&argv, elf); n64_arg(&argv, concatenate_strings(a, output, STR_LIT(".sym")));
+		result = n64_run_tool("dso-sym", argv, n64_sanitized_environment("N64_INST=n64sym"), show, false, alloc_cstring(a, files.dir));
+		if (result != 0) return result;
+		array_add(&modules, output);
+	}
+
+	array_init(&argv, a);
+	n64_arg(&argv, request.sdk.tools[N64Step_n64dso_extern].value);
+	n64_arg(&argv, "-o"); n64_arg(&argv, files.externs);
+	for (String const &module : modules) {
+		n64_arg(&argv, module);
+	}
+	return n64_run_tool("dso-extern", argv, env, show);
+}
+
+// Removes a directory of files and of directories of files.
+gb_internal bool n64_remove_tree(String const &path) {
+	Array<FileInfo> entries = {};
+	if (read_directory(path, &entries) != ReadDirectory_None) {
+		return errno == ENOENT || !path_is_directory(path);
+	}
+	bool clean = true;
+	for (FileInfo const &entry : entries) {
+		clean = (entry.is_dir ? n64_remove_tree(entry.fullpath) : n64_remove_file_if_present(entry.fullpath)) && clean;
+	}
+	return n64_remove_directory(path) && clean;
+}
+
 gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &files, char **env) {
 	// Compiler object paths come from a hash map whose order is not stable
 	// between runs; sort them so the link, and so the ROM, is reproducible.
@@ -1186,6 +1363,9 @@ gb_internal i32 n64_link_elf(N64BuildRequest *request, N64Intermediates const &f
 	for (String const &flag : sdk.link_flags) {
 		n64_arg(&argv, flag);
 	}
+	if (request->settings.dsos.count > 0) {
+		n64_arg(&argv, concatenate_strings(a, STR_LIT("-T"), files.externs));
+	}
 	n64_arg(&argv, concatenate_strings(a, STR_LIT("-Map="), files.map));
 	n64_arg(&argv, "--cref");
 	n64_add_linker_words(&argv, request->extra_linker_flags);
@@ -1208,31 +1388,27 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	i32 result = 0;
 	N64Argv argv = {};
 
-	// n64sym --all elf elf.sym
-	// n64sym runs $N64_INST/bin/mips64-elf-objdump and mips64-elf-addr2line, so it gets N64_INST naming a relative
-	// directory inside the intermediates whose bin holds llvm-objdump and llvm-addr2line under those names.
+	// n64sym --all elf elf.sym, with n64_prepare_sym_facade's N64_INST
 	bool symbols = n64_sdk_declares(request.sdk, N64Step_n64sym);
-	String sym_bin = n64_path_join(a, files.sym_sdk, STR_LIT("bin"));
 	if (symbols) {
-		for (String const &directory : {files.sym_sdk, sym_bin}) {
-			if (mkdir(alloc_cstring(a, directory), 0755) != 0 && errno != EEXIST) {
-				gb_printf_err("Failed to create N64 build directory %.*s: %s\n", LIT(directory), strerror(errno));
-				return 1;
-			}
-		}
-		for (auto const &tool : n64_sym_tools) {
-			String link = n64_path_join(a, sym_bin, make_string_c(tool[0]));
-			n64_remove_file_if_present(link);
-			if (!n64_create_symlink(n64_llvm_tool(tool[1]), link)) {
-				gb_printf_err("Failed to link %.*s -> %.*s for n64sym: %s\n", LIT(link), LIT(n64_llvm_tool(tool[1])), strerror(errno));
-				return 1;
-			}
+		if (!n64_prepare_sym_facade(files)) {
+			return 1;
 		}
 		array_init(&argv, a);
 		n64_arg(&argv, request.sdk.tools[N64Step_n64sym].value); n64_arg(&argv, "--all");
 		n64_arg(&argv, "odin-n64.elf"); n64_arg(&argv, "odin-n64.elf.sym");
 		result = n64_run_tool("sym", argv, n64_sanitized_environment("N64_INST=n64sym"), show, false, alloc_cstring(a, files.dir));
 		if (result != 0) return result;
+	}
+
+	// n64dso-msym -e externs elf msym. It runs $N64_INST/bin/mips64-elf-readelf, whose columns it parses, so it gets the
+	// SDK root as N64_INST.
+	if (s.dsos.count > 0) {
+		array_init(&argv, a);
+		n64_arg(&argv, request.sdk.tools[N64Step_n64dso_msym].value);
+		n64_arg(&argv, "-e"); n64_arg(&argv, files.externs); n64_arg(&argv, files.elf); n64_arg(&argv, files.msym);
+		char const *sdk_entry = alloc_cstring(a, concatenate_strings(a, STR_LIT("N64_INST="), s.sdk_root));
+		if ((result = n64_run_tool("dso-msym", argv, n64_sanitized_environment(sdk_entry), show)) != 0) return result;
 	}
 
 	// cp elf elf.stripped; strip -s elf.stripped
@@ -1279,6 +1455,9 @@ gb_internal i32 n64_build_rom_from_elf(N64BuildRequest const &request, N64Interm
 	}
 	if (s.assets.len > 0) {
 		n64_arg(&argv, files.dfs);
+	}
+	if (s.dsos.count > 0) {
+		n64_arg(&argv, files.msym);
 	}
 	// The SDK description's rom-files, as libdragon's N64_TOOLFILES = $(wildcard <sdk>/mips64-elf/include/*.version),
 	// sorted like make's glob.
@@ -1340,6 +1519,9 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 
 	i32 result = n64_compile_foreign_sources(&request, files, env);
 	if (result == 0) {
+		result = n64_build_dsos(request, files, env);
+	}
+	if (result == 0) {
 		result = n64_link_elf(&request, files, env);
 	}
 	if (result == 0) {
@@ -1359,7 +1541,7 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 		return {0, files.dir};
 	}
 	String sym_bin = n64_path_join(temporary_allocator(), files.sym_sdk, STR_LIT("bin"));
-	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs};
+	String generated[] = {files.elf, files.map, files.sym, files.stripped, files.dfs, files.externs, files.msym};
 	bool clean = true;
 	for (String const &path : generated) {
 		clean = n64_remove_file_if_present(path) && clean;
@@ -1377,6 +1559,7 @@ gb_internal N64BuildResult n64_package_rom(N64BuildRequest request) {
 		}
 		clean = n64_remove_directory(files.foreign) && clean;
 	}
+	clean = n64_remove_tree(files.dso) && clean;
 	if (!clean || !n64_remove_directory(files.dir)) {
 		gb_printf_err("Warning: could not completely remove N64 build intermediates at %.*s\n", LIT(files.dir));
 	}

@@ -432,6 +432,7 @@ enum BuildFlagKind {
 	BuildFlag_N64Metadata,
 	BuildFlag_N64Pack,
 	BuildFlag_N64CFlags,
+	BuildFlag_N64Dso,
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
@@ -768,6 +769,47 @@ gb_internal bool n64_parse_existing_path(String const &option, String const &val
 	return true;
 }
 
+// -n64-dso:<name>=<source>[,<source>...], where name is the module's path under -n64-assets.
+gb_internal bool n64_parse_dso(String const &value) {
+	isize equals = string_index_byte(value, '=');
+	String name = equals < 0 ? String{} : string_trim_whitespace(substring(value, 0, equals));
+	bool name_valid = name.len > 4 && string_ends_with(name, STR_LIT(".dso")) && name[0] != '/' &&
+	                  !string_contains_string(name, STR_LIT("..")) && !string_contains_string(name, STR_LIT("\\"));
+	if (!name_valid) {
+		gb_printf_err("Invalid -n64-dso value '%.*s': expected <name>.dso=<source>[,<source>...] with a relative name under -n64-assets\n", LIT(value));
+		return false;
+	}
+	for (N64Dso const &dso : build_context.n64.dsos) {
+		if (dso.name == name) {
+			gb_printf_err("-n64-dso names %.*s twice\n", LIT(name));
+			return false;
+		}
+	}
+	N64Dso dso = {copy_string(permanent_allocator(), name)};
+	array_init(&dso.sources, permanent_allocator());
+	String rest = substring(value, equals+1, value.len);
+	while (rest.len > 0 || dso.sources.count == 0) {
+		isize comma = string_index_byte(rest, ',');
+		String source = comma < 0 ? rest : substring(rest, 0, comma);
+		rest = comma < 0 ? String{} : substring(rest, comma+1, rest.len);
+		String path = {};
+		if (!n64_parse_existing_path(STR_LIT("-n64-dso"), source, false, &path)) {
+			return false;
+		}
+		String extension = path_extension(path, false);
+		if ((extension != "c" && extension != "cpp" && extension != "S") || string_starts_with(remove_directory_from_path(path), STR_LIT("rsp"))) {
+			gb_printf_err("-n64-dso sources must be .c, .cpp or VR4300 .S files, got %.*s\n", LIT(path));
+			return false;
+		}
+		array_add(&dso.sources, path);
+	}
+	if (build_context.n64.dsos.data == nullptr) {
+		array_init(&build_context.n64.dsos, permanent_allocator());
+	}
+	array_add(&build_context.n64.dsos, dso);
+	return true;
+}
+
 gb_internal bool parse_build_flags(Array<String> args) {
 	auto build_flags = array_make<BuildFlag>(heap_allocator(), 0, BuildFlag_COUNT);
 	add_flag(&build_flags, BuildFlag_Help,                    str_lit("help"),                      BuildFlagParam_None,    Command_all);
@@ -803,6 +845,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_N64Metadata,             str_lit("n64-metadata"),              BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64Pack,                 str_lit("n64-pack"),                  BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_N64CFlags,               str_lit("n64-cflags"),                BuildFlagParam_String,  Command__does_build);
+	add_flag(&build_flags, BuildFlag_N64Dso,                  str_lit("n64-dso"),                   BuildFlagParam_String,  Command__does_build, true);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
@@ -1572,6 +1615,14 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							build_context.n64.cflags = value.value_string;
 							build_context.n64_rom_options_given = true;
+							break;
+						case BuildFlag_N64Dso:
+							GB_ASSERT(value.kind == ExactValue_String);
+							if (n64_parse_dso(value.value_string)) {
+								build_context.n64_rom_options_given = true;
+							} else {
+								bad_flags = true;
+							}
 							break;
 
 						case BuildFlag_Subtarget:
@@ -3695,6 +3746,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(2, "Runs <executable> --n64-tool <tool> <arguments> in place of the SDK's mkdfs, n64tool,");
 			print_usage_line(2, "ed64romconfig and n64elfcompress, for each of them the SDK description declares,");
 			print_usage_line(2, "which the SDK then need not provide.");
+		}
+		if (print_flag("-n64-dso:<name>=<source>[,<source>...]")) {
+			print_usage_line(2, "Builds a DSO module from the sources into the -n64-assets directory as <name>, with its");
+			print_usage_line(2, "symbols beside it, and links and packages the ROM with the modules' externs and msym.");
+			print_usage_line(2, "May be repeated. Example: -n64-dso:overlay1.dso=overlay1.c");
 		}
 		if (print_flag("-n64-cflags:<string>")) {
 			print_usage_line(2, "Appends flags to the SDK compile of foreign-imported .c, .cpp and .S sources.");
