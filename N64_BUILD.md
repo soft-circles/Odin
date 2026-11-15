@@ -321,8 +321,9 @@ foreign import probe {"probe.c", "rsp_probe.S"}
 The build compiles each source with the flags of libdragon's `n64.mk` rules,
 then links the object in the source's place. A `.c` file gets the LLVM fork's
 `clang` and `N64_CFLAGS`, targeting `mips3` with the `o64` ABI and GCC's `stdint.h`
-types, so `int32_t` stays `long`. A `.S` file whose name starts with `rsp` is
-RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
+types, so `int32_t` stays `long`, and at GCC's `-G 8`, so C and Odin agree on
+which globals are reached through `$gp` (see [Runtime contract](#runtime-contract)).
+A `.S` file whose name starts with `rsp` is RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
 `misc/n64/rsp.lld.ld`, a copy of libdragon's `rsp.ld`, and `llvm-objcopy` turns its `.text`, `.data` and
 `.meta` sections into `<name>_text_start` and the other symbols that
 `DEFINE_RSP_UCODE(<name>)` expects. These tools come from the bindir of the
@@ -473,6 +474,18 @@ The value must be greater than zero. Temporary allocations are zeroed by
 default, support aligned grow/shrink resize, and are reclaimed together with
 `free_all`; individual frees are not supported. Both context allocators are
 ordinary replaceable Odin allocator values.
+
+Odin code reaches globals of 8 bytes or less through `$gp`, as libdragon's GCC
+does with its default `-G 8`: they live in `.sdata` and `.sbss`, which
+libdragon's `n64.ld` places within 32 KiB of `_gp`, and a read is one
+`lw v0, %gp_rel(sym)(gp)`. A global with its own `link_section` other than
+`.sdata` or `.sbss`, a larger one and a zero-sized one keep `%hi`/`%lo`.
+`$gp` must hold `_gp` before any Odin code runs, as libdragon's `entrypoint.S`
+ensures. Boot code that sets it from Odin declares `_gp` zero-sized
+(`_gp: [0]u8`), since the address of a small `_gp` would itself be read through
+`$gp`. A foreign global of 8 bytes or less is reached the same way, so the C
+side must place it in small data, as GCC and clang do at `-G 8`; one placed
+farther from `_gp` fails the link with a `R_MIPS_GPREL16` overflow.
 
 The current runtime is single-threaded and has no TLS runtime. Callback,
 interrupt, timer, thread, and TLS context propagation are not supported.
