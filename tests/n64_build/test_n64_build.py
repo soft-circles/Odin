@@ -997,6 +997,66 @@ class N64StubPackagingTests(unittest.TestCase):
 		self.assertEqual(result.returncode, 0, result.stdout)
 		self.assertFalse(self.intermediates(output).exists())
 
+	def test_cc_and_cxx_tools_compile_dso_sources_as_n64_mk_does(self):
+		for name in ("mips64-elf-gcc", "mips64-elf-g++"):
+			self.make_stub(self.sdk / "bin" / name)
+		description = self.dso_sdk_description("tool cc {sdk}/bin/mips64-elf-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app, assets = self.create_dso_app()
+		(app / "overlay_cxx.cpp").write_text("extern \"C\" int overlay_cxx(void) { return 2; }\n", encoding="utf-8")
+		output = app / "gnu-dso.z64"
+		foreign = self.intermediates(output) / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={app / 'overlay.c'},{app / 'overlay_cxx.cpp'},{app / 'overlay_asm.S'}",
+		                    extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual([call["tool"] for call in calls][:7],
+		                 ["mips64-elf-gcc", "llvm-objcopy", "mips64-elf-g++", "llvm-objcopy", "mips64-elf-gcc", "llvm-objcopy",
+		                  "ld.lld"])
+		c, c_copy, cxx, cxx_copy, asm, asm_copy, _ = calls[:7]
+		self.assertEqual(c["argv"][-7:], ["-std=gnu17", "-G", "0", "-DN64_DSO", "-o", str(foreign / "dso0-0-overlay.o"), "overlay.c"])
+		self.assertEqual(cxx["argv"][-7:],
+		                 ["-std=gnu++17", "-G", "0", "-DN64_DSO", "-o", str(foreign / "dso0-1-overlay_cxx.o"), "overlay_cxx.cpp"])
+		self.assertNotIn("-DN64_DSO", asm["argv"])
+		self.assertEqual(asm["argv"][-3:], ["-o", str(foreign / "dso0-2-overlay_asm.o"), "overlay_asm.S"])
+		for copy, name in ((c_copy, "dso0-0-overlay.o"), (cxx_copy, "dso0-1-overlay_cxx.o"), (asm_copy, "dso0-2-overlay_asm.o")):
+			self.assertEqual(copy["argv"], [str(foreign / name)])
+
+	def test_a_cpp_dso_source_needs_a_cxx_tool(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		source = app / "overlay_cxx.cpp"
+		source.write_text("extern \"C\" int overlay_cxx(void) { return 2; }\n", encoding="utf-8")
+
+		result = self.build(app, app / "no-cxx.z64", f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={source}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 DSO source {source} requires the SDK description {description} to declare a c++ tool", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def test_each_dso_module_links_apart_and_all_feed_the_externs(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "two.z64"
+		build = self.intermediates(output)
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:a/overlay.dso={app / 'overlay.c'}", f"-n64-dso:b/overlay.dso={app / 'overlay_asm.S'}",
+		                    extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		links = [call for call in calls if call["tool"] == "ld.lld" and "--emit-relocs" in call["argv"]]
+		self.assertEqual([call["argv"][call["argv"].index("-o") + 1] for call in links],
+		                 [str(build / "dso/0/overlay.elf"), str(build / "dso/1/overlay.elf")])
+		self.assertEqual([call["argv"][-1] for call in calls if call["tool"] == "n64dso"],
+		                 [str(build / "dso/0/overlay.elf"), str(build / "dso/1/overlay.elf")])
+		extern = next(call for call in calls if call["tool"] == "n64dso-extern")
+		self.assertEqual(extern["argv"], ["-o", str(build / "odin-n64.externs"), str(assets / "a/overlay.dso"), str(assets / "b/overlay.dso")])
+
 	def test_n64_dso_needs_assets_a_dso_linker_script_and_the_dso_tools(self):
 		app, assets = self.create_dso_app()
 		dso = f"-n64-dso:overlay.dso={app / 'overlay.c'}"

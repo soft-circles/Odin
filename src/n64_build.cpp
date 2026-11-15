@@ -641,6 +641,38 @@ gb_internal N64Step n64_source_compiler(String const &input) {
 	return path_extension(input, false) == "cpp" ? N64Step_cxx : N64Step_cc;
 }
 
+// The tools that compile a .c, .cpp or .S source: the SDK description's cc or c++ with llvm-objcopy, or clang; RSP
+// microcode needs clang, ld.lld and llvm-objcopy.
+gb_internal bool n64_validate_source_tools(N64BuildRequest const &request, String const &input, char const *what) {
+	bool rsp = n64_foreign_input_is_rsp_source(input);
+	N64Step compiler = n64_source_compiler(input);
+	bool gnu = !rsp && n64_sdk_declares(request.sdk, compiler);
+	if (!rsp && compiler == N64Step_cxx && !gnu) {
+		gb_printf_err("N64 %s %.*s requires the SDK description %.*s to declare a c++ tool\n",
+		              what, LIT(input), LIT(request.sdk.path));
+		return false;
+	}
+	if (gnu && !n64_sdk_tool_is_executable(request.sdk.tools[compiler].value)) {
+		gb_printf_err("N64 %s %.*s requires the executable N64 SDK tool %.*s\n",
+		              what, LIT(input), LIT(n64_sdk_display(request.sdk.tools[compiler])));
+		return false;
+	}
+	char const *source_tools[] = {gnu ? "llvm-objcopy" : "clang"};
+	char const *rsp_tools[] = {"clang", "ld.lld", "llvm-objcopy"};
+	char const **tools = rsp ? rsp_tools : source_tools;
+	isize tool_count = rsp ? gb_count_of(rsp_tools) : gb_count_of(source_tools);
+	for (isize index = 0; index < tool_count; index += 1) {
+		char const *tool = tools[index];
+		if (!n64_sdk_tool_is_executable(n64_llvm_tool(tool))) {
+			gb_printf_err("N64 %s %.*s requires the LLVM fork's executable %s in '%.*s'; "
+			              "set ODIN_N64_LLVM_BIN to the directory that holds it\n",
+			              rsp ? "RSP microcode" : what, LIT(input), tool, LIT(n64_llvm_bindir()));
+			return false;
+		}
+	}
+	return true;
+}
+
 // Pure validation, run before the intermediates directory exists so a
 // rejected request leaves nothing behind in the output directory.
 gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
@@ -670,36 +702,15 @@ gb_internal bool n64_validate_link_inputs(N64BuildRequest const &request) {
 			if (!source) {
 				continue;
 			}
-			bool rsp = n64_foreign_input_is_rsp_source(input);
-			if (!rsp) {
-				N64Step compiler = n64_source_compiler(input);
-				if (compiler == N64Step_cxx && !n64_sdk_declares(request.sdk, N64Step_cxx)) {
-					gb_printf_err("N64 foreign import source %.*s requires the SDK description %.*s to declare a c++ tool\n",
-					              LIT(input), LIT(request.sdk.path));
-					return false;
-				}
-				if (n64_sdk_declares(request.sdk, compiler)) {
-					N64SdkWord const &tool = request.sdk.tools[compiler];
-					if (!n64_sdk_tool_is_executable(tool.value)) {
-						gb_printf_err("N64 foreign import source %.*s requires the executable N64 SDK tool %.*s\n",
-						              LIT(input), LIT(n64_sdk_display(tool)));
-						return false;
-					}
-				}
+			if (!n64_validate_source_tools(request, input, "foreign import source")) {
+				return false;
 			}
-			bool gnu = !rsp && n64_sdk_declares(request.sdk, n64_source_compiler(input));
-			char const *source_tools[] = {gnu ? "llvm-objcopy" : "clang"};
-			char const *rsp_tools[] = {"clang", "ld.lld", "llvm-objcopy"};
-			char const **tools = rsp ? rsp_tools : source_tools;
-			isize tool_count = rsp ? gb_count_of(rsp_tools) : gb_count_of(source_tools);
-			for (isize index = 0; index < tool_count; index += 1) {
-				char const *tool = tools[index];
-				if (!n64_sdk_tool_is_executable(n64_llvm_tool(tool))) {
-					gb_printf_err("N64 %s %.*s requires the LLVM fork's executable %s in '%.*s'; "
-					              "set ODIN_N64_LLVM_BIN to the directory that holds it\n",
-					              rsp ? "RSP microcode" : "foreign import source", LIT(input), tool, LIT(n64_llvm_bindir()));
-					return false;
-				}
+		}
+	}
+	for (N64Dso const &dso : request.settings.dsos) {
+		for (String const &source : dso.sources) {
+			if (!n64_validate_source_tools(request, source, "DSO source")) {
+				return false;
 			}
 		}
 	}
