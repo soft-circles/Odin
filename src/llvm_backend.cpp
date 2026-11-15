@@ -3656,6 +3656,13 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 	TIME_SECTION("LLVM Create Target Machine");
 
+	if (build_context.metrics.os == TargetOs_n64) {
+		// libdragon's GCC reaches globals of 8 bytes or less through $gp (-G 8, -mgpopt), and n64.ld sets _gp in
+		// .sdata, so Odin places and reaches them the same way.
+		char const *llvm_args[] = {"odin", "-mgpopt", "-mips-ssection-threshold=8"};
+		LLVMParseCommandLineOptions(gb_count_of(llvm_args), llvm_args, nullptr);
+	}
+
 	LLVMCodeModel code_mode = LLVMCodeModelDefault;
 	if (is_arch_wasm()) {
 		code_mode = LLVMCodeModelJITDefault;
