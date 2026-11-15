@@ -200,10 +200,14 @@ class N64OptionValidationTests(unittest.TestCase):
 		self.assertNotEqual(result.returncode, 0, result.stdout)
 		self.assertIn(diagnostic, result.stdout)
 
-	def test_title_is_bounded_and_makefile_safe(self):
-		for value in ("", "x" * 21, "unsafe$title", "unsafe#title"):
+	def test_title_is_bounded_and_printable_ascii(self):
+		for value in ("", "x" * 21, "tab\ttitle", "caf\u00e9"):
 			with self.subTest(value=value):
 				self.assert_invalid_option(f"-n64-title:{value}", "n64-title")
+
+	def test_a_title_may_use_any_printable_ascii(self):
+		result = run_build(self.app, "-n64-title:C++ $#\"'!~")
+		self.assertNotIn("n64-title", result.stdout)
 
 	def test_region_is_exactly_one_ascii_letter(self):
 		self.assert_invalid_option("-n64-region:", "n64-region")
@@ -252,6 +256,23 @@ class N64OptionValidationTests(unittest.TestCase):
 		for option, diagnostic in cases:
 			with self.subTest(option=option):
 				self.assert_invalid_option(option, diagnostic)
+
+	def test_dso_values_name_a_relative_dso_and_existing_vr4300_sources(self):
+		(self.app / "module.c").write_text("int module(void) { return 1; }\n", encoding="utf-8")
+		(self.app / "rsp_module.S").write_text("", encoding="utf-8")
+		cases = (
+			("-n64-dso:module.c", "Invalid -n64-dso value"),
+			("-n64-dso:module.so=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:/abs/module.dso=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:../module.dso=module.c", "Invalid -n64-dso value"),
+			("-n64-dso:module.dso=missing.c", "-n64-dso must name an existing file"),
+			("-n64-dso:module.dso=rsp_module.S", "-n64-dso sources must be .c, .cpp or VR4300 .S files"),
+		)
+		for option, diagnostic in cases:
+			with self.subTest(option=option):
+				self.assert_invalid_option(option, diagnostic)
+		result = run_build(self.app, "-n64-dso:module.dso=module.c", "-n64-dso:module.dso=module.c")
+		self.assertIn("-n64-dso names module.dso twice", result.stdout)
 
 	def test_n64_options_are_rejected_for_host_builds(self):
 		description = self.root / "host.sdk"
@@ -452,7 +473,7 @@ def write(path, data):
 def value_after(flag):
 	return arguments[arguments.index(flag) + 1]
 
-if tool in ("ld.lld", "clang"):
+if tool in ("ld.lld", "clang", "mips64-elf-gcc", "mips64-elf-g++"):
 	write(value_after("-o"), b"stub object")
 	for argument in arguments:
 		if argument.startswith("-Map="):
@@ -478,7 +499,7 @@ if behaviour.startswith("exit:"):
 if behaviour.startswith("signal:"):
 	os.kill(os.getpid(), int(behaviour[len("signal:"):]))
 '''
-STUB_LLVM_TOOLS = (*ROM_LLVM_TOOLS, "clang")
+STUB_LLVM_TOOLS = (*ROM_LLVM_TOOLS, "clang", "llvm-objcopy")
 STUB_SDK_TOOLS = (*REQUIRED_SDK_TOOLS, "bin/mkdfs")
 SANITIZED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -790,6 +811,266 @@ class N64StubPackagingTests(unittest.TestCase):
 			with self.subTest(tool=call["tool"]):
 				self.assertFalse("CCC_OVERRIDE_OPTIONS" in call["env"])
 
+
+	def gnu_sdk_description(self, tools: str) -> Path:
+		"""The documented libdragon description with the stub SDK's GCC declared as cc and c++."""
+		guide = (ODIN_ROOT / "N64_BUILD.md").read_text(encoding="utf-8")
+		documented = guide.split("packages a ROM:\n\n```text\n", 1)[1].split("```", 1)[0]
+		for name in ("mips64-elf-gcc", "mips64-elf-g++"):
+			self.make_stub(self.sdk / "bin" / name)
+		return self.write_description(self.root / "gnu.sdk", documented + tools)
+
+	def create_gnu_source_app(self) -> Path:
+		app = self.root / "gnu app"
+		app.mkdir()
+		for name, text in (("helper.c", "int helper(void) { return 1; }\n"), ("util.cpp", "extern \"C\" int util(void) { return 2; }\n"),
+		                   ("vr4300.S", "\t.text\n"), ("rsp_probe.S", "\t.text\n")):
+			(app / name).write_text(text, encoding="utf-8")
+		(app / "main.odin").write_text(
+			"package gnu_app\n\n"
+			"foreign import lib {\"helper.c\", \"util.cpp\", \"vr4300.S\", \"rsp_probe.S\"}\n"
+			"@(default_calling_convention=\"c\")\n"
+			"foreign lib {\n\thelper :: proc() -> i32 ---\n\tutil :: proc() -> i32 ---\n}\n\n"
+			"main :: proc() { helper(); util() }\n",
+			encoding="utf-8",
+		)
+		return app
+
+	def test_cc_and_cxx_tools_compile_vr4300_sources_with_n64_mk_flags(self):
+		description = self.gnu_sdk_description("tool cc {sdk}/bin/mips64-elf-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+		output = app / "gnu.z64"
+		foreign = self.intermediates(output) / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", "-n64-cflags:-DFROM_CFLAGS=1", extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[call["tool"] for call in calls][:9],
+			["mips64-elf-gcc", "llvm-objcopy", "mips64-elf-g++", "llvm-objcopy", "mips64-elf-gcc", "llvm-objcopy",
+			 "clang", "ld.lld", "llvm-objcopy"],
+		)
+		include = self.sdk / "mips64-elf/include"
+		c_and_cxx = [
+			"-march=vr4300", "-mtune=vr4300", "-mabi=o64", f"-I{include}/newlib_overrides", f"-I{include}",
+			"-include", "ktls.h", "-falign-functions=32", "-ffunction-sections", "-fdata-sections", "-g",
+			f"-ffile-prefix-map={app}=", "-ffast-math", "-ftrapping-math", "-fno-associative-math", "-DN64", "-O2",
+			"-Wall", "-Werror", "-Wno-error=deprecated-declarations", "-fdiagnostics-color=always",
+			"-Wno-error=unused-variable", "-Wno-error=unused-but-set-variable", "-Wno-error=unused-function",
+			"-Wno-error=unused-parameter", "-Wno-error=unused-but-set-parameter", "-Wno-error=unused-label",
+			"-Wno-error=unused-local-typedefs", "-Wno-error=unused-const-variable", "-ftrivial-auto-var-init=pattern",
+			"-DLIBDRAGON_PREVIEW=2",
+		]
+		c, c_copy, cxx, cxx_copy, asm, asm_copy, rsp = calls[:7]
+		self.assertEqual(c["program"], str(self.sdk / "bin/mips64-elf-gcc"))
+		self.assertEqual(c["argv"], ["-c", *c_and_cxx, "-std=gnu17", "-DFROM_CFLAGS=1", "-o", str(foreign / "0-helper.o"), "helper.c"])
+		self.assertEqual(c["cwd"], str(app))
+		self.assertEqual(cxx["program"], str(self.sdk / "bin/mips64-elf-g++"))
+		self.assertEqual(cxx["argv"], ["-c", *c_and_cxx, "-std=gnu++17", "-DFROM_CFLAGS=1", "-o", str(foreign / "1-util.o"), "util.cpp"])
+		self.assertEqual(
+			asm["argv"],
+			["-c", "-mtune=vr4300", "-march=vr4300", "-mabi=o64", "-Wa,--fatal-warnings", f"-I{include}",
+			 "-DLIBDRAGON_PREVIEW=2", "-DFROM_CFLAGS=1", "-o", str(foreign / "2-vr4300.o"), "vr4300.S"],
+		)
+		for copy, name in ((c_copy, "0-helper.o"), (cxx_copy, "1-util.o"), (asm_copy, "2-vr4300.o")):
+			self.assertEqual(copy["program"], str(self.llvm / "llvm-objcopy"))
+			self.assertEqual(copy["argv"], [str(foreign / name)])
+		self.assertEqual(rsp["program"], str(self.llvm / "clang"))
+		self.assertIn("-march=mips1", rsp["argv"])
+		link = next(call for call in calls if call["tool"] == "ld.lld" and "-EB" in call["argv"])
+		for name in ("0-helper.o", "1-util.o", "2-vr4300.o", "3-rsp_probe.o"):
+			self.assertIn(str(foreign / name), link["argv"])
+		for call in calls:
+			with self.subTest(tool=call["tool"]):
+				self.assert_sanitized_environment(call)
+
+	def test_without_a_cc_tool_c_and_assembly_sources_keep_clang(self):
+		description = self.gnu_sdk_description("tool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "mixed.z64", f"-n64-sdk:{description}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		compiles = [call for call in self.calls() if call["argv"][-1] in ("helper.c", "util.cpp", "vr4300.S")]
+		self.assertEqual([(call["tool"], call["argv"][-1]) for call in compiles],
+		                 [("clang", "helper.c"), ("mips64-elf-g++", "util.cpp"), ("clang", "vr4300.S")])
+		self.assertEqual(compiles[0]["argv"][1:1 + len(CLANG_TARGET_FLAGS)], list(CLANG_TARGET_FLAGS))
+		self.assertNotIn("-ftrapping-math", compiles[0]["argv"])
+
+	def test_a_cpp_source_needs_a_cxx_tool(self):
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "no-cxx.z64")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 foreign import source {app / 'util.cpp'} requires the SDK description libdragon (built in) "
+		              "to declare a c++ tool", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def test_a_declared_cc_tool_must_be_executable(self):
+		description = self.gnu_sdk_description("tool cc {sdk}/bin/no-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app = self.create_gnu_source_app()
+
+		result = self.build(app, app / "no-cc.z64", f"-n64-sdk:{description}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 foreign import source {app / 'helper.c'} requires the executable N64 SDK tool bin/no-gcc", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def dso_sdk_description(self, extra: str = "") -> Path:
+		guide = (ODIN_ROOT / "N64_BUILD.md").read_text(encoding="utf-8")
+		documented = guide.split("packages a ROM:\n\n```text\n", 1)[1].split("```", 1)[0]
+		for name in ("n64dso", "n64dso-extern", "n64dso-msym"):
+			self.make_stub(self.sdk / "bin" / name)
+		(self.sdk / "mips64-elf/lib/dso.ld").touch()
+		return self.write_description(self.root / "dso.sdk", documented + (
+			"dso-linker-script {sdk}/mips64-elf/lib/dso.ld\n"
+			"tool n64dso {sdk}/bin/n64dso\n"
+			"tool n64dso-extern {sdk}/bin/n64dso-extern\n"
+			"tool n64dso-msym {sdk}/bin/n64dso-msym\n"
+		) + extra)
+
+	def create_dso_app(self) -> tuple[Path, Path]:
+		app = create_app(self.root, "dso app")
+		(app / "overlay.c").write_text("int overlay(void) { return 1; }\n", encoding="utf-8")
+		(app / "overlay_asm.S").write_text("\t.text\n", encoding="utf-8")
+		assets = app / "filesystem"
+		assets.mkdir()
+		return app, assets
+
+	def test_dso_modules_build_into_the_assets_and_link_with_externs_and_msym(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "dso.z64"
+		build = self.intermediates(output)
+		foreign = build / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:levels/overlay.dso={app / 'overlay.c'},{app / 'overlay_asm.S'}",
+		                    "-n64-cflags:-DFROM_CFLAGS=1", extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual(
+			[call["tool"] for call in calls],
+			["clang", "clang", "ld.lld", "n64dso", "n64sym", "n64dso-extern", "ld.lld", "n64sym", "n64dso-msym",
+			 "llvm-strip", "n64elfcompress", "mkdfs", "n64tool", "ed64romconfig"],
+		)
+		c, asm, dso_link, n64dso, dso_sym, extern, link, sym, msym, *_ = calls
+		self.assertEqual(c["argv"][-8:], ["-std=gnu17", "-G", "0", "-DN64_DSO", "-DFROM_CFLAGS=1", "-o", str(foreign / "dso0-0-overlay.o"), "overlay.c"])
+		self.assertNotIn("-DN64_DSO", asm["argv"])
+		self.assertEqual(asm["argv"][-3:], ["-o", str(foreign / "dso0-1-overlay_asm.o"), "overlay_asm.S"])
+		elf = build / "dso/0/overlay.elf"
+		self.assertEqual(
+			dso_link["argv"],
+			["-EB", "--emit-relocs", "--unresolved-symbols=ignore-all", "--omagic",
+			 f"-T{self.sdk / 'mips64-elf/lib/dso.ld'}", f"-Map={build / 'dso/0/overlay.map'}", "-o", str(elf),
+			 str(foreign / "dso0-0-overlay.o"), str(foreign / "dso0-1-overlay_asm.o")],
+		)
+		self.assertEqual(n64dso["argv"], ["-o", str(assets / "levels"), "-c", "1", str(elf)])
+		self.assertEqual(dso_sym["argv"], ["--all", str(elf), str(assets / "levels/overlay.dso.sym")])
+		self.assertEqual(dso_sym["env"].get("N64_INST"), "n64sym")
+		externs = build / "odin-n64.externs"
+		self.assertEqual(extern["argv"], ["-o", str(externs), str(assets / "levels/overlay.dso")])
+		self.assertIn(f"-T{externs}", link["argv"])
+		self.assertEqual(link["argv"].index(f"-T{externs}") + 1, link["argv"].index(f"-Map={build / 'odin-n64.map'}"))
+		msym_path = build / "odin-n64.msym"
+		self.assertEqual(msym["argv"], ["-e", str(externs), str(build / "odin-n64.elf"), str(msym_path)])
+		self.assertEqual(msym["env"].get("N64_INST"), str(self.sdk))
+		n64tool = calls[12]
+		self.assertEqual(n64tool["argv"][-4:-2], [str(build / "odin-n64.dfs"), str(msym_path)])
+		self.assertTrue((assets / "levels").is_dir())
+		for call in calls:
+			if call["tool"] != "n64dso-msym":
+				with self.subTest(tool=call["tool"]):
+					self.assert_sanitized_environment(call)
+
+	def test_dso_build_intermediates_are_removed_without_keep_temp_files(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "clean.z64"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={app / 'overlay.c'}")
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertFalse(self.intermediates(output).exists())
+
+	def test_cc_and_cxx_tools_compile_dso_sources_as_n64_mk_does(self):
+		for name in ("mips64-elf-gcc", "mips64-elf-g++"):
+			self.make_stub(self.sdk / "bin" / name)
+		description = self.dso_sdk_description("tool cc {sdk}/bin/mips64-elf-gcc\ntool c++ {sdk}/bin/mips64-elf-g++\n")
+		app, assets = self.create_dso_app()
+		(app / "overlay_cxx.cpp").write_text("extern \"C\" int overlay_cxx(void) { return 2; }\n", encoding="utf-8")
+		output = app / "gnu-dso.z64"
+		foreign = self.intermediates(output) / "foreign"
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={app / 'overlay.c'},{app / 'overlay_cxx.cpp'},{app / 'overlay_asm.S'}",
+		                    extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		self.assertEqual([call["tool"] for call in calls][:7],
+		                 ["mips64-elf-gcc", "llvm-objcopy", "mips64-elf-g++", "llvm-objcopy", "mips64-elf-gcc", "llvm-objcopy",
+		                  "ld.lld"])
+		c, c_copy, cxx, cxx_copy, asm, asm_copy, _ = calls[:7]
+		self.assertEqual(c["argv"][-7:], ["-std=gnu17", "-G", "0", "-DN64_DSO", "-o", str(foreign / "dso0-0-overlay.o"), "overlay.c"])
+		self.assertEqual(cxx["argv"][-7:],
+		                 ["-std=gnu++17", "-G", "0", "-DN64_DSO", "-o", str(foreign / "dso0-1-overlay_cxx.o"), "overlay_cxx.cpp"])
+		self.assertNotIn("-DN64_DSO", asm["argv"])
+		self.assertEqual(asm["argv"][-3:], ["-o", str(foreign / "dso0-2-overlay_asm.o"), "overlay_asm.S"])
+		for copy, name in ((c_copy, "dso0-0-overlay.o"), (cxx_copy, "dso0-1-overlay_cxx.o"), (asm_copy, "dso0-2-overlay_asm.o")):
+			self.assertEqual(copy["argv"], [str(foreign / name)])
+
+	def test_a_cpp_dso_source_needs_a_cxx_tool(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		source = app / "overlay_cxx.cpp"
+		source.write_text("extern \"C\" int overlay_cxx(void) { return 2; }\n", encoding="utf-8")
+
+		result = self.build(app, app / "no-cxx.z64", f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:overlay.dso={source}")
+
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn(f"N64 DSO source {source} requires the SDK description {description} to declare a c++ tool", result.stdout)
+		self.assertEqual(self.calls(), [])
+
+	def test_each_dso_module_links_apart_and_all_feed_the_externs(self):
+		description = self.dso_sdk_description()
+		app, assets = self.create_dso_app()
+		output = app / "two.z64"
+		build = self.intermediates(output)
+
+		result = self.build(app, output, f"-n64-sdk:{description}", f"-n64-assets:{assets}",
+		                    f"-n64-dso:a/overlay.dso={app / 'overlay.c'}", f"-n64-dso:b/overlay.dso={app / 'overlay_asm.S'}",
+		                    extra_env=self.inherited)
+
+		self.assertEqual(result.returncode, 0, result.stdout)
+		calls = self.calls()
+		links = [call for call in calls if call["tool"] == "ld.lld" and "--emit-relocs" in call["argv"]]
+		self.assertEqual([call["argv"][call["argv"].index("-o") + 1] for call in links],
+		                 [str(build / "dso/0/overlay.elf"), str(build / "dso/1/overlay.elf")])
+		self.assertEqual([call["argv"][-1] for call in calls if call["tool"] == "n64dso"],
+		                 [str(build / "dso/0/overlay.elf"), str(build / "dso/1/overlay.elf")])
+		extern = next(call for call in calls if call["tool"] == "n64dso-extern")
+		self.assertEqual(extern["argv"], ["-o", str(build / "odin-n64.externs"), str(assets / "a/overlay.dso"), str(assets / "b/overlay.dso")])
+
+	def test_n64_dso_needs_assets_a_dso_linker_script_and_the_dso_tools(self):
+		app, assets = self.create_dso_app()
+		dso = f"-n64-dso:overlay.dso={app / 'overlay.c'}"
+		description = self.dso_sdk_description()
+		result = self.build(app, app / "no-assets.z64", f"-n64-sdk:{description}", dso)
+		self.assertIn("-n64-dso requires -n64-assets", result.stdout)
+		result = self.build(app, app / "built-in.z64", f"-n64-assets:{assets}", dso)
+		self.assertIn("-n64-dso requires the SDK description to declare an existing dso-linker-script: libdragon (built in)",
+		              result.stdout)
+		(self.sdk / "bin/n64dso-msym").chmod(0o644)
+		result = self.build(app, app / "no-msym.z64", f"-n64-sdk:{description}", f"-n64-assets:{assets}", dso)
+		self.assertIn(f"-n64-dso requires the SDK description to declare an executable n64dso-msym tool: {description}",
+		              result.stdout)
+		self.assertEqual(self.calls(), [])
 
 	def write_description(self, path: Path, text: str) -> Path:
 		path.parent.mkdir(parents=True, exist_ok=True)

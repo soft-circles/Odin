@@ -187,8 +187,9 @@ as it does `-T<name>`: in the working directory first, then in the
 | `system-libraries` | words | After `-extra-linker-flags` and the foreign imports' flags |
 | `finish` | paths | Link inputs last |
 | `sdk-library` | names | `foreign import "system:<name>"` libraries the link already names |
-| `tool` | step, path | The tool of a packaging step |
+| `tool` | step, path | The tool of a packaging step, or `cc` and `c++`, which compile foreign sources |
 | `rom-files` | directory, suffix | Files with the suffix in the directory, appended to `n64tool`'s inputs |
+| `dso-linker-script` | one path | The linker script of `-n64-dso` modules, such as libdragon's `dso.ld` |
 
 ld.lld links `-EB -o <elf>`, then `startup`, `library-dir`, the objects,
 `libraries`, `linker-script`, `link-flags`, the map, `-extra-linker-flags`,
@@ -259,7 +260,7 @@ they apply only to executable ROM output.
 | Option | Accepted value | Default when omitted |
 | --- | --- | --- |
 | `-n64-inst:<directory>` | Existing installed SDK root | `N64_INST`, then `<odin root>/n64` if that directory exists |
-| `-n64-title:<title>` | 1–20 ASCII letters, digits, spaces, `-`, `_`, `.`, or `!` | Main package directory name, sanitized and truncated to 20 characters; `Odin N64` if empty |
+| `-n64-title:<title>` | 1–20 printable ASCII characters | Main package directory name, sanitized and truncated to 20 characters; `Odin N64` if empty |
 | `-n64-region:<letter>` | One ASCII letter, case-insensitive | No fixed region code; libdragon's region-free header remains enabled |
 | `-n64-save-type:<type>` | One save type listed below | No declared save hardware (`none`) |
 | `-n64-rtc` | Flag with no value | RTC declaration disabled |
@@ -267,7 +268,8 @@ they apply only to executable ROM output.
 | `-n64-assets:<directory>` | Existing directory | No DragonFS image is added |
 | `-n64-metadata:<file>` | Existing INI file | No extended metadata is added |
 | `-n64-pack:<executable>` | Existing executable, run as `<executable> --n64-tool <tool> <arguments>` in place of the SDK's `mkdfs`, `n64tool`, `ed64romconfig` and `n64elfcompress` | The SDK's own tools run, and it must provide them |
-| `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c` and `.S` sources get only the SDK's flags |
+| `-n64-cflags:<flags>` | Compiler flags, split on whitespace | Foreign `.c`, `.cpp` and `.S` sources get only the SDK's flags |
+| `-n64-dso:<name>=<sources>` | A `.dso` path under `-n64-assets`, then comma-separated `.c`, `.cpp` or VR4300 `.S` sources; repeatable | No DSO modules are built |
 | `-out:<path>` | Output file path, with optional `.z64` suffix | Package-directory name plus `.z64` |
 
 Valid save types are `none`, `eeprom4k`, `eeprom16k`, `sram256k`,
@@ -309,7 +311,7 @@ therefore do not accept ROM configuration options.
 
 ## Foreign C and assembly sources
 
-A foreign import on `-target:n64` may name `.c` and `.S` sources as well as
+A foreign import on `-target:n64` may name `.c`, `.cpp` and `.S` sources as well as
 objects. Paths resolve against the importing file, as object paths do:
 
 ```odin
@@ -328,6 +330,16 @@ LLVM the compiler was built against, or from the directory
 `ODIN_N64_LLVM_BIN` names. Any other `.S` file is VR4300 assembly
 and gets `clang` with `N64_ASFLAGS`. Each compile runs in the source's directory, so
 `#include "..."` and `__FILE__` see the paths `n64.mk` would give them.
+
+An SDK description can compile sources with the SDK's own compilers instead:
+`tool cc <path>` compiles `.c` and VR4300 `.S` sources, and `tool c++ <path>`
+compiles `.cpp` sources, for example with `{sdk}/bin/mips64-elf-gcc` and
+`{sdk}/bin/mips64-elf-g++`. They get `n64.mk`'s `N64_CFLAGS`, `N64_CXXFLAGS` and
+`N64_ASFLAGS` exactly, `-march=vr4300` and `-ftrapping-math` included, then
+`-n64-cflags`. `llvm-objcopy` then rewrites each object, because ld.lld rejects
+the symbol table GNU as writes. RSP microcode still builds with the LLVM fork's
+tools. A `.cpp` source needs a description that declares `tool c++`; without
+`tool cc`, `.c` and `.S` sources get `clang` as above.
 
 `-n64-cflags` appends flags to every source of the build, for example
 warnings, include directories or defines:
@@ -384,6 +396,29 @@ converts the complete directory into one DragonFS image and embeds it in the
 ROM. Runtime filesystem access is a project concern; the
 [Odin64 DragonFS example](https://github.com/soft-circles/Odin64/tree/main/examples/dragonfs)
 shows checked mount/open/read/close behavior.
+
+### DSO modules
+
+`-n64-dso:<name>=<source>[,<source>...]` builds a libdragon DSO module, as
+`n64.mk`'s `%.dso`, `%.externs` and `%.msym` rules do, into the `-n64-assets`
+directory before `mkdfs` packs it:
+
+```sh
+odin build . -target:n64 -n64-assets:filesystem \
+  -n64-dso:overlay1.dso=overlay1.c -n64-dso:overlay2.dso=overlay2.c
+```
+
+Each module's sources compile like foreign sources, `.c` and `.cpp` with
+`-G 0 -DN64_DSO` added. ld.lld links them with `n64.mk`'s `N64_DSOLDFLAGS` and
+the description's `dso-linker-script`, taking `--omagic` for GNU ld's
+`--nmagic` so the module has the single load segment `n64dso` needs. `n64dso`
+writes `<name>` and `n64sym` writes `<name>.sym` beside it. `n64dso-extern`
+then lists the symbols the modules import, the ROM links with that list as a
+linker script, and `n64dso-msym` writes the ROM's symbol table for them, which
+`n64tool` packs after the DragonFS image. `n64dso-msym` runs the SDK's
+`bin/mips64-elf-readelf`, so it gets the SDK root as `N64_INST`. The option
+needs `-n64-assets`, a `dso-linker-script` and the `n64dso`, `n64dso-extern`,
+`n64dso-msym` and `n64sym` tools.
 
 ## Add extended metadata
 
