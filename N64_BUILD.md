@@ -322,8 +322,8 @@ The build compiles each source with the flags of libdragon's `n64.mk` rules,
 then links the object in the source's place. A `.c` file gets the LLVM fork's
 `clang` and `N64_CFLAGS`, targeting `mips3` with the `o64` ABI and GCC's `stdint.h`
 types, so `int32_t` stays `long`, and at GCC's `-G 8`, so C and Odin agree on
-which globals are reached through `$gp` (see [Runtime contract](#runtime-contract)). A `.S` file whose name starts with `rsp` is
-RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
+which globals are reached through `$gp` (see [Runtime contract](#runtime-contract)).
+A `.S` file whose name starts with `rsp` is RSP microcode: the LLVM fork's `clang` assembles it, `ld.lld` links it with
 `misc/n64/rsp.lld.ld`, a copy of libdragon's `rsp.ld`, and `llvm-objcopy` turns its `.text`, `.data` and
 `.meta` sections into `<name>_text_start` and the other symbols that
 `DEFINE_RSP_UCODE(<name>)` expects. These tools come from the bindir of the

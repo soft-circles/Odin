@@ -935,9 +935,10 @@ gb_internal bool n64_init_intermediates(N64Intermediates *out, String const &out
 }
 
 // clang's flags for the VR4300 with GCC's o64 types. clang has no vr4300 CPU, so it targets mips3 as the RSP steps do,
-// and like GCC it reaches data of 8 bytes or less through $gp, as Odin code does. GCC's stdint.h types follow its __*_TYPE__ macros: int32_t is long
-// and the fast 8- and 16-bit types are int there, so foreign C keeps the layout and format specifiers GCC code uses.
-// Their limit, width and _C macros follow, so INT32_MAX and INT32_C(1) are long as PRId32 expects.
+// and like GCC and Odin code it reaches data of 8 bytes or less through $gp. GCC's stdint.h types follow its __*_TYPE__
+// macros: int32_t is long and the fast 8- and 16-bit types are int there, so foreign C keeps the layout and format
+// specifiers GCC code uses. Their limit, width and _C macros follow, so INT32_MAX and INT32_C(1) are long as PRId32
+// expects.
 gb_internal void n64_add_clang_target_flags(N64Argv *argv) {
 	char const *flags[] = {
 		"--target=mips64-elf", "-march=mips3", "-mabi=o64", "-mno-abicalls", "-fno-pic",
