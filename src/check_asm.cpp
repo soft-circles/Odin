@@ -3843,8 +3843,10 @@ gb_internal DECL_ATTRIBUTE_PROC(asm_template_decl_attribute) {
 	if (name == "rsp_origin") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind == ExactValue_Integer) {
-			i64 origin = exact_value_to_i64(ev);
-			if (origin < 0 || origin > 0xFFFFFFFC || (origin & 3) != 0) {
+			bool in_range = compare_exact_values(Token_GtEq, ev, exact_value_i64(0)) &&
+			                compare_exact_values(Token_LtEq, ev, exact_value_i64(0xFFFFFFFC));
+			i64 origin = in_range ? exact_value_to_i64(ev) : 0;
+			if (!in_range || (origin & 3) != 0) {
 				error(value, "'rsp_origin' is a 32-bit address of a word, a multiple of 4");
 			} else {
 				ac->rsp_origin_elem = elem;

@@ -415,6 +415,17 @@ whole_forms :: asm() -> ! {
 WHOLE :: intrinsics.rsp_template_code(whole_forms)
 WHOLE_TAIL :: intrinsics.rsp_template_label_offset(whole_forms, "tail")
 WHOLE_HALT :: intrinsics.rsp_template_label_offset(whole_forms, "halt")
+WHOLE_DOT_TAIL :: intrinsics.rsp_template_label_offset(whole_forms, ".tail")
+
+@(rsp, rsp_origin = WHOLE_ORIGIN)
+whole_pinned :: asm(p: ^u32) -> ! [p = %sp] {
+.top:
+	lw    %t0, [p + 0]
+	j     .top
+	nop
+}
+
+WHOLE_PINS :: intrinsics.rsp_template_pins(whole_pinned)
 FILL_ADDRESS :: intrinsics.rsp_template_address(valid.fill)
 SCALAR_ADDRESS :: intrinsics.rsp_template_address(scalar_forms)
 FILL_PINS :: intrinsics.rsp_template_pins(valid.fill)
@@ -929,7 +940,7 @@ main :: proc() {
 		failures += 1
 	}
 	// rexcode's j and jal take a label at its offset from 0; whole Microcode's encode its
-	// address from WHOLE_ORIGIN, of which a jump keeps the low 28 bits and ori the low 16
+	// address from WHOLE_ORIGIN, of which a jump keeps the low 28 bits and addiu the low 16
 	cp0 :: proc(n: u16) -> rsp.Register { return rsp.Register(rsp.REG_CP0 | n) }
 	whole := [?]rsp.Instruction{
 		rsp.inst_mfc0(rsp.T0, cp0(4)),
@@ -948,8 +959,13 @@ main :: proc() {
 	}
 	origin_bits := u32(WHOLE_ORIGIN & 0x0FFFFFFF) >> 2
 	compare("whole_forms", WHOLE, whole[:], {0, 11}, {2 = origin_bits, 11 = origin_bits})
-	if WHOLE_TAIL != 44 || WHOLE_HALT != 36 {
-		fmt.printfln("whole_forms: labels tail at %d and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_HALT)
+	if WHOLE_TAIL != 44 || WHOLE_HALT != 36 || WHOLE_DOT_TAIL != 44 {
+		fmt.printfln("whole_forms: labels tail at %d (.tail at %d) and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_DOT_TAIL, WHOLE_HALT)
+		failures += 1
+	}
+	whole_pins := WHOLE_PINS
+	if len(whole_pins) != 1 || whole_pins[0] != {29, false} {
+		fmt.printfln("whole_pinned: pins %v, want sp", whole_pins)
 		failures += 1
 	}
 

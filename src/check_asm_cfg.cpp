@@ -317,6 +317,7 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 	AsmInstructionFacts *slot_owner_facts = nullptr;
 	i32                  slot_owner_index = -1;
 	Ast *                slot_gap         = nullptr; // a label or directive between the branch and its slot
+	AstAsmInstruction   *labelled_slot_owner = nullptr; // whole Microcode: the branch whose slot a label marks
 
 	// Build basic blocks over the template body. A leader is: the first instruction, any
 	// instruction preceded by a label, and any instruction following a control transfer.
@@ -330,6 +331,7 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 			if (slot_gap->kind == Ast_AsmLabelDecl && entity->AsmTemplate.is_whole_microcode) {
 				// Whole RSP Microcode may enter a slot at its label, as rspq's `j rspq_overlay_check`
 				// shares its slot with rspq_switch_highpri; the slot opens the label's block.
+				labelled_slot_owner = slot_owner;
 			} else if (slot_gap->kind == Ast_AsmLabelDecl) {
 				error(slot_gap, "A label cannot mark the delay slot of '%.*s' in a #noreorder template; "
 				                "put the slot instruction right after the branch and the label after it",
@@ -382,16 +384,23 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 		cfg->blocks[bi].last = ii;
 		cfg->blocks[bi].term = is_slot ? slot_owner_index : ii;
 
-		if (is_slot) {
-			String owner_name = slot_owner->name->Ident.token.string;
+		AstAsmInstruction *checked_slot_owner = is_slot ? slot_owner : labelled_slot_owner;
+		labelled_slot_owner = nullptr;
+		if (checked_slot_owner != nullptr) {
+			String owner_name = checked_slot_owner->name->Ident.token.string;
 			if (facts != nullptr && facts->is_control) {
 				error(instr->name, "'%.*s' cannot sit in the delay slot of '%.*s': a branch or jump in a delay slot is "
 				                   "UNPREDICTABLE on the VR4300",
 				      LIT(instr->name->Ident.token.string), LIT(owner_name));
 			} else if (facts != nullptr && facts->slot_reject_reason != nullptr) {
-				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in a #noreorder template: %s",
-				      LIT(instr->name->Ident.token.string), LIT(owner_name), facts->slot_reject_reason);
+				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in %s: %s",
+				      LIT(instr->name->Ident.token.string), LIT(owner_name),
+				      entity->AsmTemplate.is_whole_microcode ? "whole Microcode" : "a #noreorder template",
+				      facts->slot_reject_reason);
 			}
+		}
+
+		if (is_slot) {
 			slot_owner = nullptr;
 			slot_owner_facts = nullptr;
 			need_leader = true;

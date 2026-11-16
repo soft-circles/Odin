@@ -1416,6 +1416,9 @@ gb_internal void rsp_check_routine_calls(Entity *e) {
 		Entity *routine = rsp_template_routine_named(e, instr->operands[0]);
 		if (routine == e) {
 			error(instr->operands[0], "'%.*s' calls itself; an @(rsp) template cannot", LIT(e->token.string));
+		} else if (routine != nullptr && routine->AsmTemplate.is_whole_microcode) {
+			error(instr->operands[0], "'%.*s' is whole Microcode, @(rsp, rsp_origin = A), which no template calls",
+			      LIT(routine->token.string));
 		} else if (routine == nullptr) {
 			// at the mnemonic: a constant operand in parentheses has its own warning
 			gbString s = expr_to_string(instr->operands[0]);
@@ -1489,6 +1492,9 @@ gb_internal bool check_rsp_template_label_offset(CheckerContext *c, Operand *ope
 		return true; // its check reported why
 	}
 	String label = name.value.value_string;
+	if (label.len > 0 && label[0] == '.') {
+		label = substring(label, 1, label.len);
+	}
 	i32 *index = string_map_get(&st->label_words, label);
 	if (index == nullptr) {
 		error(ce->args[1], "'%.*s' has no label '.%.*s'", LIT(e->token.string), LIT(label));
@@ -1505,6 +1511,11 @@ gb_internal bool check_rsp_template_address(CheckerContext *c, Operand *operand,
 	operand->value = exact_value_i64(0);
 	Entity *e = rsp_template_argument(c, call, builtin_name);
 	if (e == nullptr) {
+		return true;
+	}
+	if (e->AsmTemplate.is_whole_microcode) {
+		error(call, "'%.*s' is whole Microcode, @(rsp, rsp_origin = A), placed at its rsp_origin, not a routine",
+		      LIT(e->token.string));
 		return true;
 	}
 	operand->value = exact_value_i64(rsp_routine_address(e));
@@ -1533,6 +1544,9 @@ gb_internal bool check_rsp_template_pins(CheckerContext *c, Operand *operand, As
 	if (rsp_template_checked(c, e, call) == nullptr) {
 		return true;
 	}
+	bool whole_before = g_asm_rsp.whole_microcode;
+	g_asm_rsp.whole_microcode = e->AsmTemplate.is_whole_microcode;
+	defer (g_asm_rsp.whole_microcode = whole_before);
 	auto const &decls = e->AsmTemplate.decls;
 	isize count = 0;
 	for (auto const &ed : decls) {

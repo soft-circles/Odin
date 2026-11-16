@@ -559,3 +559,28 @@ whole_ok :: asm() -> ! {
 
 WHOLE_MISSING :: intrinsics.rsp_template_label_offset(whole_ok, "missing") // ERROR: 'whole_ok' has no label '.missing'
 PLACED_OFFSET :: intrinsics.rsp_template_label_offset(placed, "here") // ERROR: 'rsp_template_label_offset' takes whole Microcode
+
+@(rsp, rsp_origin = 0x1_0000_0000_0000_1000) // ERROR: 'rsp_origin' is a 32-bit address of a word, a multiple of 4
+wide_origin :: asm() {
+}
+
+@(rsp, rsp_origin = -4) // ERROR: 'rsp_origin' is a 32-bit address of a word, a multiple of 4
+negative_origin :: asm() {
+}
+
+@(rsp, rsp_origin = 0xA4001000)
+labelled_slot :: asm() -> ! {
+.top:
+	j     .top
+.slot:
+	j     .top // ERROR: 'j' cannot sit in the delay slot of 'j'
+	nop
+}
+
+@(rsp)
+calls_whole :: asm() {
+	jal   (whole_ok) // ERROR: 'whole_ok' is whole Microcode, @(rsp, rsp_origin = A), which no template calls
+	nop
+}
+
+WHOLE_ADDRESS :: intrinsics.rsp_template_address(whole_ok) // ERROR: 'whole_ok' is whole Microcode, @(rsp, rsp_origin = A), placed at its rsp_origin
