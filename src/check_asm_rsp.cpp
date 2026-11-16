@@ -23,6 +23,7 @@
 
 gb_internal void check_queued_asm_template_body(Checker *c, Entity *e, UntypedExprInfoMap *untyped);
 gb_internal void rsp_check_routine_calls(Entity *e);
+gb_internal void rsp_check_whole_microcode_forms(Entity *e);
 
 // Its constant, like #load's, is global data, not a temporary of the stack frame.
 gb_internal bool is_rsp_template_code_call(Ast *call) {
@@ -46,6 +47,7 @@ struct RspTemplateState {
 	bool               in_progress; // its body check is running, further up this thread's stack
 	bool               encoded;     // its check reported nothing, and `lines` holds its words
 	Array<RspCodeLine> lines;
+	StringMap<i32>     label_words; // whole Microcode: each label's instruction index, for rsp_template_label_offset
 };
 
 // Serialises @(rsp) templates' body checks between their queued checks and the
@@ -352,7 +354,7 @@ gb_internal bool rsp_template_constant(Ast *expr, i64 *value_) {
 
 // Encodes the checked body of `e`. Returns false when it has errors, which the check
 // has reported, or reports what the encoder itself rejects.
-gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
+gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out, StringMap<i32> *label_words) {
 	Ast *node = e->AsmTemplate.node;
 	GB_ASSERT(node != nullptr && node->kind == Ast_AsmTemplate);
 	ast_node(at, AsmTemplate, node);
@@ -370,6 +372,9 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 			break;
 		case Ast_AsmLabelDecl:
 			map_set(&label_index, instruction, count);
+			if (label_words != nullptr) {
+				string_map_set(label_words, instruction->AsmLabelDecl.name->Ident.token.string, count);
+			}
 			break;
 		case Ast_AsmDirective:
 			error(instruction, "Asm directives are not supported in an @(rsp) template");
@@ -450,6 +455,8 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 			case Asm_rsp::OP_UIMM16:
 			case Asm_rsp::OP_SHAMT:
 			case Asm_rsp::OP_CALL26:
+			case Asm_rsp::OP_CP0:
+			case Asm_rsp::OP_CODE10:
 				if (!rsp_template_constant(expr, &value)) {
 					error(expr, "Expected a constant immediate in an @(rsp) template");
 					return false;
@@ -496,6 +503,24 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out) {
 					      LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]), cast(long long)value);
 					return false;
 				}
+				break;
+			}
+			case Asm_rsp::OP_LABEL26:
+			case Asm_rsp::OP_LABEL_LO16: {
+				// whole Microcode only (rsp_check_whole_microcode_forms): the label's address
+				Ast *l = unparen_expr(expr);
+				Entity *le = nullptr;
+				if (l != nullptr && l->kind == Ast_AsmLabelDecl) {
+					le = entity_of_node(l->AsmLabelDecl.name);
+				}
+				i32 *target = (le != nullptr && le->kind == Entity_Label) ? map_get(&label_index, le->Label.node) : nullptr;
+				if (target == nullptr || !e->AsmTemplate.is_whole_microcode) {
+					error(expr, "Expected a label of this template");
+					return false;
+				}
+				i64 address = e->AsmTemplate.rsp_origin + 4*cast(i64)*target;
+				// as GNU as encodes them: a jump keeps the low 28 bits, %lo() the low 16
+				value = type == Asm_rsp::OP_LABEL26 ? (address & 0x0FFFFFFF) : (address & 0xFFFF);
 				break;
 			}
 			default:
@@ -1137,6 +1162,10 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 		return; // re-entered through a builtin in its own body, which reports it
 	}
 	st->in_progress = true;
+	// The table's whole-Microcode forms and registers, for the check and the encoder
+	bool whole_before = g_asm_rsp.whole_microcode;
+	g_asm_rsp.whole_microcode = e->AsmTemplate.is_whole_microcode;
+	defer (g_asm_rsp.whole_microcode = whole_before);
 
 	// The check is the template's, not the expression that asked for its words: a
 	// builtin checked in a muted trial (a procedure group's candidates) must not mute it,
@@ -1150,6 +1179,7 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 		rsp_expand_pinned_registers(e);
 		check_asm_template_body(&g_asm_rsp, ctx, e, d);
 		rsp_check_routine_calls(e);
+		rsp_check_whole_microcode_forms(e);
 		rsp_check_parameter_types(e);
 		rsp_check_template_layout_measures(e);
 	}
@@ -1157,7 +1187,8 @@ gb_internal void check_rsp_template_body(CheckerContext *ctx, Entity *e, DeclInf
 	// operands took words from), so the encoder never repeats one of the check's errors.
 	if (thread_error_count() == errors_before) {
 		array_init(&st->lines, heap_allocator());
-		if (rsp_template_encode(e, &st->lines)) {
+		string_map_init(&st->label_words);
+		if (rsp_template_encode(e, &st->lines, &st->label_words)) {
 			st->encoded = true;
 		} else if (thread_error_count() == errors_before) {
 			error(e->token, "'%.*s' could not be encoded for the RSP", LIT(e->token.string));
@@ -1367,9 +1398,27 @@ gb_internal void rsp_check_routine_calls(Entity *e) {
 		    instr->mnemonic == 0 || instr->valid_form_index < 0 || instr->operands.count != 1) {
 			continue;
 		}
+		Ast *target = unparen_expr(instr->operands[0]);
+		bool is_label = target != nullptr && target->kind == Ast_AsmLabelDecl;
+		if (e->AsmTemplate.is_whole_microcode) {
+			if (!is_label) {
+				gbString s = expr_to_string(instr->operands[0]);
+				error(instr->name, "'jal' in whole Microcode calls a label of the template, as 'jal .label'; '%s' is not one", s);
+				gb_string_free(s);
+			}
+			continue;
+		}
+		if (is_label) {
+			error(instr->operands[0], "'jal' calls a label only in whole Microcode, @(rsp, rsp_origin = A); "
+			      "a template calls another @(rsp) template by name, as 'jal (pkg.routine)'");
+			continue;
+		}
 		Entity *routine = rsp_template_routine_named(e, instr->operands[0]);
 		if (routine == e) {
 			error(instr->operands[0], "'%.*s' calls itself; an @(rsp) template cannot", LIT(e->token.string));
+		} else if (routine != nullptr && routine->AsmTemplate.is_whole_microcode) {
+			error(instr->operands[0], "'%.*s' is whole Microcode, @(rsp, rsp_origin = A), which no template calls",
+			      LIT(routine->token.string));
 		} else if (routine == nullptr) {
 			// at the mnemonic: a constant operand in parentheses has its own warning
 			gbString s = expr_to_string(instr->operands[0]);
@@ -1379,6 +1428,82 @@ gb_internal void rsp_check_routine_calls(Entity *e) {
 	}
 }
 
+// A label's address is an operand only in whole Microcode, @(rsp, rsp_origin = A): an
+// `addiu` that takes one (`addiu %ra, %zero, .loop`, GNU as's `li ra, %lo(loop)`) and a `j` or
+// `jal` to one. Elsewhere a template's code is placed by Odin64's generator, so the address
+// is unknown; jal's case is rsp_check_routine_calls's.
+gb_internal void rsp_check_whole_microcode_forms(Entity *e) {
+	if (e->AsmTemplate.is_whole_microcode) {
+		return;
+	}
+	ast_node(at, AsmTemplate, e->AsmTemplate.node);
+	for (Ast *instruction : at->instructions) {
+		if (instruction->kind != Ast_AsmInstruction) {
+			continue;
+		}
+		ast_node(instr, AsmInstruction, instruction);
+		if (instr->mnemonic == 0 || instr->mnemonic == Asm_rsp::M_JAL) {
+			continue;
+		}
+		auto forms = g_asm_rsp.encoding_forms(instr->mnemonic);
+		if (instr->valid_form_index < 0 || instr->valid_form_index >= forms.count) {
+			continue;
+		}
+		auto const &form = forms[instr->valid_form_index];
+		for_array(i, instr->operands) {
+			auto type = form.ops[g_asm_rsp.form_explicit_slot(form, cast(int)i)];
+			if (type == Asm_rsp::OP_LABEL26 || type == Asm_rsp::OP_LABEL_LO16) {
+				error(instr->operands[i], "'%.*s' takes a label's address only in whole Microcode, @(rsp, rsp_origin = A), "
+				      "whose address the compiler knows", LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]));
+			}
+		}
+	}
+}
+
+// A label's byte offset from the start of whole Microcode, as a constant u32, for data
+// such as rspq's command table: `rsp_template_label_offset(kernel, "loop")` for `.loop:`.
+gb_internal bool check_rsp_template_label_offset(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
+	ast_node(ce, CallExpr, call);
+	operand->mode  = Addressing_Constant;
+	operand->type  = t_u32;
+	operand->value = exact_value_i64(0);
+
+	Operand name = {};
+	check_expr(c, &name, ce->args[1]);
+	if (name.mode == Addressing_Invalid) {
+		return true;
+	}
+	if (name.mode != Addressing_Constant || name.value.kind != ExactValue_String) {
+		error(ce->args[1], "'%.*s' takes the label's name as a constant string", LIT(builtin_name));
+		return true;
+	}
+	Entity *e = rsp_template_argument(c, call, builtin_name);
+	if (e == nullptr) {
+		return true;
+	}
+	if (!e->AsmTemplate.is_whole_microcode) {
+		error(ce->args[0], "'%.*s' takes whole Microcode, @(rsp, rsp_origin = A); '%.*s' is placed by its generator",
+		      LIT(builtin_name), LIT(e->token.string));
+		return true;
+	}
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	RspTemplateState *st = rsp_template_checked(c, e, call);
+	if (st == nullptr || !st->encoded) {
+		return true; // its check reported why
+	}
+	String label = name.value.value_string;
+	if (label.len > 0 && label[0] == '.') {
+		label = substring(label, 1, label.len);
+	}
+	i32 *index = string_map_get(&st->label_words, label);
+	if (index == nullptr) {
+		error(ce->args[1], "'%.*s' has no label '.%.*s'", LIT(e->token.string), LIT(label));
+		return true;
+	}
+	operand->value = exact_value_i64(4*cast(i64)*index);
+	return true;
+}
+
 // The address a jal to the template encodes (rsp_routine_address), as a constant u32.
 gb_internal bool check_rsp_template_address(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name) {
 	operand->mode  = Addressing_Constant;
@@ -1386,6 +1511,11 @@ gb_internal bool check_rsp_template_address(CheckerContext *c, Operand *operand,
 	operand->value = exact_value_i64(0);
 	Entity *e = rsp_template_argument(c, call, builtin_name);
 	if (e == nullptr) {
+		return true;
+	}
+	if (e->AsmTemplate.is_whole_microcode) {
+		error(call, "'%.*s' is whole Microcode, @(rsp, rsp_origin = A), placed at its rsp_origin, not a routine",
+		      LIT(e->token.string));
 		return true;
 	}
 	operand->value = exact_value_i64(rsp_routine_address(e));
@@ -1414,6 +1544,9 @@ gb_internal bool check_rsp_template_pins(CheckerContext *c, Operand *operand, As
 	if (rsp_template_checked(c, e, call) == nullptr) {
 		return true;
 	}
+	bool whole_before = g_asm_rsp.whole_microcode;
+	g_asm_rsp.whole_microcode = e->AsmTemplate.is_whole_microcode;
+	defer (g_asm_rsp.whole_microcode = whole_before);
 	auto const &decls = e->AsmTemplate.decls;
 	isize count = 0;
 	for (auto const &ed : decls) {

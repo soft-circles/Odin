@@ -239,6 +239,16 @@ class Check(unittest.TestCase):
         self.assertEqual([(d[1], d[3]) for d in diagnostics(output)],
                          [(4, "'#unroll for' in an asm template body is supported only in @(rsp) templates")], output)
 
+    def test_rsp_origin_is_rsp_only(self):
+        # rsp_origin places whole RSP Microcode, so a CPU template can't take it.
+        directory = unique_dir("cpu-origin")
+        (directory / "cpu.odin").write_text(
+            "package cpu\n\n@(rsp_origin = 0xA4001000)\nt :: asm() {\n\tnop\n}\n")
+        code, output = check_package(directory, "linux_amd64")
+        self.assertNotEqual(code, 0)
+        self.assertEqual([(d[1], d[3]) for d in diagnostics(output)],
+                         [(3, "'rsp_origin' places whole RSP Microcode; it needs @(rsp)")], output)
+
 
 class Encode(unittest.TestCase):
     def test_every_form_matches_rexcode(self):

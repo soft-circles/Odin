@@ -128,6 +128,8 @@ struct AttributeContext {
 	String  deprecated_message;
 	String  warning_message;
 	DeferredProcedure deferred_procedure;
+	Ast *   rsp_origin_elem; // @(rsp_origin = A) on an asm template
+	i64     rsp_origin;
 	bool    is_export             : 1;
 	bool    is_static             : 1;
 	bool    require_results       : 1;

@@ -306,15 +306,18 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 
 	bool need_leader = true;
 
-	// #noreorder (MIPS): the instruction after a branch, jump or call is its delay slot.
+	// #noreorder (MIPS), and whole RSP Microcode: the instruction after a branch, jump or call is its delay slot.
 	// A plain branch's slot runs on both edges, so it ends the branch's block, and the
 	// block's edges are the branch's (`term`). A branch-likely's slot runs on the taken
 	// edge only, so it is a block of its own between the branch and its fall-through.
-	bool noreorder = entity->AsmTemplate.is_noreorder;
+	// Whole RSP Microcode (@(rsp, rsp_origin = A)) is written in the same order: its j, jr
+	// and jal have slots too.
+	bool noreorder = entity->AsmTemplate.is_noreorder || entity->AsmTemplate.is_whole_microcode;
 	AstAsmInstruction   *slot_owner       = nullptr; // the branch whose slot comes next
 	AsmInstructionFacts *slot_owner_facts = nullptr;
 	i32                  slot_owner_index = -1;
 	Ast *                slot_gap         = nullptr; // a label or directive between the branch and its slot
+	AstAsmInstruction   *labelled_slot_owner = nullptr; // whole Microcode: the branch whose slot a label marks
 
 	// Build basic blocks over the template body. A leader is: the first instruction, any
 	// instruction preceded by a label, and any instruction following a control transfer.
@@ -325,7 +328,11 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 		if (slot_owner != nullptr && slot_gap != nullptr && node->kind == Ast_AsmInstruction) {
 			// A label or directive between a branch and its slot would put a branch
 			// target or data in the slot.
-			if (slot_gap->kind == Ast_AsmLabelDecl) {
+			if (slot_gap->kind == Ast_AsmLabelDecl && entity->AsmTemplate.is_whole_microcode) {
+				// Whole RSP Microcode may enter a slot at its label, as rspq's `j rspq_overlay_check`
+				// shares its slot with rspq_switch_highpri; the slot opens the label's block.
+				labelled_slot_owner = slot_owner;
+			} else if (slot_gap->kind == Ast_AsmLabelDecl) {
 				error(slot_gap, "A label cannot mark the delay slot of '%.*s' in a #noreorder template; "
 				                "put the slot instruction right after the branch and the label after it",
 				      LIT(slot_owner->name->Ident.token.string));
@@ -377,8 +384,10 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 		cfg->blocks[bi].last = ii;
 		cfg->blocks[bi].term = is_slot ? slot_owner_index : ii;
 
-		if (is_slot) {
-			String owner_name = slot_owner->name->Ident.token.string;
+		AstAsmInstruction *checked_slot_owner = is_slot ? slot_owner : labelled_slot_owner;
+		labelled_slot_owner = nullptr;
+		if (checked_slot_owner != nullptr) {
+			String owner_name = checked_slot_owner->name->Ident.token.string;
 			if (facts != nullptr && facts->is_control) {
 				error(instr->name, "'%.*s' cannot sit in the delay slot of '%.*s': a branch or jump in a delay slot is "
 				                   "UNPREDICTABLE on the VR4300",
@@ -387,6 +396,9 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in a #noreorder template: %s",
 				      LIT(instr->name->Ident.token.string), LIT(owner_name), facts->slot_reject_reason);
 			}
+		}
+
+		if (is_slot) {
 			slot_owner = nullptr;
 			slot_owner_facts = nullptr;
 			need_leader = true;
@@ -474,6 +486,20 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 
 		cfg->blocks[0].reachable = true;
 		array_add(&stack, cast(i32)0);
+		if (entity->AsmTemplate.is_whole_microcode) {
+			// Whole RSP Microcode dispatches through jr to addresses it keeps in data, such as
+			// rspq's command table, so any labelled block may be entered.
+			for (Ast *node : at->instructions) {
+				if (node->kind != Ast_AsmLabelDecl) {
+					continue;
+				}
+				i32 li = asm_cfg_label_block_index(node->AsmLabelDecl.name->Ident.entity);
+				if (0 <= li && li < cast(i32)cfg->blocks.count && !cfg->blocks[li].reachable) {
+					cfg->blocks[li].reachable = true;
+					array_add(&stack, li);
+				}
+			}
+		}
 		while (stack.count > 0) {
 			i32 bi = stack[stack.count-1];
 			stack.count -= 1;

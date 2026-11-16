@@ -3074,6 +3074,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 gb_internal bool check_rsp_template_code(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name); // check_asm_rsp.cpp
 gb_internal bool check_rsp_template_location(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name); // check_asm_rsp.cpp
 gb_internal bool check_rsp_template_address(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name); // check_asm_rsp.cpp
+gb_internal bool check_rsp_template_label_offset(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name); // check_asm_rsp.cpp
 gb_internal bool check_rsp_template_pins(CheckerContext *c, Operand *operand, Ast *call, String const &builtin_name); // check_asm_rsp.cpp
 
 gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32 id, Type *type_hint) {
@@ -3125,6 +3126,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	case BuiltinProc_rsp_template_code: // the argument is an asm template, which is not a value
 	case BuiltinProc_rsp_template_location:
 	case BuiltinProc_rsp_template_address:
+	case BuiltinProc_rsp_template_label_offset:
 	case BuiltinProc_rsp_template_pins:
 	case BuiltinProc_procedure_of:
 	case BuiltinProc_simd_indices:
@@ -5462,6 +5464,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		return check_rsp_template_location(c, operand, call, builtin_name);
 	case BuiltinProc_rsp_template_address:
 		return check_rsp_template_address(c, operand, call, builtin_name);
+	case BuiltinProc_rsp_template_label_offset:
+		return check_rsp_template_label_offset(c, operand, call, builtin_name);
 	case BuiltinProc_rsp_template_pins:
 		return check_rsp_template_pins(c, operand, call, builtin_name);
 

@@ -3830,11 +3830,30 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 
 
 // `@(rsp)` marks RSP Microcode (asm_tables_rsp.cpp). The collector already read it to
-// set Entity.AsmTemplate.arch; here it only has to be accepted.
+// set Entity.AsmTemplate.arch; here it only has to be accepted. `@(rsp, rsp_origin = A)`
+// makes the template a whole Microcode whose first instruction is at address A, as
+// libdragon's rsp.ld places .text at 0xA4001000.
 gb_internal DECL_ATTRIBUTE_PROC(asm_template_decl_attribute) {
 	if (name == "rsp") {
 		if (value != nullptr) {
 			error(value, "Expected no value for '%.*s'", LIT(name));
+		}
+		return true;
+	}
+	if (name == "rsp_origin") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+		if (ev.kind == ExactValue_Integer) {
+			bool in_range = compare_exact_values(Token_GtEq, ev, exact_value_i64(0)) &&
+			                compare_exact_values(Token_LtEq, ev, exact_value_i64(0xFFFFFFFC));
+			i64 origin = in_range ? exact_value_to_i64(ev) : 0;
+			if (!in_range || (origin & 3) != 0) {
+				error(value, "'rsp_origin' is a 32-bit address of a word, a multiple of 4");
+			} else {
+				ac->rsp_origin_elem = elem;
+				ac->rsp_origin = origin;
+			}
+		} else {
+			error(elem, "Expected a constant integer address for '%.*s'", LIT(name));
 		}
 		return true;
 	}
@@ -3879,6 +3898,14 @@ gb_internal bool check_asm_template_signature(CheckerContext *ctx, Entity *entit
 	AttributeContext ac = make_attribute_context({}, {});
 	if (d != nullptr) {
 		check_decl_attributes(ctx, d->attributes, asm_template_decl_attribute, &ac);
+	}
+	if (ac.rsp_origin_elem != nullptr) {
+		if (ate->arch != AsmTemplateArch_Rsp) {
+			error(ac.rsp_origin_elem, "'rsp_origin' places whole RSP Microcode; it needs @(rsp)");
+		} else {
+			ate->is_whole_microcode = true;
+			ate->rsp_origin = ac.rsp_origin;
+		}
 	}
 	check_target_feature_attributes(ac, entity, type);
 	return true;
@@ -4413,7 +4440,9 @@ gb_internal void check_asm_template_body(AsmCtx *asm_ctx, CheckerContext *ctx, E
 		vet_unused = (ast_file_vet_flags(file) & VetFlag_UnusedVariables) != 0;
 	}
 
-	if (vet_unused) {
+	// Whole RSP Microcode's labels are entry points too, which data such as rspq's command
+	// table names (intrinsics.rsp_template_label_offset).
+	if (vet_unused && !ate->is_whole_microcode) {
 		for (auto const &entry : ate->label_scope->elements) {
 			Entity *le = entry.value;
 			GB_ASSERT(le != nullptr);

@@ -136,6 +136,8 @@ rsp_template_code :: proc(t: $T) -> []Rsp_Code_Line ---
 rsp_template_location :: proc(t: $T) -> runtime.Source_Code_Location ---
 // The address a `jal (t)` in another @(rsp) template encodes for the template `t`, as a constant; the compiler assigns it
 rsp_template_address :: proc(t: $T) -> u32 ---
+// The byte offset of the label `.name` from the first instruction of the whole Microcode `t`, @(rsp, rsp_origin = A), as a constant
+rsp_template_label_offset :: proc(t: $T, name: string) -> u32 ---
 // The register an @(rsp) asm template parameter is pinned to: a GPR's number, or a vector register's when `vector`
 Rsp_Pin :: struct {
 	number: u8,

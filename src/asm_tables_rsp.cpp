@@ -24,6 +24,11 @@
 //     lwv              not implemented by the RSP: LWC2 sub-opcode 0x0a does
 //                      nothing (ares), and rsp.inc has no lwv. swv is real.
 //
+// Whole Microcode, @(rsp, rsp_origin = A), is rspq itself (N64_MAINTAINERS.md,
+// "Whole Microcode"): for it the table also has j, jr, mfc0, mtc0 and break, %sp,
+// jumps, calls and addiu to its labels, and writes to gp and ra
+// (Asm_rsp::whole_microcode).
+//
 // Spelling (libdragon's rsp.inc and rexcode's printer):
 //
 //   * GPRs by ABI name (%t0, %s6, ...). %v0 and %v1 are the GPRs $2/$3, as in
@@ -74,13 +79,17 @@
 	X(SLTI, "slti") X(SLTIU, "sltiu") X(ANDI, "andi") X(ORI, "ori") X(XORI, "xori") X(LUI, "lui") \
 	/* branches (explicit delay slot) */ \
 	X(BEQ, "beq") X(BNE, "bne") X(BLEZ, "blez") X(BGTZ, "bgtz") X(BLTZ, "bltz") X(BGEZ, "bgez") \
-	/* a call to another @(rsp) template (check_asm_rsp.cpp) */ \
+	/* a call to another @(rsp) template (check_asm_rsp.cpp), or to a label of whole Microcode */ \
 	X(JAL, "jal") \
+	/* whole Microcode only (Asm_rsp::whole_microcode) */ \
+	X(J, "j") X(JR, "jr") \
 	/* scalar loads / stores, nop */ \
 	X(LB, "lb") X(LH, "lh") X(LW, "lw") X(LBU, "lbu") X(LHU, "lhu") X(SB, "sb") \
 	X(SH, "sh") X(SW, "sw") X(NOP, "nop") \
 	/* COP2 moves */ \
 	X(MFC2, "mfc2") X(MTC2, "mtc2") X(CFC2, "cfc2") X(CTC2, "ctc2") \
+	/* CP0 moves and halting: whole Microcode only */ \
+	X(MFC0, "mfc0") X(MTC0, "mtc0") X(BREAK, "break") \
 	/* vector unit */ \
 	X(VMULF, "vmulf") X(VMULU, "vmulu") X(VMUDL, "vmudl") X(VMUDM, "vmudm") X(VMUDN, "vmudn") X(VMUDH, "vmudh") \
 	X(VMACF, "vmacf") X(VMACU, "vmacu") X(VMADL, "vmadl") X(VMADM, "vmadm") X(VMADN, "vmadn") X(VMADH, "vmadh") \
@@ -96,7 +105,8 @@
 	X(SBV, "sbv") X(SSV, "ssv") X(SLV, "slv") X(SDV, "sdv") X(SQV, "sqv") X(SRV, "srv") \
 	X(SPV, "spv") X(SUV, "suv") X(SHV, "shv") X(SFV, "sfv") X(SWV, "swv") X(STV, "stv")
 
-// ENUM, name, class, number. %sp ($29) is deliberately absent: see register_unavailable_reason.
+// ENUM, name, class, number. %sp ($29) is only whole Microcode's: see register_lookup and
+// register_unavailable_reason.
 #define ASM_RSP_REGISTERS(X) \
 	X(ZERO, "zero", GPR, 0)  X(AT, "at", GPR, 1) \
 	X(V0, "v0", GPR, 2)   X(V1, "v1", GPR, 3) \
@@ -106,7 +116,7 @@
 	X(S0, "s0", GPR, 16)  X(S1, "s1", GPR, 17)  X(S2, "s2", GPR, 18)  X(S3, "s3", GPR, 19) \
 	X(S4, "s4", GPR, 20)  X(S5, "s5", GPR, 21)  X(S6, "s6", GPR, 22)  X(S7, "s7", GPR, 23) \
 	X(T8, "t8", GPR, 24)  X(T9, "t9", GPR, 25)  X(K0, "k0", GPR, 26)  X(K1, "k1", GPR, 27) \
-	X(GP, "gp", GPR, 28)  X(FP, "fp", GPR, 30)  X(S8, "s8", GPR, 30)  X(RA, "ra", GPR, 31) \
+	X(GP, "gp", GPR, 28)  X(SP, "sp", GPR, 29)  X(FP, "fp", GPR, 30)  X(S8, "s8", GPR, 30)  X(RA, "ra", GPR, 31) \
 	X(V00, "v00", VR, 0)  X(V01, "v01", VR, 1)  X(V02, "v02", VR, 2)  X(V03, "v03", VR, 3) \
 	X(V04, "v04", VR, 4)  X(V05, "v05", VR, 5)  X(V06, "v06", VR, 6)  X(V07, "v07", VR, 7) \
 	X(V08, "v08", VR, 8)  X(V09, "v09", VR, 9)  X(V10, "v10", VR, 10) X(V11, "v11", VR, 11) \
@@ -173,6 +183,10 @@ struct Asm_rsp {
 		OP_VMEM,        // [base + disp], byte displacement scaled by the form's access size
 		OP_REL16,       // branch target label (PC-relative, 16-bit word offset)
 		OP_CALL26,      // jal target: the address the compiler assigns a routine
+		OP_LABEL26,     // j/jal target in whole Microcode: a label of the template, at its absolute address
+		OP_LABEL_LO16,  // addiu immediate in whole Microcode: the low 16 bits of a label's address
+		OP_CP0,         // mfc0/mtc0 CP0 register number, 0..15
+		OP_CODE10,      // break code, 0..1023
 	};
 
 
@@ -194,6 +208,8 @@ struct Asm_rsp {
 		ENC_VT_LS,        // vt in bits 20..16, L/S element in bits 10..7
 		ENC_ELEM,         // the register's number in the VU element field, bits 24..21 (vsar)
 		ENC_VBASE,        // base in bits 25..21, offset/size in bits 6..0
+		ENC_CODE10,       // bits 25..16 (break)
+		ENC_CP0,          // the CP0 register number in bits 15..11 (mfc0/mtc0)
 	};
 
 
@@ -406,6 +422,15 @@ struct Asm_rsp {
 	u16 GPRLEN;
 	u16 VRLEN;
 
+	// Set while a whole-Microcode template (@(rsp, rsp_origin = A)) is checked, under
+	// rsp_template_body_mutex: it admits j, jr, mfc0, mtc0 and break, and writes to gp
+	// and ra.
+	bool whole_microcode;
+
+	static bool is_whole_microcode_mnemonic(Mnemonic m) {
+		return m == M_J || m == M_JR || m == M_MFC0 || m == M_MTC0 || m == M_BREAK;
+	}
+
 	bool init(i64 word_size);
 
 
@@ -427,7 +452,10 @@ struct Asm_rsp {
 
 	Mnemonic mnemonic_lookup(String const &name) {
 		Mnemonic *found = string_map_get(&mnemonic_map, name);
-		return found ? *found : M_INVALID;
+		if (found == nullptr || (is_whole_microcode_mnemonic(*found) && !whole_microcode)) {
+			return M_INVALID;
+		}
+		return *found;
 	}
 	Prefix prefix_lookup(String const &name) {
 		gb_unused(name);
@@ -437,7 +465,10 @@ struct Asm_rsp {
 
 	Register register_lookup(String const &name) {
 		Register *found = string_map_get(&register_map, name);
-		return found ? *found : REG_INVALID;
+		if (found == nullptr || (*found == REG_SP && !whole_microcode)) {
+			return REG_INVALID;
+		}
+		return *found;
 	}
 	Slice<Encoding> encoding_forms(/*Mnemonic*/ u16 m) const {
 		EncodeRun r = encode_runs[m];
@@ -527,6 +558,8 @@ struct Asm_rsp {
 		case OP_UIMM16:
 		case OP_SHAMT:
 		case OP_CALL26:
+		case OP_CP0:
+		case OP_CODE10:
 			return AsmOperand_Immediate;
 
 		case OP_MEM:
@@ -534,6 +567,8 @@ struct Asm_rsp {
 			return AsmOperand_Memory;
 
 		case OP_REL16:
+		case OP_LABEL26:
+		case OP_LABEL_LO16:
 			return AsmOperand_Label;
 		}
 		return AsmOperand_Invalid;
@@ -622,6 +657,10 @@ struct Asm_rsp {
 		case OP_VMEM:     return 0;
 		case OP_REL16:    return 16;
 		case OP_CALL26:   return 28;
+		case OP_LABEL26:  return 28;
+		case OP_LABEL_LO16: return 16;
+		case OP_CP0:      return 4;
+		case OP_CODE10:   return 10;
 		}
 		return 0;
 	}
@@ -749,18 +788,19 @@ struct Asm_rsp {
 		if (name == "j" || name == "jr" || name == "jalr") {
 			return "jumps out of the template, which an @(rsp) template cannot: a Microcode body branches only "
 			       "to its own labels (beq, bne, blez, bgtz, bltz, bgez) and ends by falling through to the "
-			       "generated epilogue, and calls another @(rsp) template with jal (pkg.routine)";
+			       "generated epilogue, and calls another @(rsp) template with jal (pkg.routine); whole Microcode, "
+			       "@(rsp, rsp_origin = A), may use j and jr";
 		}
 		if (name == "bltzal" || name == "bgezal") {
 			return "writes %ra, which holds the rspq return address; an @(rsp) template branches with bltz or bgez";
 		}
 		if (name == "mfc0" || name == "mtc0") {
 			return "is CP0 access (DMA, semaphore and RDP registers), which belongs to the generated prologue and "
-			       "epilogue; an @(rsp) template has none";
+			       "epilogue; an @(rsp) template has none, and whole Microcode, @(rsp, rsp_origin = A), may use it";
 		}
 		if (name == "break") {
 			return "halts the RSP, which only rspq does; an @(rsp) template ends by falling through to the "
-			       "generated epilogue";
+			       "generated epilogue, and whole Microcode, @(rsp, rsp_origin = A), may use it";
 		}
 		if (name == "lwv") {
 			return "is not implemented by the RSP; LWC2 sub-opcode 0x0a does nothing";
@@ -816,6 +856,9 @@ struct Asm_rsp {
 
 	// rspq keeps its own state in gp and ra.
 	char const *register_write_reject_reason(Register r) const {
+		if (whole_microcode) {
+			return nullptr; // whole Microcode is rspq itself, which owns them
+		}
 		switch (r) {
 		case REG_GP: return "holds the rspq command pointer; a Microcode body must not write it";
 		case REG_RA: return "holds the rspq return address; a Microcode body must not write it";
@@ -1025,6 +1068,8 @@ struct Asm_rsp {
 		case OP_UIMM16: lo = 0;      hi = 65535; break;
 		case OP_SHAMT:  lo = 0;      hi = 31;    break;
 		case OP_CALL26: lo = 0;      hi = 0x0FFFFFFC; break;
+		case OP_CP0:    lo = 0;      hi = 15;    break;
+		case OP_CODE10: lo = 0;      hi = 1023;  break;
 		default:
 			return false;
 		}
@@ -1036,6 +1081,19 @@ struct Asm_rsp {
 	bool has_delay_slot(u16 m, Clobber const &clobber) const {
 		gb_unused(m);
 		return clobber.has_control();
+	}
+
+	// Delay slots for check_asm_cfg_build, which reads them only for whole Microcode:
+	// every branch, jump and call has one, and jal returns after it.
+	u8 delay_slot_flags(u16 m, Clobber const &clobber) const {
+		if (!whole_microcode || !has_delay_slot(m, clobber)) {
+			return 0;
+		}
+		u8 flags = AsmDelaySlot_Has;
+		if ((clobber.side_effects & SideEffectFlag_CALL) != 0) {
+			flags |= AsmDelaySlot_Links;
+		}
+		return flags;
 	}
 
 	// The fields of explicit operand slot `enc` holding register number `reg`,
@@ -1063,6 +1121,12 @@ struct Asm_rsp {
 		case ENC_TARGET26:
 			if (value < 0 || value > 0x0FFFFFFC || (value & 3) != 0) *ok = false;
 			return (cast(u32)value >> 2) & 0x03FFFFFF;
+		case ENC_CODE10:
+			if (value < 0 || value > 1023) *ok = false;
+			return (cast(u32)value & 0x3FF) << 16;
+		case ENC_CP0:
+			if (value < 0 || value > 15) *ok = false;
+			return (cast(u32)value & 0x1F) << 11;
 		case ENC_VD:          return (reg & 0x1F) << 6;
 		case ENC_VD_DE:
 			if (element > 7) *ok = false;
@@ -1135,6 +1199,11 @@ enum Asm_rsp::Shape : u8 {
 	SH_BR2,        // rs, rt, label                      beq bne
 	SH_BR1,        // rs, label                          blez bgtz bltz bgez
 	SH_CALL,       // constant address                   jal
+	SH_JUMP,       // label (whole Microcode)            j jal
+	SH_JR,         // rs                                 jr
+	SH_I_LO,       // rt, rs, label (whole Microcode)    addiu
+	SH_MXC0,       // rt, CP0 register number            mfc0 mtc0
+	SH_BREAK,      // code                               break
 	SH_MEM,        // rt, [base + disp]                  lb lh lw lbu lhu sb sh sw
 	SH_MXC2,       // rt, vs.byte                        mfc2 mtc2
 	SH_CXC2,       // rt, %vco/%vcc/%vce                 cfc2 ctc2
@@ -1163,6 +1232,11 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 	/* SH_BR2      */ RS((OP_GPR,ENC_RS), (OP_GPR,ENC_RT), (OP_REL16,ENC_BRANCH16), N_),
 	/* SH_BR1      */ RS((OP_GPR,ENC_RS), (OP_REL16,ENC_BRANCH16), N_, N_),
 	/* SH_CALL     */ RS((OP_CALL26,ENC_TARGET26), N_, N_, N_),
+	/* SH_JUMP     */ RS((OP_LABEL26,ENC_TARGET26), N_, N_, N_),
+	/* SH_JR       */ RS((OP_GPR,ENC_RS), N_, N_, N_),
+	/* SH_I_LO     */ RS((OP_GPR,ENC_RT), (OP_GPR,ENC_RS), (OP_LABEL_LO16,ENC_IMM16), N_),
+	/* SH_MXC0     */ RS((OP_GPR,ENC_RT), (OP_CP0,ENC_CP0), N_, N_),
+	/* SH_BREAK    */ RS((OP_CODE10,ENC_CODE10), N_, N_, N_),
 	/* SH_MEM      */ RS((OP_GPR,ENC_RT), (OP_MEM,ENC_OFFSET_BASE), N_, N_),
 	/* SH_MXC2     */ RS((OP_GPR,ENC_RT), (OP_VR_BYTE,ENC_VS_ELEM), N_, N_),
 	/* SH_CXC2     */ RS((OP_GPR,ENC_RT), (OP_VC,ENC_RD), N_, N_),
@@ -1206,6 +1280,9 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_C_BR1     RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND)
 #define RSP_C_BR2     RSP_CLB(0,      RSP_O0|RSP_O1, false, false, RSP_CTL|RSP_COND)
 #define RSP_C_CALL    RSP_CLB(0,      0,             false, false, RSP_CTL|RSP_CALL)
+#define RSP_C_JUMP    RSP_CLB(0,      0,             false, false, RSP_CTL)
+#define RSP_C_JR      RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL)
+#define RSP_C_R0      RSP_CLB(0,      RSP_O0,        false, false, 0)  // mtc0
 // The accumulator is not modelled (VU effects stay in the generator's check).
 #define RSP_C_VU      RSP_CLB(RSP_O0, RSP_O1|RSP_O2, false, false, 0)
 
@@ -1231,6 +1308,7 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(SRAV,   SH_SHV,       0x00000007, 0xFC0007FF, RSP_SCALAR, RSP_C_W0_R12),
 	R(ADDI,   SH_I_S,       0x20000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
 	R(ADDIU,  SH_I_S,       0x24000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
+	R(ADDIU,  SH_I_LO,      0x24000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
 	R(SLTI,   SH_I_S,       0x28000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
 	R(SLTIU,  SH_I_S,       0x2C000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
 	R(ANDI,   SH_I_U,       0x30000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
@@ -1244,6 +1322,9 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(BLTZ,   SH_BR1,       0x04000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BGEZ,   SH_BR1,       0x04010000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(JAL,    SH_CALL,      0x0C000000, 0xFC000000, RSP_SCALAR, RSP_C_CALL),
+	R(JAL,    SH_JUMP,      0x0C000000, 0xFC000000, RSP_SCALAR, RSP_C_CALL),
+	R(J,      SH_JUMP,      0x08000000, 0xFC000000, RSP_SCALAR, RSP_C_JUMP),
+	R(JR,     SH_JR,        0x00000008, 0xFC1FFFFF, RSP_SCALAR, RSP_C_JR),
 	R(LB,     SH_MEM,       0x80000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LH,     SH_MEM,       0x84000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LW,     SH_MEM,       0x8C000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
@@ -1257,6 +1338,10 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(MTC2,   SH_MXC2,      0x48800000, 0xFFE0007F, RSP_SCALAR, RSP_C_W1_R0),
 	R(CFC2,   SH_CXC2,      0x48400000, 0xFFE007FF, RSP_SCALAR, RSP_C_W0_R1),
 	R(CTC2,   SH_CXC2,      0x48C00000, 0xFFE007FF, RSP_SCALAR, RSP_C_W1_R0),
+	R(MFC0,   SH_MXC0,      0x40000000, 0xFFE007FF, RSP_SCALAR, RSP_C_W0),
+	R(MTC0,   SH_MXC0,      0x40800000, 0xFFE007FF, RSP_SCALAR, RSP_C_R0),
+	R(BREAK,  SH_NONE,      0x0000000D, 0xFFFFFFFF, RSP_SCALAR, RSP_C_NONE),
+	R(BREAK,  SH_BREAK,     0x0000000D, 0xFC00FFFF, RSP_SCALAR, RSP_C_NONE),
 	R(VMULF,  SH_VU,        0x4A000000, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMULU,  SH_VU,        0x4A000001, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMUDL,  SH_VU,        0x4A000004, 0xFE00003F, RSP_VU,     RSP_C_VU),
@@ -1333,6 +1418,10 @@ isize const Asm_rsp::form_row_count = gb_count_of(Asm_rsp::form_rows);
 #undef RSP_C_W0
 #undef RSP_C_W1_R0
 #undef RSP_C_BR2
+#undef RSP_C_CALL
+#undef RSP_C_JUMP
+#undef RSP_C_JR
+#undef RSP_C_R0
 #undef RSP_C_VU
 #undef RSP_O0
 #undef RSP_O1
