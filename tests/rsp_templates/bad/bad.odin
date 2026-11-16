@@ -64,7 +64,7 @@ CALL_TARGET :: 0x1000
 calls :: asm() {
 	jal   (ok)
 	nop
-	jal   .here // ERROR: 'jal' operands
+	jal   .here // ERROR: 'jal' calls a label only in whole Microcode
 .here:
 	jal   (CALL_TARGET) // ERROR: 'jal' calls an @(rsp) template by name, as 'jal (pkg.routine)'; '(CALL_TARGET)' is not one
 	nop
@@ -520,3 +520,42 @@ unrolled_operand_errors :: asm(p: ^u32) [p = %s1] {
 		cfc2  %t0, %c // ERROR: 'cfc2' operand-1 must be a named COP2 control register, got %v01
 	}
 }
+
+// Whole Microcode, @(rsp, rsp_origin = A), knows its labels' addresses; a template
+// placed by Odin64's generator does not.
+@(rsp)
+placed :: asm() {
+	addiu %ra, %zero, .here // ERROR: 'addiu' takes a label's address only in whole Microcode
+.here:
+}
+
+@(rsp, rsp_origin = 0xA4001002) // ERROR: 'rsp_origin' is a 32-bit address of a word, a multiple of 4
+unaligned_origin :: asm() {
+}
+
+@(rsp, rsp_origin = "imem") // ERROR: Expected a constant integer address for 'rsp_origin'
+string_origin :: asm() {
+}
+
+@(rsp, rsp_origin = 0xA4001000)
+whole :: asm() -> ! {
+.top:
+	jal   (ok) // ERROR: 'jal' in whole Microcode calls a label of the template
+	nop
+	mfc0  %t0, 16 // ERROR: 'mfc0' operand-1
+	mtc0  %t0, %t1 // ERROR: 'mtc0' operands
+	break 1024 // ERROR: 'break' operand-0
+	jalr  %t1, %t0 // ERROR: 'jalr' jumps out of the template
+	j     .top
+	nop
+}
+
+@(rsp, rsp_origin = 0xA4001000)
+whole_ok :: asm() -> ! {
+.top:
+	j     .top
+	nop
+}
+
+WHOLE_MISSING :: intrinsics.rsp_template_label_offset(whole_ok, "missing") // ERROR: 'whole_ok' has no label '.missing'
+PLACED_OFFSET :: intrinsics.rsp_template_label_offset(placed, "here") // ERROR: 'rsp_template_label_offset' takes whole Microcode

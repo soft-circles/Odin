@@ -387,6 +387,34 @@ call_forms :: asm() {
 }
 
 CALL :: intrinsics.rsp_template_code(call_forms)
+
+// Whole Microcode, placed where libdragon's rsp.ld puts .text: the forms only it may use,
+// labels whose addresses it knows, and a label on a delay slot (jr's), which rspq's kernel has
+WHOLE_ORIGIN :: 0xA4001000
+
+@(rsp, rsp_origin = WHOLE_ORIGIN)
+whole_forms :: asm() -> ! {
+.top:
+	mfc0  %t0, 4
+	mtc0  %a2, 7
+	jal   .tail
+	nop
+	addiu %ra, %zero, .tail
+	addiu %gp, %gp, 4
+	or    %sp, %ra, %zero
+	or    %ra, %sp, %zero
+	jr    %t6
+.halt:
+	break
+	break 0xba
+.tail:
+	j     .top
+	nop
+}
+
+WHOLE :: intrinsics.rsp_template_code(whole_forms)
+WHOLE_TAIL :: intrinsics.rsp_template_label_offset(whole_forms, "tail")
+WHOLE_HALT :: intrinsics.rsp_template_label_offset(whole_forms, "halt")
 FILL_ADDRESS :: intrinsics.rsp_template_address(valid.fill)
 SCALAR_ADDRESS :: intrinsics.rsp_template_address(scalar_forms)
 FILL_PINS :: intrinsics.rsp_template_pins(valid.fill)
@@ -405,7 +433,7 @@ VLS       :: intrinsics.rsp_template_code(vls_forms)
 // rexcode's RSP mnemonics an @(rsp) template may not use (asm_tables_rsp.cpp's
 // mnemonic_unavailable_reason; bad.odin's `profile` checks each one's error). LWV is
 // one rexcode encodes but the RSP does not implement.
-REJECTED :: bit_set[rsp.Mnemonic]{.J, .JR, .JALR, .BLTZAL, .BGEZAL, .MFC0, .MTC0, .BREAK, .LWV}
+REJECTED :: bit_set[rsp.Mnemonic]{.JALR, .BLTZAL, .BGEZAL, .LWV}
 
 vr :: proc(n: int) -> rsp.Register {
 	return rsp.Register(rsp.REG_VR | u16(n))
@@ -900,6 +928,31 @@ main :: proc() {
 		fmt.printfln("call_forms: routine addresses %08x and %08x are not distinct word addresses above IMEM", FILL_ADDRESS, SCALAR_ADDRESS)
 		failures += 1
 	}
+	// rexcode's j and jal take a label at its offset from 0; whole Microcode's encode its
+	// address from WHOLE_ORIGIN, of which a jump keeps the low 28 bits and ori the low 16
+	cp0 :: proc(n: u16) -> rsp.Register { return rsp.Register(rsp.REG_CP0 | n) }
+	whole := [?]rsp.Instruction{
+		rsp.inst_mfc0(rsp.T0, cp0(4)),
+		rsp.inst_mtc0(rsp.A2, cp0(7)),
+		rsp.inst_jal(1),
+		rsp.inst_nop(),
+		rsp.inst_addiu(rsp.RA, rsp.ZERO, (WHOLE_ORIGIN + 44) & 0xFFFF),
+		rsp.inst_addiu(rsp.GP, rsp.GP, 4),
+		rsp.inst_or(rsp.SP, rsp.RA, rsp.ZERO),
+		rsp.inst_or(rsp.RA, rsp.SP, rsp.ZERO),
+		rsp.inst_jr(rsp.T6),
+		rsp.inst_break(0),
+		rsp.inst_break(0xba << 10),
+		rsp.inst_j(0),
+		rsp.inst_nop(),
+	}
+	origin_bits := u32(WHOLE_ORIGIN & 0x0FFFFFFF) >> 2
+	compare("whole_forms", WHOLE, whole[:], {0, 11}, {2 = origin_bits, 11 = origin_bits})
+	if WHOLE_TAIL != 44 || WHOLE_HALT != 36 {
+		fmt.printfln("whole_forms: labels tail at %d and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_HALT)
+		failures += 1
+	}
+
 	// fill's parameters, output and value, are pinned to s2 and a0; its result is not a parameter
 	fill_pins := FILL_PINS
 	if len(fill_pins) != 2 || fill_pins[0] != {18, false} || fill_pins[1] != {4, false} {
@@ -916,7 +969,7 @@ main :: proc() {
 	// Every rexcode RSP mnemonic (one form each) is diffed above, or is one the
 	// table rejects and none of the templates holds.
 	covered: bit_set[rsp.Mnemonic]
-	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:], call[:]}) {
+	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:], call[:], whole[:]}) {
 		for inst in list {
 			covered += {inst.mnemonic}
 		}

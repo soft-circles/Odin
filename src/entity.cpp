@@ -380,6 +380,8 @@ struct Entity {
 			bool is_align_stack;
 			bool is_pure;
 			bool is_noreorder; // MIPS: the body owns its delay slots (`.set noreorder`, `.set noat`)
+			bool is_whole_microcode; // @(rsp, rsp_origin = A): the template is a whole Microcode loaded at rsp_origin
+			i64  rsp_origin;
 
 			bool has_observable_side_effect;
 
