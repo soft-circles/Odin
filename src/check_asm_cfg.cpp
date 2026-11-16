@@ -393,10 +393,8 @@ gb_internal void check_asm_cfg_build(AsmCtx *asm_ctx, AsmCfg *cfg, Ast *at_node,
 				                   "UNPREDICTABLE on the VR4300",
 				      LIT(instr->name->Ident.token.string), LIT(owner_name));
 			} else if (facts != nullptr && facts->slot_reject_reason != nullptr) {
-				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in %s: %s",
-				      LIT(instr->name->Ident.token.string), LIT(owner_name),
-				      entity->AsmTemplate.is_whole_microcode ? "whole Microcode" : "a #noreorder template",
-				      facts->slot_reject_reason);
+				error(instr->name, "'%.*s' cannot fill the delay slot of '%.*s' in a #noreorder template: %s",
+				      LIT(instr->name->Ident.token.string), LIT(owner_name), facts->slot_reject_reason);
 			}
 		}
 

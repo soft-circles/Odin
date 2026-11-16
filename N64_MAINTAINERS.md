@@ -398,9 +398,10 @@ RSP rather than a body Odin64's generator wraps, such as rspq's kernel
 where libdragon's `rsp.ld` puts `.text`. `asm_template_decl_attribute` reads the
 address (a word-aligned 32-bit constant) into the `AttributeContext`, and
 `check_asm_template_signature` sets `Entity.AsmTemplate.is_whole_microcode` and
-`rsp_origin`; on a CPU template it is an error. `check_rsp_template_body` sets
-`Asm_rsp::whole_microcode` while it checks and encodes one, under
-`rsp_template_body_mutex`, saving and restoring it around nested checks. With it set:
+`rsp_origin`; on a CPU template, or outside 0..0xFFFFFFFC, it is an error.
+`check_rsp_template_body` and `check_rsp_template_pins` set
+`Asm_rsp::whole_microcode` while they read one, under `rsp_template_body_mutex`,
+saving and restoring it around nested checks. With it set:
 
 - `mnemonic_lookup` finds `j`, `jr`, `mfc0`, `mtc0` and `break`, and
   `register_lookup` finds `%sp`; `register_write_reject_reason` lets the template
@@ -415,7 +416,8 @@ address (a word-aligned 32-bit constant) into the `AttributeContext`, and
   and `break` takes an optional code 0..1023 (`OP_CODE10`, bits 25..16).
 - `check_asm_cfg_build` models delay slots as for `#noreorder`
   (`Asm_rsp::delay_slot_flags`), lets a label mark a slot (rspq's
-  `j rspq_overlay_check` shares its slot with `rspq_switch_highpri`), and roots
+  `j rspq_overlay_check` shares its slot with `rspq_switch_highpri`) while still
+  checking the slot's instruction as a slot, and roots
   reachability at every label, since the kernel enters its commands through `jr`
   to addresses in its command table. `-vet` does not require its labels to be
   referenced, for the same reason.
@@ -423,7 +425,9 @@ address (a word-aligned 32-bit constant) into the `AttributeContext`, and
 `intrinsics.rsp_template_label_offset(t, "name")` is the constant byte offset of
 `.name` from the first instruction of whole Microcode `t`, from the label indices
 `rsp_template_encode` records in `RspTemplateState.label_words`, so Odin code can
-lay out data that names code, such as rspq's `(fn - _start) >> 2` command table.
+lay out data that names code, such as rspq's `(fn - _start) >> 2` command table;
+the name may be spelled `"name"` or `".name"`. Whole Microcode is not a routine:
+`jal (t)` from another template and `rsp_template_address(t)` are errors.
 The compiler emits no ELF and no data: a host generator takes the words from
 `rsp_template_code` and writes the sections libdragon's build expects. The golden
 program's `whole_forms` diffs every form against rexcode, and `bad/` holds each

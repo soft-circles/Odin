@@ -584,3 +584,24 @@ calls_whole :: asm() {
 }
 
 WHOLE_ADDRESS :: intrinsics.rsp_template_address(whole_ok) // ERROR: 'whole_ok' is whole Microcode, @(rsp, rsp_origin = A), placed at its rsp_origin
+
+@(rsp, rsp_origin = 0xA4001000)
+whole_bounds :: asm() -> ! {
+.top:
+	mfc0  %t0, 15
+	mtc0  %t0, -1 // ERROR: 'mtc0' operand-1
+	break 1023
+	j     %t0 // ERROR: 'j' operand-0
+	nop
+	j     .top
+	nop
+}
+
+@(rsp, rsp_origin = 0xA4001000)
+whole_missing_slot :: asm() -> ! {
+.top:
+	j     .top // ERROR: 'j' ends a #noreorder template without a delay-slot instruction
+}
+
+LABEL_NAME := "top"
+VARIABLE_NAME_OFFSET :: intrinsics.rsp_template_label_offset(whole_ok, LABEL_NAME) // ERROR: 'rsp_template_label_offset' takes the label's name as a constant string
