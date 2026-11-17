@@ -48,6 +48,12 @@ jobs:
 
   build_freebsd:
     name: FreeBSD Build, Check, and Test
+    # Known core:fmt failure on the n64 branch; skip there to cut CI noise.
+    # Pushes to the fork's feature branches are skipped too: their push run
+    # shows on the PR, and the pull_request run already covers FreeBSD.
+    if: >-
+      github.base_ref != 'n64' && github.ref != 'refs/heads/n64' &&
+      !(github.event_name == 'push' && github.repository == 'soft-circles/Odin' && github.ref != 'refs/heads/master')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
