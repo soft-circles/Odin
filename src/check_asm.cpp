@@ -3128,6 +3128,7 @@ gb_internal AsmTermCategory check_asm_mem_term_category(Operand *o, Array<AsmTem
 }
 
 gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr); // check_asm_rsp.cpp
+gb_internal bool rsp_template_label_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr); // check_asm_rsp.cpp
 
 template <typename AsmCtx>
 gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *entity, Operand *operand, Ast *expr, bool allow_memory_operands) {
@@ -3144,6 +3145,10 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 
 	Scope *param_scope = ate->param_scope;
 	Scope *label_scope = ate->label_scope;
+
+	if (ate->arch == AsmTemplateArch_Rsp && rsp_template_label_operand(ctx, entity, operand, expr)) {
+		return; // `(t).label`: a label of another whole RSP Microcode
+	}
 
 	switch (expr->kind) {
 	case_ast_node(ue, UnaryExpr, expr);

@@ -67,3 +67,53 @@ transform_words :: proc "contextless" () -> (count: int, first: u32, line: i32) 
 	code := TRANSFORM
 	return len(code), code[0].word, code[0].line
 }
+
+// Whole Microcode another one reaches by its labels, as an rdpq overlay reaches rspq's
+// kernel: cross_overlay below, whose words gnu/cross_template.S gives
+@(rsp, rsp_origin = 0xA4001000)
+whole_kernel :: asm() -> ! {
+	nop
+.loop:
+	nop
+	nop
+.tail:
+	jr    %ra
+	nop
+}
+
+// Reaches whole_kernel by its labels as '(t).label', its start as '(t)', and constant
+// addresses; gnu/cross_template.S is the same code for GNU as (golden.odin's CROSS_GNU)
+CROSS_ABS :: 0xA4001008
+
+@(rsp, rsp_origin = 0xA4001100)
+cross_overlay :: asm() -> ! {
+	beq   %at, %v0, (whole_kernel).loop
+	nop
+	bne   %zero, %v1, (whole_kernel).tail
+	nop
+	bgez  %a0, (whole_kernel).loop
+	nop
+	blez  %a1, (whole_kernel).tail
+	nop
+	bgtz  %a3, (whole_kernel)
+	nop
+	bltz  %a2, CROSS_ABS
+	nop
+	jal   (whole_kernel).tail
+	nop
+	jal   0xA4001004
+	nop
+	j     0x1040
+	nop
+.back:
+	j     (whole_kernel)
+	nop
+.last:
+	j     (whole_kernel).loop
+	nop
+}
+
+@(export)
+cross_overlay_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
+	return intrinsics.rsp_template_code(cross_overlay)
+}

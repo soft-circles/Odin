@@ -182,9 +182,10 @@ struct Asm_rsp {
 		OP_MEM,         // [base + disp], signed 16-bit byte displacement
 		OP_VMEM,        // [base + disp], byte displacement scaled by the form's access size
 		OP_REL16,       // branch target label (PC-relative, 16-bit word offset)
-		OP_CALL26,      // jal target: the address the compiler assigns a routine
+		OP_CALL26,      // jal target: the address the compiler assigns a routine; in whole Microcode, j/jal's constant address
 		OP_LABEL26,     // j/jal target in whole Microcode: a label of the template, at its absolute address
 		OP_LABEL_LO16,  // addiu immediate in whole Microcode: the low 16 bits of a label's address
+		OP_ADDR16,      // branch target in whole Microcode: a constant address (PC-relative, 16-bit word offset)
 		OP_CP0,         // mfc0/mtc0 CP0 register number, 0..15
 		OP_CODE10,      // break code, 0..1023
 	};
@@ -558,6 +559,7 @@ struct Asm_rsp {
 		case OP_UIMM16:
 		case OP_SHAMT:
 		case OP_CALL26:
+		case OP_ADDR16:
 		case OP_CP0:
 		case OP_CODE10:
 			return AsmOperand_Immediate;
@@ -659,6 +661,7 @@ struct Asm_rsp {
 		case OP_CALL26:   return 28;
 		case OP_LABEL26:  return 28;
 		case OP_LABEL_LO16: return 16;
+		case OP_ADDR16:   return 32;
 		case OP_CP0:      return 4;
 		case OP_CODE10:   return 10;
 		}
@@ -1067,7 +1070,8 @@ struct Asm_rsp {
 		case OP_SIMM16: lo = -32768; hi = 32767; break;
 		case OP_UIMM16: lo = 0;      hi = 65535; break;
 		case OP_SHAMT:  lo = 0;      hi = 31;    break;
-		case OP_CALL26: lo = 0;      hi = 0x0FFFFFFC; break;
+		case OP_CALL26: lo = 0;      hi = whole_microcode ? 0xFFFFFFFC : 0x0FFFFFFC; break;
+		case OP_ADDR16: lo = 0;      hi = 0xFFFFFFFC; break;
 		case OP_CP0:    lo = 0;      hi = 15;    break;
 		case OP_CODE10: lo = 0;      hi = 1023;  break;
 		default:
@@ -1198,7 +1202,9 @@ enum Asm_rsp::Shape : u8 {
 	SH_LUI,        // rt, uimm16                         lui
 	SH_BR2,        // rs, rt, label                      beq bne
 	SH_BR1,        // rs, label                          blez bgtz bltz bgez
-	SH_CALL,       // constant address                   jal
+	SH_BR2_ADDR,   // rs, rt, constant address (whole)   beq bne
+	SH_BR1_ADDR,   // rs, constant address (whole)       blez bgtz bltz bgez
+	SH_CALL,       // constant address                   jal; j (whole Microcode)
 	SH_JUMP,       // label (whole Microcode)            j jal
 	SH_JR,         // rs                                 jr
 	SH_I_LO,       // rt, rs, label (whole Microcode)    addiu
@@ -1231,6 +1237,8 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 	/* SH_LUI      */ RS((OP_GPR,ENC_RT), (OP_UIMM16,ENC_IMM16), N_, N_),
 	/* SH_BR2      */ RS((OP_GPR,ENC_RS), (OP_GPR,ENC_RT), (OP_REL16,ENC_BRANCH16), N_),
 	/* SH_BR1      */ RS((OP_GPR,ENC_RS), (OP_REL16,ENC_BRANCH16), N_, N_),
+	/* SH_BR2_ADDR */ RS((OP_GPR,ENC_RS), (OP_GPR,ENC_RT), (OP_ADDR16,ENC_BRANCH16), N_),
+	/* SH_BR1_ADDR */ RS((OP_GPR,ENC_RS), (OP_ADDR16,ENC_BRANCH16), N_, N_),
 	/* SH_CALL     */ RS((OP_CALL26,ENC_TARGET26), N_, N_, N_),
 	/* SH_JUMP     */ RS((OP_LABEL26,ENC_TARGET26), N_, N_, N_),
 	/* SH_JR       */ RS((OP_GPR,ENC_RS), N_, N_, N_),
@@ -1316,14 +1324,21 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(XORI,   SH_I_U,       0x38000000, 0xFC000000, RSP_SCALAR, RSP_C_W0_R1),
 	R(LUI,    SH_LUI,       0x3C000000, 0xFFE00000, RSP_SCALAR, RSP_C_W0),
 	R(BEQ,    SH_BR2,       0x10000000, 0xFC000000, RSP_SCALAR, RSP_C_BR2),
+	R(BEQ,    SH_BR2_ADDR,  0x10000000, 0xFC000000, RSP_SCALAR, RSP_C_BR2),
 	R(BNE,    SH_BR2,       0x14000000, 0xFC000000, RSP_SCALAR, RSP_C_BR2),
+	R(BNE,    SH_BR2_ADDR,  0x14000000, 0xFC000000, RSP_SCALAR, RSP_C_BR2),
 	R(BLEZ,   SH_BR1,       0x18000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
+	R(BLEZ,   SH_BR1_ADDR,  0x18000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BGTZ,   SH_BR1,       0x1C000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
+	R(BGTZ,   SH_BR1_ADDR,  0x1C000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BLTZ,   SH_BR1,       0x04000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
+	R(BLTZ,   SH_BR1_ADDR,  0x04000000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(BGEZ,   SH_BR1,       0x04010000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
+	R(BGEZ,   SH_BR1_ADDR,  0x04010000, 0xFC1F0000, RSP_SCALAR, RSP_C_BR1),
 	R(JAL,    SH_CALL,      0x0C000000, 0xFC000000, RSP_SCALAR, RSP_C_CALL),
 	R(JAL,    SH_JUMP,      0x0C000000, 0xFC000000, RSP_SCALAR, RSP_C_CALL),
 	R(J,      SH_JUMP,      0x08000000, 0xFC000000, RSP_SCALAR, RSP_C_JUMP),
+	R(J,      SH_CALL,      0x08000000, 0xFC000000, RSP_SCALAR, RSP_C_JUMP),
 	R(JR,     SH_JR,        0x00000008, 0xFC1FFFFF, RSP_SCALAR, RSP_C_JR),
 	R(LB,     SH_MEM,       0x80000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LH,     SH_MEM,       0x84000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
