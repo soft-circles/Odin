@@ -1451,11 +1451,20 @@ gb_internal bool rsp_template_label_operand(CheckerContext *ctx, Entity *tmpl, O
 		return false;
 	}
 	check_entity_decl(ctx, target, target->decl_info, nullptr); // its signature says whether it is whole Microcode
-	operand->expr = expr;
-	operand->mode = Addressing_Invalid;
-	operand->type = t_invalid;
 	String label = sel->Ident.token.string;
 	Operand named = {};
+	// Once reported, the operand is a placeholder constant, the start of `tmpl`, so the
+	// instruction's form still matches and nothing repeats the error; `tmpl` has an
+	// error, so it is not encoded.
+	operand->expr  = expr;
+	operand->mode  = Addressing_Constant;
+	operand->type  = t_untyped_integer;
+	operand->value = exact_value_i64(tmpl->AsmTemplate.rsp_origin);
+	add_type_and_value(ctx, expr, operand->mode, operand->type, operand->value);
+	if (target->type == nullptr || target->type == t_invalid || target->decl_info == nullptr) {
+		error(expr, "'%.*s' has errors, so its label '.%.*s' has no address", LIT(target->token.string), LIT(label));
+		return true;
+	}
 	if (!tmpl->AsmTemplate.is_whole_microcode) {
 		error(expr, "'%.*s.%.*s' is a label's address, which only whole Microcode, @(rsp, rsp_origin = A), may name",
 		      LIT(target->token.string), LIT(label));
@@ -1470,19 +1479,21 @@ gb_internal bool rsp_template_label_operand(CheckerContext *ctx, Entity *tmpl, O
 		error(expr, "'%.*s' is this template; name its own label as '.%.*s'", LIT(target->token.string), LIT(label));
 		return true;
 	}
+	rsp_template_name_use(ctx, tmpl, lhs, target, &named, target->AsmTemplate.rsp_origin);
 	MUTEX_GUARD(&rsp_template_body_mutex);
 	RspTemplateState *st = rsp_template_checked(ctx, target, expr);
-	if (st == nullptr || !st->encoded) {
-		return true; // its check reported why
+	if (st == nullptr) {
+		return true; // a cycle back to `tmpl`, reported
+	}
+	if (!st->encoded) {
+		error(expr, "'%.*s' has errors, so its label '.%.*s' has no address", LIT(target->token.string), LIT(label));
+		return true;
 	}
 	i32 *index = string_map_get(&st->label_words, label);
 	if (index == nullptr) {
 		error(sel, "'%.*s' has no label '.%.*s'", LIT(target->token.string), LIT(label));
 		return true;
 	}
-	rsp_template_name_use(ctx, tmpl, lhs, target, &named, target->AsmTemplate.rsp_origin);
-	operand->mode  = Addressing_Constant;
-	operand->type  = t_untyped_integer;
 	operand->value = exact_value_i64(target->AsmTemplate.rsp_origin + 4*cast(i64)*index);
 	add_type_and_value(ctx, expr, operand->mode, operand->type, operand->value);
 	return true;

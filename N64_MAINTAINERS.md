@@ -422,9 +422,14 @@ saving and restoring it around nested checks. With it set:
   (SH_BR2_ADDR/SH_BR1_ADDR, `OP_ADDR16`) encode `(address - slot) / 4`, the slot
   being `rsp_origin + 4*(index + 1)`, as GNU as and ld encode a branch to an absolute
   symbol; the encoder rejects an unaligned address or one beyond a branch's reach.
-  `tests/rsp_templates/gnu/cross_template.S` is golden.odin's `cross_overlay` for GNU
-  as, which `test_cross_template_matches_gnu_as` diffs when libdragon's
-  `mips64-elf-as` is found; `CROSS_GNU` holds its words for CI.
+  `tests/rsp_templates/gnu/cross_template.S` is `valid.cross_overlay` for GNU as,
+  which `test_cross_template_matches_gnu_as` diffs when libdragon's `mips64-elf-as`
+  is found. golden.odin's `CROSS_GNU` holds GNU as's words, which
+  `test_cross_template_constant_is_gnu_as_words` finds in the n64 IR of `valid/`, so
+  a MIPS-only LLVM, as CI's, checks them too. A literal address in a branch is
+  matched to ld's encoding of an absolute symbol (`--defsym`): GNU as itself
+  rejects a literal branch target out of a REL addend's range, or resolves it
+  against the section.
 - `mfc0`/`mtc0 rt, N` take the CP0 register number 0..15 (`OP_CP0`, bits 15..11),
   and `break` takes an optional code 0..1023 (`OP_CODE10`, bits 25..16).
 - `check_asm_cfg_build` models delay slots as for `#noreorder`

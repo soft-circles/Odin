@@ -9,6 +9,8 @@ Packages under tests/rsp_templates/:
            `// ERROR: <message prefix>`
   golden/  a host program that encodes every form of src/asm_tables_rsp.cpp
            through both the compiler and core:rexcode/isa/rsp and diffs the words
+  gnu/     GNU as source for whole Microcode reaching another one
+           (valid.cross_overlay), diffed when libdragon's mips64-elf-as is found
 
 `odin check` works with any compiler. The golden program and the byte-order IR
 checks need the compiler's LLVM to have the host and target backends; a fork built
@@ -191,6 +193,26 @@ class Check(unittest.TestCase):
                     self.assertEqual(code, 0, output)
                     self.assertEqual(output.strip().splitlines()[-1], "1e208000")
 
+    def test_mutual_label_reference_is_reported_once(self):
+        # Whole Microcode a and b reaching each other's labels: whichever is checked first,
+        # the other's use of it is the cycle, and the first's use is that b has errors.
+        directory = unique_dir("mutual-labels")
+        (directory / "mutual.odin").write_text(
+            "package mutual\n\n"
+            "@(rsp, rsp_origin = 0xA4001000)\na :: asm() -> ! {\n.top:\n\tj     (b).top\n\tnop\n}\n\n"
+            "@(rsp, rsp_origin = 0xA4001100)\nb :: asm() -> ! {\n.top:\n\tj     (a).top\n\tnop\n}\n")
+        for target in ("n64", host_target()):
+            with self.subTest(target=target):
+                code, output = check_package(directory, target)
+                self.assertNotEqual(code, 0)
+                found = diagnostics(output)
+                self.assertEqual(sorted(d[1] for d in found), [6, 13], output)
+                cycle = [d for d in found if "refers to the template being checked" in d[3]]
+                self.assertEqual(len(cycle), 1, output)
+                rest = [d[3] for d in found if d not in cycle]
+                self.assertIn(rest[0], ("'a' has errors, so its label '.top' has no address",
+                                        "'b' has errors, so its label '.top' has no address"), output)
+
     def test_mutual_reference_is_reported_once(self):
         # Whichever of a and b is checked first, the other's use of it is the one error,
         # and nothing repeats it or reports "already pinned".
@@ -285,7 +307,7 @@ class Encode(unittest.TestCase):
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
-                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay"):
+                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay", "cross_package"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 
@@ -385,6 +407,27 @@ class Encode(unittest.TestCase):
                 self.assertEqual(code, 0, output)
                 ir = "".join(p.read_text() for p in directory.glob("*.ll"))
                 self.assertIn(f'c"{word}{line}', ir)
+
+    def test_cross_template_constant_is_gnu_as_words(self):
+        # valid.cross_overlay's constant in n64 IR holds GNU as's words (CROSS_GNU, from
+        # gnu/cross_template.S), each followed by its line, big-endian. Unlike the golden
+        # program this needs only the n64 backend, which a MIPS-only LLVM has.
+        require_backend(self, "n64")
+        golden = (HERE / "golden" / "golden.odin").read_text()
+        block = re.search(r"CROSS_GNU :: \[\?\]u32\{(.*?)\}", golden, re.S).group(1)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-fA-F]{8})", block)]
+        lines = template_instruction_lines(HERE / "valid" / "valid.odin")["cross_overlay"]
+        self.assertEqual(len(words), len(lines))
+        directory = unique_dir("ir-cross")
+        code, output = run_odin("build", HERE / "valid", "-target:n64", "-build-mode:llvm-ir",
+                                "-no-entry-point", "-use-single-module", f"-out:{directory}")
+        self.assertEqual(code, 0, output)
+        ir = "".join(p.read_text() for p in directory.glob("*.ll"))
+        data = b"".join(v.to_bytes(4, "big") for w, line in zip(words, lines) for v in (w, line))
+        # as LLVM prints a c"..." string: printable bytes as they are, but '"' as \\22 and '\\' as \\\\
+        escaped = "".join("\\\\" if b == 0x5C else chr(b) if 0x20 <= b < 0x7f and b != 0x22 else f"\\{b:02X}"
+                          for b in data)
+        self.assertIn(f'c"{escaped}', ir)
 
 
 if __name__ == "__main__":

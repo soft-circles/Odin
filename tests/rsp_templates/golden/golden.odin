@@ -427,41 +427,21 @@ whole_pinned :: asm(p: ^u32) -> ! [p = %sp] {
 
 WHOLE_PINS :: intrinsics.rsp_template_pins(whole_pinned)
 
-// Whole Microcode reaching another one, valid.whole_kernel at 0xA4001000, as an rdpq
-// overlay reaches rspq's kernel: its labels as '(t).label', its start as '(t)', and
-// constant addresses. gnu/cross_template.S is the same code for GNU as, which gives
-// CROSS_GNU, and test_rsp_templates.py diffs the two when mips64-elf-as is found.
-CROSS_ABS :: 0xA4001008
-
+// valid.cross_overlay reaches valid.whole_kernel by its labels, its start and constant
+// addresses; gnu/cross_template.S is the same code for GNU as, whose words CROSS_GNU
+// holds (test_rsp_templates.py diffs the two when mips64-elf-as is found, and checks
+// the n64 constant's bytes against CROSS_GNU). cross_package names them from another
+// package, as '(pkg.t).label', at the same addresses as cross_overlay's words 0 and 20.
 @(rsp, rsp_origin = 0xA4001100)
-cross_overlay :: asm() -> ! {
+cross_package :: asm() -> ! {
 	beq   %at, %v0, (valid.whole_kernel).loop
 	nop
-	bne   %zero, %v1, (valid.whole_kernel).tail
-	nop
-	bgez  %a0, (valid.whole_kernel).loop
-	nop
-	blez  %a1, (valid.whole_kernel).tail
-	nop
-	bgtz  %a3, (valid.whole_kernel)
-	nop
-	bltz  %a2, CROSS_ABS
-	nop
-	jal   (valid.whole_kernel).tail
-	nop
-	jal   0xA4001004
-	nop
-	j     0x1040
-	nop
-.back:
-	j     (valid.whole_kernel)
-	nop
-.last:
 	j     (valid.whole_kernel).loop
 	nop
 }
 
-CROSS :: intrinsics.rsp_template_code(cross_overlay)
+CROSS :: intrinsics.rsp_template_code(valid.cross_overlay)
+CROSS_PACKAGE :: intrinsics.rsp_template_code(cross_package)
 CROSS_GNU :: [?]u32{
 	0x1022ffc0, 0x00000000, 0x1403ffc0, 0x00000000, 0x0481ffbc, 0x00000000, 0x18a0ffbc, 0x00000000,
 	0x1ce0ffb7, 0x00000000, 0x04c0ffb7, 0x00000000, 0x0d000403, 0x00000000, 0x0d000401, 0x00000000,
@@ -950,6 +930,21 @@ compare :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []rsp.Instr
 	}
 }
 
+// Compares the compiler's words with GNU as's, `want`.
+compare_words :: proc(name: string, got: []intrinsics.Rsp_Code_Line, want: []u32) {
+	if len(got) != len(want) {
+		fmt.printfln("%s: %d words from the compiler, %d from GNU as", name, len(got), len(want))
+		failures += 1
+	}
+	for line, i in got {
+		fmt.printfln("%s %d %08x %d", name, i, line.word, line.line)
+		if i < len(want) && line.word != want[i] {
+			fmt.printfln("MISMATCH %s[%d] (line %d): compiler %08x, GNU as %08x", name, i, line.line, line.word, want[i])
+			failures += 1
+		}
+	}
+}
+
 main :: proc() {
 	scalar, labels := expected_scalar()
 	compare("scalar_forms", SCALAR, scalar[:], labels[:])
@@ -1004,18 +999,9 @@ main :: proc() {
 		fmt.printfln("whole_forms: labels tail at %d (.tail at %d) and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_DOT_TAIL, WHOLE_HALT)
 		failures += 1
 	}
-	cross, cross_gnu := CROSS, CROSS_GNU
-	if len(cross) != len(cross_gnu) {
-		fmt.printfln("cross_overlay: %d words from the compiler, %d from GNU as", len(cross), len(cross_gnu))
-		failures += 1
-	}
-	for line, i in cross {
-		fmt.printfln("%s %d %08x %d", "cross_overlay", i, line.word, line.line)
-		if i < len(cross_gnu) && line.word != cross_gnu[i] {
-			fmt.printfln("MISMATCH cross_overlay[%d] (line %d): compiler %08x, GNU as %08x", i, line.line, line.word, cross_gnu[i])
-			failures += 1
-		}
-	}
+	cross_gnu := CROSS_GNU
+	compare_words("cross_overlay", CROSS, cross_gnu[:])
+	compare_words("cross_package", CROSS_PACKAGE, {cross_gnu[0], 0, cross_gnu[20], 0})
 	whole_pins := WHOLE_PINS
 	if len(whole_pins) != 1 || whole_pins[0] != {29, false} {
 		fmt.printfln("whole_pinned: pins %v, want sp", whole_pins)

@@ -564,10 +564,13 @@ cross_bad :: asm() -> ! {
 .top:
 	j     (whole_ok).missing // ERROR: 'whole_ok' has no label '.missing'
 	nop
+.routine:
 	j     (ok).top // ERROR: 'ok' is a routine, which Odin64's generator places; '(t).label' names a label of whole Microcode
 	nop
+.itself:
 	j     (cross_bad).top // ERROR: 'cross_bad' is this template; name its own label as '.top'
 	nop
+.branch:
 	beq   %t0, %t1, (ok) // ERROR: 'ok' is a routine, which Odin64's generator places; whole Microcode
 	nop
 	j     .top
@@ -596,7 +599,24 @@ cross_far :: asm() -> ! {
 	nop
 }
 
-WHOLE_MISSING :: intrinsics.rsp_template_label_offset(whole_ok, "missing") // ERROR: 'whole_ok' has no label '.missing'
+// A label of whole Microcode with errors has no address: its use is one error, which
+// nothing repeats
+@(rsp, rsp_origin = 0xA4001000)
+cross_broken_kernel :: asm() -> ! {
+.top:
+	addiu %t0, %t0, 70000 // ERROR: 'addiu' operand-2 immediate 70000 does not fit
+	j     .top
+	nop
+}
+
+@(rsp, rsp_origin = 0xA4001100)
+cross_to_broken :: asm() -> ! {
+.top:
+	j     (cross_broken_kernel).top // ERROR: 'cross_broken_kernel' has errors, so its label '.top' has no address
+	nop
+}
+
+WHOLE_MISSING ::intrinsics.rsp_template_label_offset(whole_ok, "missing") // ERROR: 'whole_ok' has no label '.missing'
 PLACED_OFFSET :: intrinsics.rsp_template_label_offset(placed, "here") // ERROR: 'rsp_template_label_offset' takes whole Microcode
 
 @(rsp, rsp_origin = 0x1_0000_0000_0000_1000) // ERROR: 'rsp_origin' is a 32-bit address of a word, a multiple of 4
