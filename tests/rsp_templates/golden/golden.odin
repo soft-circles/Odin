@@ -442,6 +442,13 @@ cross_package :: asm() -> ! {
 
 CROSS :: intrinsics.rsp_template_code(valid.cross_overlay)
 CROSS_PACKAGE :: intrinsics.rsp_template_code(cross_package)
+
+// valid.single_lane: GNU as's words for gnu/single_lane.S, through libdragon's rsp.inc
+SINGLE_LANE :: intrinsics.rsp_template_code(valid.single_lane)
+SINGLE_LANE_GNU :: [?]u32{
+	0x4bf14070, 0x4bb15870, 0x4bd649b1, 0x4bbb7af2, 0x4b805c34, 0x4b656575, 0x4b4a6eb6, 0x4be147b3,
+	0x4b4f7ff3,
+}
 CROSS_GNU :: [?]u32{
 	0x1022ffc0, 0x00000000, 0x1403ffc0, 0x00000000, 0x0481ffbc, 0x00000000, 0x18a0ffbc, 0x00000000,
 	0x1ce0ffb7, 0x00000000, 0x04c0ffb7, 0x00000000, 0x0d000403, 0x00000000, 0x0d000401, 0x00000000,
@@ -624,7 +631,7 @@ vu :: proc(m: rsp.Mnemonic, d, s, t: int, element: u8) -> rsp.Instruction {
 // rexcode's single-lane form: vd, the destination lane as a register number (`de`),
 // vt, and the element field 8 + the source lane
 single :: proc(m: rsp.Mnemonic, d, de, t, lane: int) -> rsp.Instruction {
-	inst := rsp.inst_vrcp(vr(d), vr(de), vr(t), u8(8 + lane))
+	inst := rsp.inst_vrcp(vr(d), vr(8 + de), vr(t), u8(8 + lane)) // de as 8|lane, as rsp.inc
 	inst.mnemonic = m
 	return inst
 }
@@ -639,7 +646,7 @@ vls :: proc(m: rsp.Mnemonic, t: int, base: rsp.Register, element: u8, units: i32
 // unroll_operand_forms
 expected_unroll_operands :: proc() -> (code: [dynamic]rsp.Instruction) {
 	for r in 1..=3 {
-		append(&code, single(.VRCP, r, 3, 17, 5), rsp.inst_vsar_acc(vr(r), .HI), rsp.inst_vmov(vr(r), vr(2), vr(4), 9))
+		append(&code, single(.VRCP, r, 3, 17, 5), rsp.inst_vsar_acc(vr(r), .HI), rsp.inst_vmov(vr(r), vr(10), vr(4), 9))
 	}
 	for g, i in ([]int{0, 8, 16, 24}) {
 		append(&code, vls(.LTV, g, rsp.S1, 0, i32(i)), vls(.STV, g, rsp.ZERO, 14, 63))
@@ -760,11 +767,11 @@ expected_vu :: proc() -> (code: [dynamic]rsp.Instruction) {
 		single(.VRSQL, 21, 7, 5, 1),
 		single(.VRSQH, 26, 5, 10, 2),
 		single(.VRSQH, 26, 0, 10, 2),
-		rsp.inst_vmov(vr(0), vr(0), vr(31), 8),
-		rsp.inst_vmov(vr(30), vr(0), vr(1), 15),
-		rsp.inst_vmov(vr(12), vr(0), vr(12), 12),
-		rsp.inst_vmov(vr(1), vr(3), vr(2), 8),
-		rsp.inst_vmov(vr(31), vr(7), vr(15), 10),
+		rsp.inst_vmov(vr(0), vr(8), vr(31), 8),
+		rsp.inst_vmov(vr(30), vr(8), vr(1), 15),
+		rsp.inst_vmov(vr(12), vr(8), vr(12), 12),
+		rsp.inst_vmov(vr(1), vr(11), vr(2), 8),
+		rsp.inst_vmov(vr(31), vr(15), vr(15), 10),
 		rsp.inst_vnop(),
 	)
 	return
@@ -1002,6 +1009,8 @@ main :: proc() {
 	cross_gnu := CROSS_GNU
 	compare_words("cross_overlay", CROSS, cross_gnu[:])
 	compare_words("cross_package", CROSS_PACKAGE, {cross_gnu[0], 0, cross_gnu[20], 0})
+	single_lane_gnu := SINGLE_LANE_GNU
+	compare_words("single_lane", SINGLE_LANE, single_lane_gnu[:])
 	whole_pins := WHOLE_PINS
 	if len(whole_pins) != 1 || whole_pins[0] != {29, false} {
 		fmt.printfln("whole_pinned: pins %v, want sp", whole_pins)

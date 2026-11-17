@@ -10,7 +10,8 @@ Packages under tests/rsp_templates/:
   golden/  a host program that encodes every form of src/asm_tables_rsp.cpp
            through both the compiler and core:rexcode/isa/rsp and diffs the words
   gnu/     GNU as source for whole Microcode reaching another one
-           (valid.cross_overlay), diffed when libdragon's mips64-elf-as is found
+           (valid.cross_overlay) and the single-lane ops through rsp.inc
+           (valid.single_lane), diffed when libdragon's toolchain is found
 
 `odin check` works with any compiler. The golden program and the byte-order IR
 checks need the compiler's LLVM to have the host and target backends; a fork built
@@ -307,7 +308,7 @@ class Encode(unittest.TestCase):
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
-                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay", "cross_package"):
+                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay", "cross_package", "single_lane"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 
@@ -366,6 +367,30 @@ class Encode(unittest.TestCase):
         gnu = [int.from_bytes(text[i:i + 4], "big") for i in range(0, len(text), 4)]
         self.assertEqual([f"{w:08x}" for w in words], [f"{w:08x}" for w in gnu])
 
+    def test_single_lane_matches_gnu_as(self):
+        # valid.single_lane against GNU as on gnu/single_lane.S through libdragon's rsp.inc,
+        # whose single-lane ops write the destination lane in vs as 8|lane
+        tools = {name: gnu_tool(name) for name in ("gcc", "objcopy")}
+        include = Path(os.environ.get("N64_INST", "/nonexistent")) / "mips64-elf" / "include"
+        if None in tools.values() or not (include / "rsp.inc").exists():
+            self.skipTest("libdragon's toolchain and rsp.inc not found ($N64_INST)")
+        target = host_target()
+        require_backend(self, target)
+        code, output = golden_run()
+        self.assertEqual(code, 0, output)
+        words = [int(row.split()[2], 16) for row in output.splitlines()
+                 if len(row.split()) == 4 and row.split()[0] == "single_lane"]
+        work = unique_dir("gnu-single")
+        obj, binary = work / "single.o", work / "single.bin"
+        for args in ([tools["gcc"], "-march=mips1", "-mabi=32", f"-I{include}", "-c", "-o", obj,
+                      HERE / "gnu" / "single_lane.S"],
+                     [tools["objcopy"], "-O", "binary", "-j", ".text", obj, binary]):
+            result = subprocess.run([str(a) for a in args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = binary.read_bytes()
+        gnu = [int.from_bytes(text[i:i + 4], "big") for i in range(0, len(text), 4)]
+        self.assertEqual([f"{w:08x}" for w in words], [f"{w:08x}" for w in gnu])
+
         # intrinsics.rsp_template_location: the declaration's file, line and column
         locations = {}
         for row in output.splitlines():
@@ -408,26 +433,33 @@ class Encode(unittest.TestCase):
                 ir = "".join(p.read_text() for p in directory.glob("*.ll"))
                 self.assertIn(f'c"{word}{line}', ir)
 
-    def test_cross_template_constant_is_gnu_as_words(self):
-        # valid.cross_overlay's constant in n64 IR holds GNU as's words (CROSS_GNU, from
-        # gnu/cross_template.S), each followed by its line, big-endian. Unlike the golden
-        # program this needs only the n64 backend, which a MIPS-only LLVM has.
+    def test_constants_are_gnu_as_words(self):
+        # valid.cross_overlay's and valid.single_lane's constants in n64 IR hold GNU as's
+        # words (golden.odin's CROSS_GNU and SINGLE_LANE_GNU, from gnu/), each followed by
+        # its line, big-endian. Unlike the golden program this needs only the n64 backend,
+        # which a MIPS-only LLVM has.
         require_backend(self, "n64")
-        golden = (HERE / "golden" / "golden.odin").read_text()
-        block = re.search(r"CROSS_GNU :: \[\?\]u32\{(.*?)\}", golden, re.S).group(1)
-        words = [int(w, 16) for w in re.findall(r"0x([0-9a-fA-F]{8})", block)]
-        lines = template_instruction_lines(HERE / "valid" / "valid.odin")["cross_overlay"]
-        self.assertEqual(len(words), len(lines))
-        directory = unique_dir("ir-cross")
+        directory = unique_dir("ir-gnu")
         code, output = run_odin("build", HERE / "valid", "-target:n64", "-build-mode:llvm-ir",
                                 "-no-entry-point", "-use-single-module", f"-out:{directory}")
         self.assertEqual(code, 0, output)
         ir = "".join(p.read_text() for p in directory.glob("*.ll"))
+        for template, constant in (("cross_overlay", "CROSS_GNU"), ("single_lane", "SINGLE_LANE_GNU")):
+            with self.subTest(template=template):
+                self.assertIn(self.ir_string(template, constant), ir)
+
+    def ir_string(self, template, constant):
+        """The start of the c"..." string LLVM prints for `template`'s words, GNU as's `constant`."""
+        golden = (HERE / "golden" / "golden.odin").read_text()
+        block = re.search(constant + r" :: \[\?\]u32\{(.*?)\}", golden, re.S).group(1)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-fA-F]{8})", block)]
+        lines = template_instruction_lines(HERE / "valid" / "valid.odin")[template]
+        self.assertEqual(len(words), len(lines))
         data = b"".join(v.to_bytes(4, "big") for w, line in zip(words, lines) for v in (w, line))
         # as LLVM prints a c"..." string: printable bytes as they are, but '"' as \\22 and '\\' as \\\\
         escaped = "".join("\\\\" if b == 0x5C else chr(b) if 0x20 <= b < 0x7f and b != 0x22 else f"\\{b:02X}"
                           for b in data)
-        self.assertIn(f'c"{escaped}', ir)
+        return f'c"{escaped}'
 
 
 if __name__ == "__main__":
