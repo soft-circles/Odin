@@ -457,6 +457,12 @@ hardware: `ltv`/`stv` take only `%v00`, `%v08`, `%v16` or `%v24` (the RSP uses
 vs = vt = 0; the golden program builds it with rexcode's `inst_vsar_acc`).
 `vmov` takes a destination lane like the other single-lane ops, and so does
 rexcode's `vmov` form: `vmov vd, de, vt, element`, the lane in the vs field.
+Every single-lane op (`vrcp`, `vrcpl`, `vrcph`, `vmov`, `vrsq`, `vrsql`, `vrsqh`)
+writes its destination lane there as 8|lane, as rsp.inc and GNU as do (the RSP
+reads only the low three bits), so the golden program gives rexcode `de` as
+8+lane. `tests/rsp_templates/gnu/single_lane.S` is `valid.single_lane` for GNU
+as with libdragon's rsp.inc, diffed when libdragon's toolchain is found; golden.odin's
+`SINGLE_LANE_GNU` holds its words, which the n64 IR of `valid/` is checked against.
 The golden program in
 [tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
 through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode

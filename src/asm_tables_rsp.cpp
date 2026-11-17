@@ -40,10 +40,9 @@
 //   * Single-lane ops (vrcp vrcpl vrcph vmov vrsq vrsql vrsqh) take two
 //     operands, each with a lane, as rsp.inc's two-operand form does: `vrcp
 //     %v01.e3, %v02.e5` writes lane 3 of %v01 from lane 5 of %v02. The
-//     destination lane goes in the vs field as 0-7 (rexcode's `de`; rsp.inc
-//     writes 8-15, and the RSP reads only its low three bits, so the words
-//     differ from rsp.inc's but behave the same), the source lane in the
-//     element field as 8-15.
+//     destination lane goes in the vs field as 8-15, 8|lane, as rsp.inc and
+//     GNU as write it (the RSP reads only its low three bits), the source lane
+//     in the element field as 8-15.
 //   * vsar reads one slice of the accumulator into vd: `vsar %v01, %acc_hi`
 //     (or %acc_md, %acc_lo), rsp.inc's `vsar vd, COP2_ACC_HI`. The slice is
 //     the element field (8, 9, 10); vs and vt are unused and 0.
@@ -172,7 +171,7 @@ struct Asm_rsp {
 		OP_VR_LS_LANE,  // lpv/luv/spv/suv vt, optional lane element: .e0-.e7 (N)
 		OP_VR_LS_EVEN,  // ltv/stv vt, optional lane element: .e0-.e7 (byte 2N)
 		OP_VR_BYTE,     // mtc2/mfc2 vs, optional byte element: .e0-.e7 (2N) or .b0-.b15 (N)
-		OP_VR_DE,       // single-lane vd, required destination lane: .e0-.e7 (N, in vs)
+		OP_VR_DE,       // single-lane vd, required destination lane: .e0-.e7 (8+N, in vs)
 		OP_VR_LANE,     // single-lane vt, required source lane: .e0-.e7 (8+N)
 		OP_VC,          // a COP2 control register (%vco, %vcc, %vce), only by name
 		OP_ACC,         // vsar's accumulator slice (%acc_hi, %acc_md, %acc_lo), only by name
@@ -934,7 +933,7 @@ struct Asm_rsp {
 			if (kind == 'b' && n <= 15) return cast(i32)n;
 			return -1;
 		case OP_VR_LS_LANE:  // laneAccessorEncoder
-		case OP_VR_DE:       // the destination lane, as rexcode's `de`
+		case OP_VR_DE:       // the destination lane, 0-7; ENC_VD_DE writes it as 8|lane
 			if (kind == 'e' && n <= 7)  return cast(i32)n;
 			return -1;
 		case OP_VR_LS_EVEN:  // laneAsByteAccessorEncoder
@@ -1134,7 +1133,7 @@ struct Asm_rsp {
 		case ENC_VD:          return (reg & 0x1F) << 6;
 		case ENC_VD_DE:
 			if (element > 7) *ok = false;
-			return ((reg & 0x1F) << 6) | ((element & 0x1F) << 11);
+			return ((reg & 0x1F) << 6) | (((8 | element) & 0x1F) << 11); // 8|lane, as rsp.inc
 		case ENC_VS:          return (reg & 0x1F) << 11;
 		case ENC_VS_ELEM:
 			if (element > 15) *ok = false;

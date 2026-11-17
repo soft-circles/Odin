@@ -117,3 +117,23 @@ cross_overlay :: asm() -> ! {
 cross_overlay_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
 	return intrinsics.rsp_template_code(cross_overlay)
 }
+
+// Each single-lane op, whose destination lane is 8|lane in vs, as rsp.inc writes it;
+// gnu/single_lane.S is the same code for GNU as (golden.odin's SINGLE_LANE_GNU)
+@(rsp)
+single_lane :: asm() {
+	vrcp  %v01.e0, %v17.e7
+	vrcp  %v01.e3, %v17.e5
+	vrcpl %v06.e1, %v22.e6
+	vrcph %v11.e7, %v27.e5
+	vrsq  %v16.e3, %v00.e4
+	vrsql %v21.e4, %v05.e3
+	vrsqh %v26.e5, %v10.e2
+	vmov  %v30.e0, %v01.e7
+	vmov  %v31.e7, %v15.e2
+}
+
+@(export)
+single_lane_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
+	return intrinsics.rsp_template_code(single_lane)
+}
