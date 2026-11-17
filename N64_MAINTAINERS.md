@@ -410,8 +410,21 @@ saving and restoring it around nested checks. With it set:
   `A + 4*index`, of which a jump keeps the low 28 bits as GNU as does, and
   `addiu rt, rs, .label` (SH_I_LO, `OP_LABEL_LO16`) its low 16 bits, GNU as's
   `li rt, %lo(label)`. Outside whole Microcode `rsp_check_whole_microcode_forms`
-  rejects the `addiu` form and `rsp_check_routine_calls` the `jal` one, and in
-  whole Microcode `jal` calls only labels.
+  rejects the `addiu` form and `rsp_check_routine_calls` the `jal` one.
+- Whole Microcode reaches another one, as an rdpq overlay reaches rspq's kernel:
+  `(t).label` or `(pkg.t).label` is the constant address `t`'s `rsp_origin + 4*index`
+  of `.label` (`rsp_template_label_operand`, which checks `t` first if the queue has
+  not), and `(t)` is `t`'s `rsp_origin` (`rsp_template_routine_operand`). Either
+  names whole Microcode only, from whole Microcode only; naming a routine there is an
+  error, since Odin64's generator places it. With them or any constant address,
+  `j`/`jal` (SH_CALL, whose `OP_CALL26` in whole Microcode is an address up to
+  0xFFFFFFFC) keep its low 28 bits, and `beq`, `bne`, `blez`, `bgtz`, `bltz`, `bgez`
+  (SH_BR2_ADDR/SH_BR1_ADDR, `OP_ADDR16`) encode `(address - slot) / 4`, the slot
+  being `rsp_origin + 4*(index + 1)`, as GNU as and ld encode a branch to an absolute
+  symbol; the encoder rejects an unaligned address or one beyond a branch's reach.
+  `tests/rsp_templates/gnu/cross_template.S` is golden.odin's `cross_overlay` for GNU
+  as, which `test_cross_template_matches_gnu_as` diffs when libdragon's
+  `mips64-elf-as` is found; `CROSS_GNU` holds its words for CI.
 - `mfc0`/`mtc0 rt, N` take the CP0 register number 0..15 (`OP_CP0`, bits 15..11),
   and `break` takes an optional code 0..1023 (`OP_CODE10`, bits 25..16).
 - `check_asm_cfg_build` models delay slots as for `#noreorder`

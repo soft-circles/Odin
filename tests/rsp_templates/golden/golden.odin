@@ -426,6 +426,47 @@ whole_pinned :: asm(p: ^u32) -> ! [p = %sp] {
 }
 
 WHOLE_PINS :: intrinsics.rsp_template_pins(whole_pinned)
+
+// Whole Microcode reaching another one, valid.whole_kernel at 0xA4001000, as an rdpq
+// overlay reaches rspq's kernel: its labels as '(t).label', its start as '(t)', and
+// constant addresses. gnu/cross_template.S is the same code for GNU as, which gives
+// CROSS_GNU, and test_rsp_templates.py diffs the two when mips64-elf-as is found.
+CROSS_ABS :: 0xA4001008
+
+@(rsp, rsp_origin = 0xA4001100)
+cross_overlay :: asm() -> ! {
+	beq   %at, %v0, (valid.whole_kernel).loop
+	nop
+	bne   %zero, %v1, (valid.whole_kernel).tail
+	nop
+	bgez  %a0, (valid.whole_kernel).loop
+	nop
+	blez  %a1, (valid.whole_kernel).tail
+	nop
+	bgtz  %a3, (valid.whole_kernel)
+	nop
+	bltz  %a2, CROSS_ABS
+	nop
+	jal   (valid.whole_kernel).tail
+	nop
+	jal   0xA4001004
+	nop
+	j     0x1040
+	nop
+.back:
+	j     (valid.whole_kernel)
+	nop
+.last:
+	j     (valid.whole_kernel).loop
+	nop
+}
+
+CROSS :: intrinsics.rsp_template_code(cross_overlay)
+CROSS_GNU :: [?]u32{
+	0x1022ffc0, 0x00000000, 0x1403ffc0, 0x00000000, 0x0481ffbc, 0x00000000, 0x18a0ffbc, 0x00000000,
+	0x1ce0ffb7, 0x00000000, 0x04c0ffb7, 0x00000000, 0x0d000403, 0x00000000, 0x0d000401, 0x00000000,
+	0x08000410, 0x00000000, 0x09000400, 0x00000000, 0x09000401, 0x00000000,
+}
 FILL_ADDRESS :: intrinsics.rsp_template_address(valid.fill)
 SCALAR_ADDRESS :: intrinsics.rsp_template_address(scalar_forms)
 FILL_PINS :: intrinsics.rsp_template_pins(valid.fill)
@@ -962,6 +1003,18 @@ main :: proc() {
 	if WHOLE_TAIL != 44 || WHOLE_HALT != 36 || WHOLE_DOT_TAIL != 44 {
 		fmt.printfln("whole_forms: labels tail at %d (.tail at %d) and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_DOT_TAIL, WHOLE_HALT)
 		failures += 1
+	}
+	cross, cross_gnu := CROSS, CROSS_GNU
+	if len(cross) != len(cross_gnu) {
+		fmt.printfln("cross_overlay: %d words from the compiler, %d from GNU as", len(cross), len(cross_gnu))
+		failures += 1
+	}
+	for line, i in cross {
+		fmt.printfln("%s %d %08x %d", "cross_overlay", i, line.word, line.line)
+		if i < len(cross_gnu) && line.word != cross_gnu[i] {
+			fmt.printfln("MISMATCH cross_overlay[%d] (line %d): compiler %08x, GNU as %08x", i, line.line, line.word, cross_gnu[i])
+			failures += 1
+		}
 	}
 	whole_pins := WHOLE_PINS
 	if len(whole_pins) != 1 || whole_pins[0] != {29, false} {

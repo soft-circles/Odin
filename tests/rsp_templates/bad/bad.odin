@@ -51,8 +51,8 @@ profile :: asm() {
 	lwv   %v01, [%s1] // ERROR: 'lwv' is not implemented by the RSP; LWC2 sub-opcode 0x0a does nothing
 	swv   %v01, [%s1]
 	mult  %t0, %t1 // ERROR: Unknown mnemonic for this target platform: mult
-	bgtz  %t0, 4 // ERROR: 'bgtz' operands
-	beq   %t0, %t1, 4 // ERROR: 'beq' operands
+	bgtz  %t0, 4 // ERROR: 'bgtz' branches to a constant address only in whole Microcode
+	beq   %t0, %t1, 4 // ERROR: 'beq' branches to a constant address only in whole Microcode
 	bne   %t0, %t1, .end
 .end:
 }
@@ -540,7 +540,7 @@ string_origin :: asm() {
 @(rsp, rsp_origin = 0xA4001000)
 whole :: asm() -> ! {
 .top:
-	jal   (ok) // ERROR: 'jal' in whole Microcode calls a label of the template
+	jal   (ok) // ERROR: 'ok' is a routine, which Odin64's generator places; whole Microcode
 	nop
 	mfc0  %t0, 16 // ERROR: 'mfc0' operand-1
 	mtc0  %t0, %t1 // ERROR: 'mtc0' operands
@@ -553,6 +553,45 @@ whole :: asm() -> ! {
 @(rsp, rsp_origin = 0xA4001000)
 whole_ok :: asm() -> ! {
 .top:
+	j     .top
+	nop
+}
+
+// Whole Microcode reaching another one: '(t).label' and '(t)' name whole Microcode only,
+// from whole Microcode only, and the encoder bounds what a jump or branch reaches
+@(rsp, rsp_origin = 0xA4001100)
+cross_bad :: asm() -> ! {
+.top:
+	j     (whole_ok).missing // ERROR: 'whole_ok' has no label '.missing'
+	nop
+	j     (ok).top // ERROR: 'ok' is a routine, which Odin64's generator places; '(t).label' names a label of whole Microcode
+	nop
+	j     (cross_bad).top // ERROR: 'cross_bad' is this template; name its own label as '.top'
+	nop
+	beq   %t0, %t1, (ok) // ERROR: 'ok' is a routine, which Odin64's generator places; whole Microcode
+	nop
+	j     .top
+	nop
+}
+
+@(rsp)
+cross_placed :: asm() {
+	beq   %t0, %t1, (whole_ok).top // ERROR: 'whole_ok.top' is a label's address, which only whole Microcode
+	bne   %t0, %t1, .end
+.end:
+}
+
+@(rsp, rsp_origin = 0xA4001100)
+cross_unaligned :: asm() -> ! {
+	j     0xA4001002 // ERROR: 'j' jumps to 0xa4001002, which is not word-aligned
+	nop
+}
+
+@(rsp, rsp_origin = 0xA4001100)
+cross_far :: asm() -> ! {
+.top:
+	beq   %t0, %t1, 0xA4040000 // ERROR: 'beq' branches 64447 instructions to 0xa4040000, beyond the -32768..=32767
+	nop
 	j     .top
 	nop
 }

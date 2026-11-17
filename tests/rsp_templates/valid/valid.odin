@@ -67,3 +67,16 @@ transform_words :: proc "contextless" () -> (count: int, first: u32, line: i32) 
 	code := TRANSFORM
 	return len(code), code[0].word, code[0].line
 }
+
+// Whole Microcode another one reaches by its labels, as an rdpq overlay reaches rspq's
+// kernel: golden.odin's cross_overlay, whose words gnu/cross_template.S gives
+@(rsp, rsp_origin = 0xA4001000)
+whole_kernel :: asm() -> ! {
+	nop
+.loop:
+	nop
+	nop
+.tail:
+	jr    %ra
+	nop
+}

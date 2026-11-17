@@ -461,7 +461,40 @@ gb_internal bool rsp_template_encode(Entity *e, Array<RspCodeLine> *out, StringM
 					error(expr, "Expected a constant immediate in an @(rsp) template");
 					return false;
 				}
+				if (type == Asm_rsp::OP_CALL26 && e->AsmTemplate.is_whole_microcode) {
+					// j/jal to a constant address, such as another whole Microcode's label: as
+					// GNU as encodes it, the jump keeps the low 28 bits
+					if ((value & 3) != 0) {
+						error(expr, "'%.*s' jumps to 0x%llx, which is not word-aligned",
+						      LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]), cast(unsigned long long)value);
+						return false;
+					}
+					value &= 0x0FFFFFFF;
+				}
 				break;
+			case Asm_rsp::OP_ADDR16: {
+				// whole Microcode only (rsp_check_whole_microcode_forms): a branch to a constant
+				// address, such as another whole Microcode's label, relative to the slot's address
+				// as GNU as and ld encode a branch to an absolute symbol
+				i64 address = 0;
+				if (!rsp_template_constant(expr, &address)) {
+					error(expr, "Expected a constant address in an @(rsp) template");
+					return false;
+				}
+				i64 slot = e->AsmTemplate.rsp_origin + 4*cast(i64)(pc + 1);
+				if ((address & 3) != 0) {
+					error(expr, "'%.*s' branches to 0x%llx, which is not word-aligned",
+					      LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]), cast(unsigned long long)address);
+					return false;
+				}
+				value = (address - slot) / 4;
+				if (value < -32768 || value > 32767) {
+					error(expr, "'%.*s' branches %lld instructions to 0x%llx, beyond the -32768..=32767 a branch reaches",
+					      LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]), cast(long long)value, cast(unsigned long long)address);
+					return false;
+				}
+				break;
+			}
 			case Asm_rsp::OP_MEM:
 			case Asm_rsp::OP_VMEM: {
 				Ast *m = unparen_expr(expr);
@@ -1361,13 +1394,10 @@ gb_internal Entity *rsp_template_routine_named(Entity *tmpl, Ast *expr) {
 	return found;
 }
 
-// An operand naming another @(rsp) template is that routine's address, a constant.
-gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr) {
-	Entity *routine = rsp_template_routine_named(tmpl, expr);
-	if (routine == nullptr) {
-		return false;
-	}
-	Ast *inner = unparen_expr(expr);
+// Records the uses of `(routine)` or `(pkg.routine)`, which rsp_template_routine_named
+// found to name `routine`, and gives it and its inner expression the constant `value`.
+gb_internal void rsp_template_name_use(CheckerContext *ctx, Entity *tmpl, Ast *paren, Entity *routine, Operand *operand, i64 value) {
+	Ast *inner = unparen_expr(paren);
 	Ast *named = inner;
 	if (inner->kind == Ast_SelectorExpr) {
 		Ast *lhs = unparen_expr(inner->SelectorExpr.expr);
@@ -1378,8 +1408,82 @@ gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl,
 	add_entity_use(ctx, named, routine);
 	operand->mode  = Addressing_Constant;
 	operand->type  = t_untyped_integer;
-	operand->value = exact_value_i64(rsp_routine_address(routine));
+	operand->value = exact_value_i64(value);
 	add_type_and_value(ctx, inner, operand->mode, operand->type, operand->value);
+	add_type_and_value(ctx, paren, operand->mode, operand->type, operand->value);
+}
+
+// An operand naming another @(rsp) template is that routine's address, a constant. In
+// whole Microcode, which reaches only real addresses, one naming another whole Microcode
+// is its rsp_origin, its first instruction, and one naming a routine is an error.
+gb_internal bool rsp_template_routine_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr) {
+	Entity *routine = rsp_template_routine_named(tmpl, expr);
+	if (routine == nullptr) {
+		return false;
+	}
+	if (tmpl->AsmTemplate.is_whole_microcode) {
+		check_entity_decl(ctx, routine, routine->decl_info, nullptr); // its signature says whether it is whole Microcode
+	}
+	i64 value = 0;
+	if (!tmpl->AsmTemplate.is_whole_microcode) {
+		value = rsp_routine_address(routine);
+	} else if (routine->AsmTemplate.is_whole_microcode) {
+		value = routine->AsmTemplate.rsp_origin;
+	} else {
+		error(expr, "'%.*s' is a routine, which Odin64's generator places; whole Microcode, @(rsp, rsp_origin = A), "
+		      "reaches another whole Microcode's start as '(t)' or its label as '(t).label'", LIT(routine->token.string));
+	}
+	rsp_template_name_use(ctx, tmpl, expr, routine, operand, value);
+	return true;
+}
+
+// `(t).label` or `(pkg.t).label` in whole Microcode: the address of `.label` in whole
+// Microcode `t`, `t`'s rsp_origin + 4*index, a constant, such as rspq's kernel loop an
+// overlay jumps back to. It checks `t` now, if the queue has not, for its label indices.
+gb_internal bool rsp_template_label_operand(CheckerContext *ctx, Entity *tmpl, Operand *operand, Ast *expr) {
+	if (expr == nullptr || expr->kind != Ast_SelectorExpr) {
+		return false;
+	}
+	Ast *lhs = expr->SelectorExpr.expr;
+	Ast *sel = expr->SelectorExpr.selector;
+	Entity *target = rsp_template_routine_named(tmpl, lhs);
+	if (target == nullptr || sel == nullptr || sel->kind != Ast_Ident) {
+		return false;
+	}
+	check_entity_decl(ctx, target, target->decl_info, nullptr); // its signature says whether it is whole Microcode
+	operand->expr = expr;
+	operand->mode = Addressing_Invalid;
+	operand->type = t_invalid;
+	String label = sel->Ident.token.string;
+	Operand named = {};
+	if (!tmpl->AsmTemplate.is_whole_microcode) {
+		error(expr, "'%.*s.%.*s' is a label's address, which only whole Microcode, @(rsp, rsp_origin = A), may name",
+		      LIT(target->token.string), LIT(label));
+		return true;
+	}
+	if (!target->AsmTemplate.is_whole_microcode) {
+		error(lhs, "'%.*s' is a routine, which Odin64's generator places; '(t).label' names a label of whole Microcode, "
+		      "@(rsp, rsp_origin = A)", LIT(target->token.string));
+		return true;
+	}
+	if (target == tmpl) {
+		error(expr, "'%.*s' is this template; name its own label as '.%.*s'", LIT(target->token.string), LIT(label));
+		return true;
+	}
+	MUTEX_GUARD(&rsp_template_body_mutex);
+	RspTemplateState *st = rsp_template_checked(ctx, target, expr);
+	if (st == nullptr || !st->encoded) {
+		return true; // its check reported why
+	}
+	i32 *index = string_map_get(&st->label_words, label);
+	if (index == nullptr) {
+		error(sel, "'%.*s' has no label '.%.*s'", LIT(target->token.string), LIT(label));
+		return true;
+	}
+	rsp_template_name_use(ctx, tmpl, lhs, target, &named, target->AsmTemplate.rsp_origin);
+	operand->mode  = Addressing_Constant;
+	operand->type  = t_untyped_integer;
+	operand->value = exact_value_i64(target->AsmTemplate.rsp_origin + 4*cast(i64)*index);
 	add_type_and_value(ctx, expr, operand->mode, operand->type, operand->value);
 	return true;
 }
@@ -1401,11 +1505,8 @@ gb_internal void rsp_check_routine_calls(Entity *e) {
 		Ast *target = unparen_expr(instr->operands[0]);
 		bool is_label = target != nullptr && target->kind == Ast_AsmLabelDecl;
 		if (e->AsmTemplate.is_whole_microcode) {
-			if (!is_label) {
-				gbString s = expr_to_string(instr->operands[0]);
-				error(instr->name, "'jal' in whole Microcode calls a label of the template, as 'jal .label'; '%s' is not one", s);
-				gb_string_free(s);
-			}
+			// a label of the template, or a constant address: another whole Microcode's
+			// label, '(t).label' (rsp_template_label_operand), or start, '(t)'
 			continue;
 		}
 		if (is_label) {
@@ -1455,6 +1556,10 @@ gb_internal void rsp_check_whole_microcode_forms(Entity *e) {
 			if (type == Asm_rsp::OP_LABEL26 || type == Asm_rsp::OP_LABEL_LO16) {
 				error(instr->operands[i], "'%.*s' takes a label's address only in whole Microcode, @(rsp, rsp_origin = A), "
 				      "whose address the compiler knows", LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]));
+			} else if (type == Asm_rsp::OP_ADDR16) {
+				error(instr->operands[i], "'%.*s' branches to a constant address only in whole Microcode, "
+				      "@(rsp, rsp_origin = A), whose address the compiler knows; elsewhere it branches to a label of the template",
+				      LIT(g_asm_rsp.mnemonic_strings[instr->mnemonic]));
 			}
 		}
 	}
