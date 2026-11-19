@@ -1086,6 +1086,15 @@ class Traps(unittest.TestCase):
                                           ("R_MIPS_GPREL16", "symbol_word"), ("R_MIPS_GPREL16", "symbol_word"),
                                           ("R_MIPS_26", "symbol_foreign_proc")])
 
+    def test_foreign_declaration_shares_its_definition(self):
+        # link_names/ foreign-declares shared_word and shared_proc, which exporter/ defines and exports; in one
+        # module the second LLVM value of a name used to be renamed (shared_word.1), leaving the name undefined.
+        ir = build_ir("link_names")[1]  # -use-single-module
+        self.assertRegex(ir, r"(?m)^@shared_word = [^\n]*global i32 7")
+        self.assertRegex(ir, r"(?m)^define [^\n]*@shared_proc\(")
+        self.assertNotIn("shared_word.1", ir)
+        self.assertNotIn("shared_proc.1", ir)
+
     def test_regress_checks_without_diagnostics(self):
         # exception_handler reads the #preserve'd %ra, %hi and %lo at entry and restores them before eret, and
         # symbol_operands writes %a0 in a jal's delay slot: none of it is an undefined read or a dead write.

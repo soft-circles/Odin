@@ -303,6 +303,11 @@ Preserve these guarantees:
   `%gp_rel($N)($$28)` in memory, so the assembler emits `R_MIPS_26`,
   `HI16`/`LO16` or `GPREL16`. `la` is a two-word macro, never a delay-slot
   instruction.
+- A `foreign` proc or variable and an Odin definition with its link name are
+  one LLVM value in a module (`lb_create_procedure`, `lb_create_global_variable`),
+  as the linker makes them across objects; otherwise `-use-single-module`
+  renames the later one (`name.1`) and the definition goes missing from the
+  link. `link_names/` pins it.
 - `may_read_all_after` marks a `j`/`jal` to a symbol and `eret`: the code they
   reach may read any register, so `check_asm_cfg` keeps every tracked register
   live out of their block and reports no dead write before them. A `#preserve`d
