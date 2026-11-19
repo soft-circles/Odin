@@ -20,6 +20,8 @@ struct lbAsmGenerate {
 
 	PtrSet<Entity *>      lane_written;
 
+	PtrMap<Entity *, i32> symbol_numbers; // MIPS: each proc or global the body names -> its 's' operand's $N
+
 	enum WriteOperandFlags : u32 {
 		WriteOperandFlag_PrintPrefixes  = 1<<0,
 		WriteOperandFlag_IsScale        = 1<<1,
@@ -47,6 +49,7 @@ struct lbAsmGenerate {
 		this->asm_string  = gb_string_make_reserve(heap_allocator(), 256);
 		this->constraints = gb_string_make_reserve(heap_allocator(), 64);
 		map_init(&this->label_numbers);
+		map_init(&this->symbol_numbers);
 
 		// Pre-scan the body: any `dst[i]` operand written by INS marks its base
 		// entity as lane-written.
@@ -70,6 +73,7 @@ struct lbAsmGenerate {
 		gb_string_free(this->asm_string);
 		gb_string_free(this->constraints);
 		map_destroy(&this->label_numbers);
+		map_destroy(&this->symbol_numbers);
 		map_destroy(&this->label_def_pos);
 		ptr_set_destroy(&this->lane_written);
 	}
@@ -421,6 +425,17 @@ struct lbAsmGenerate {
 				}
 			}
 			op_number[i] = next_op++;
+		}
+
+		// Pass 3: the procs and globals the body names, as 's' operands the assembler writes as their symbols
+		for (Entity *sym : this->tmpl_entity->AsmTemplate.symbols) {
+			lbValue v = sym->kind == Entity_Procedure ? lb_find_procedure_value_from_entity(m, sym)
+			                                          : lb_find_value_from_entity(m, sym);
+			GB_ASSERT_MSG(v.value != nullptr, "asm: no value for symbol '%.*s'", LIT(sym->token.string));
+			sep();
+			raw("s");
+			add_input_value(&param_types, &call_args, v.value);
+			map_set(&this->symbol_numbers, sym, next_op++);
 		}
 
 		// AArch64 uses numeric local labels for internal branches; resolve each label's
@@ -2560,9 +2575,13 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 		}
 		switch (op->kind) {
 		case_ast_node(i, Ident, op);
+			Entity *e = entity_of_node(op);
+			if (i32 *sym = map_get(&this->symbol_numbers, e)) {
+				asm_string = gb_string_append_fmt(asm_string, "$%d", *sym);
+				break;
+			}
 			// GPRs and FPRs have no named sub-registers, so a width-view is just
 			// the source operand's register.
-			Entity *e = entity_of_node(op);
 			auto *ed = entity_op(e);
 			i32 idx = (ed->view_of >= 0) ? op_number[ed->view_of] : op_number[ed->total_index];
 			GB_ASSERT(idx >= 0);
@@ -2591,7 +2610,17 @@ struct lbAsmGenerate_mips : lbAsmGenerate {
 		GB_ASSERT_MSG(mem_op->segment_override == nullptr, "asm: MIPS has no segment overrides");
 		auto const &cl = mem_op->classify;
 		GB_ASSERT_MSG(cl.index == nullptr && cl.scale == nullptr, "asm: MIPS memory operands have no index/scale");
-		GB_ASSERT_MSG(cl.label == nullptr, "asm: MIPS memory operands cannot be labels");
+		if (cl.label != nullptr) {
+			// `[%gp + sym]`, which the checker allows with no other term
+			i32 *sym = map_get(&this->symbol_numbers, entity_of_node(cl.label));
+			GB_ASSERT_MSG(sym != nullptr, "asm: MIPS memory operands name only symbols");
+			asm_string = gb_string_append_fmt(asm_string, "%%gp_rel($%d)(", *sym);
+			this->in_memory_operand = true;
+			this->write_operand(op_number, cl.base, flags);
+			this->in_memory_operand = false;
+			write_cstr(")");
+			return;
+		}
 
 		isize start_len = gb_string_length(asm_string);
 		for (Ast *term_ast : mem_op->terms) {

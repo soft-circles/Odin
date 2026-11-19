@@ -129,6 +129,8 @@ struct AsmInstructionFacts {
 	bool is_control;
 	bool is_conditional;
 	bool is_terminal;
+	bool may_read_all_after; // MIPS `j` to a symbol, or `eret`: the code it reaches may read any register
+	bool calls_symbol;       // MIPS `jal` to a symbol: the callee reads the %ra it writes
 
 	Entity *branch_target;
 	i32     block_id;
@@ -197,6 +199,17 @@ struct AsmCfg {
 	// skipped rather than reported against values the failed instruction may set.
 	bool has_unchecked_instructions;
 };
+
+// Whether the block ends in a jump to a symbol, or an eret, whose target may read any register.
+gb_internal bool check_asm_cfg_block_reaches_any_reader(AsmCfg const *cfg, AsmBlock const &b) {
+	for (i32 ii = b.first; ii <= b.last; ii++) {
+		AsmInstructionFacts *f = cfg->insts[ii]->facts;
+		if (f != nullptr && f->may_read_all_after) {
+			return true;
+		}
+	}
+	return false;
+}
 
 gb_internal void asm_cfg_init(AsmCfg *cfg) {
 	map_init(&cfg->entity_to_index);
@@ -666,7 +679,8 @@ gb_internal void check_asm_cfg_analyse(AsmCtx *asm_ctx, AsmCfg *cfg, CheckerCont
 	}
 	seed_regs |= preserve_bits;
 	{
-		u8 full = cast(u8)asm_check_pointer_bits();
+		// A preserved register holds the caller's whole value: all 64 bits of a MIPS III GPR, whatever the pointer size.
+		u8 full = cast(u8)(asm_check_arch() == TargetArch_mips32be ? 64 : asm_check_pointer_bits());
 		for (i32 idx = 0; idx < ASM_WIDTH_REG_COUNT; idx++) {
 			if (preserve_bits & cast(u16)(1u << idx)) {
 				entry_seed_w.e[idx] = gb_max(entry_seed_w.e[idx], full);
@@ -1209,6 +1223,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 			if (check_asm_cfg_block_leaves(cfg, cast(i32)bi)) {
 				lo |= exit_live;
 			}
+			if (check_asm_cfg_block_reaches_any_reader(cfg, b)) {
+				lo |= REG_TOP; // what a delay slot writes reaches the code the block jumps to
+			}
 
 			u16 live = lo;
 			for (i32 ii = b.last; ii >= b.first; ii--) {
@@ -1217,6 +1234,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 					continue;
 				}
 				live = (live & ~asm_full_kill_mask(f)) | (f->read_regs & REG_TOP);
+				if (f->may_read_all_after) {
+					live |= REG_TOP;
+				}
 			}
 
 			if (lo != live_out[bi] || live != live_in[bi]) {
@@ -1251,6 +1271,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 		if (check_asm_cfg_block_leaves(cfg, cast(i32)bi)) {
 			live |= exit_live; // already folded above, but harmless
 		}
+		if (check_asm_cfg_block_reaches_any_reader(cfg, b)) {
+			live |= REG_TOP;
+		}
 		for (i32 ii = b.last; ii >= b.first; ii--) {
 			AsmInstructionFacts *f = cfg->insts[ii]->facts;
 			if (f == nullptr) {
@@ -1260,7 +1283,10 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 			// A register this instruction writes but that is not live afterward,
 			// and that it does not itself read (self-use like `xor r,r` or `add r,x`) is a dead write.
 			u16 kill = asm_full_kill_mask(f);
-			u16 dead = kill & ~live_after & ~f->read_regs;
+			u16 dead = f->may_read_all_after ? 0 : kill & ~live_after & ~f->read_regs;
+			if (f->calls_symbol) {
+				dead &= ~cast(u16)asm_ctx->clobber_bit_for_reg_name(str_lit("ra")); // the callee reads it to return
+			}
 			for (u16 bit = 1; bit != 0; bit <<= 1) {
 				if ((dead & bit) == 0) {
 					continue;
@@ -1277,6 +1303,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 				}
 			}
 			live = (live & ~kill) | (f->read_regs & REG_TOP);
+			if (f->may_read_all_after) {
+				live |= REG_TOP;
+			}
 		}
 	}
 

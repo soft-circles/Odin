@@ -322,6 +322,13 @@ package n64_asm_coverage
 	return t()
 }
 
+@(export) la_target: u32
+
+@(export) enc_la :: proc "contextless" () -> rawptr {
+	t :: asm() -> (r: rawptr) [r = %v0] { la r, la_target }
+	return t()
+}
+
 @(export) enc_li_small :: proc "contextless" () -> u32 {
 	t :: asm() -> (r: u32) [r = %v0] { li r, -5 }
 	return t()

@@ -469,6 +469,21 @@ gb_internal AsmRegClass check_asm_reg_class_from_type(Type *type) {
 	return AsmRegClass_Unknown;
 }
 
+// A proc, a global variable or a `foreign` symbol named in a MIPS template: a jump, call or address target the
+// linker resolves, passed to the inline asm as an 's' operand.
+gb_internal bool asm_entity_is_symbol(Entity *e) {
+	if (e == nullptr) {
+		return false;
+	}
+	switch (e->kind) {
+	case Entity_Procedure:
+		return true;
+	case Entity_Variable:
+		return e->Variable.is_global || e->Variable.is_foreign;
+	}
+	return false;
+}
+
 gb_internal AsmOperandKind determine_asm_operand_kind(Operand const *operand) {
 	if (operand->mode == Addressing_Constant) {
 		return AsmOperand_Immediate;
@@ -492,6 +507,9 @@ gb_internal AsmOperandKind determine_asm_operand_kind(Operand const *operand) {
 		Entity *e = entity_of_node(expr);
 		if (e != nullptr && e->kind == Entity_Variable && (e->flags & EntityFlag_PolyConst) != 0) {
 			return AsmOperand_Immediate;
+		}
+		if (asm_entity_is_symbol(e)) {
+			return AsmOperand_Symbol;
 		}
 		return AsmOperand_Register;
 	case_end;
@@ -517,6 +535,8 @@ gb_internal bool asm_operand_kind_fits(AsmOperandKind dst, AsmOperandKind src) {
 		return src == AsmOperand_Register || src == AsmOperand_Memory;
 	case AsmOperand_RegisterShift:
 		return src == AsmOperand_Register;
+	case AsmOperand_JumpTarget:
+		return src == AsmOperand_Label || src == AsmOperand_Symbol;
 	}
 	return false;
 }
@@ -707,6 +727,10 @@ template <typename AsmCtx>
 gb_internal bool check_asm_operand_size_class(AsmCtx *asm_ctx, typename AsmCtx::OperandType slot, Operand const *operand,
                                               AsmMismatch *mismatch_, i32 *want_bits_, i32 *got_bits_) {
 	if (mismatch_) *mismatch_ = AsmMismatch_None;
+
+	if (determine_asm_operand_kind(operand) == AsmOperand_Symbol) {
+		return true; // an address the linker fills in; the slot's kind already took it
+	}
 
 	AsmOperandKind slot_kind = asm_ctx->kind_from_operand_type(slot);
 	if (slot_kind == AsmOperand_Immediate) {
@@ -1999,7 +2023,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			AsmRegClass    c = asm_ctx->operand_type_reg_class(slot);
 			i32            w = asm_ctx->operand_type_bit_width(slot);
 
-			if (k == AsmOperand_Label) {
+			if (k == AsmOperand_Label || k == AsmOperand_JumpTarget) {
 				s = gb_string_appendc(s, "label");
 			} else if (k == AsmOperand_Immediate) {
 				s = (w > 0) ? gb_string_append_fmt(s, "imm%d", cast(int)w)
@@ -2046,6 +2070,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			if (max_count > 1) {
 				switch (k) {
 				case AsmOperand_Label: // 5 characters
+				case AsmOperand_JumpTarget:
 					break;
 				case AsmOperand_Immediate: // 3+ characters
 				case AsmOperand_Register_Or_Memory:
@@ -2085,6 +2110,7 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 			AsmOperandKind k = asm_ctx->kind_from_operand_type(slot);
 			switch (k) {
 			case AsmOperand_Label:
+			case AsmOperand_JumpTarget:
 			case AsmOperand_Register:
 			case AsmOperand_RegisterShift:
 			case AsmOperand_Lane:
@@ -2527,6 +2553,25 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		auto clobber = clobber_forms[valid_form_index];
 
 		facts->read_regs = cast(u16)clobber.implicit_rd & asm_ctx->CLOBBER_REGS_NAMED;
+		if (clobber.has_control() && asm_check_arch() == TargetArch_mips32be) {
+			for_array(i, operands) {
+				if (determine_asm_operand_kind(&operands[i]) != AsmOperand_Symbol) {
+					continue;
+				}
+				// Code outside the template may read or write any memory, as for jalr.
+				ate->clobber_memory = true;
+				ate->is_volatile = true;
+				ate->has_observable_side_effect = true;
+				if (instr->mnemonic == Asm_mips::M_JAL) {
+					facts->calls_symbol = true; // the callee reads the %ra the jal writes, and returns
+				} else {
+					facts->may_read_all_after = true; // `j sym` hands every register to the code there
+				}
+			}
+			if (instr->mnemonic == Asm_mips::M_ERET) {
+				facts->may_read_all_after = true; // the code an exception interrupted
+			}
+		}
 
 		// NOTE(bill): reads_mem/writes_mem are per-FORM capability bits.
 		// A form with an r/m slot (e.g. add r/m32, imm32) carries them even
@@ -3115,6 +3160,9 @@ gb_internal AsmTermCategory check_asm_mem_term_category(Operand *o, Array<AsmTem
 		return AsmTermCategory_Const;
 	}
 	Entity *pe = entity_of_node(o->expr);
+	if (o->mode == Addressing_Value && asm_entity_is_symbol(pe)) {
+		return AsmTermCategory_Label; // MIPS `[%gp + sym]`; elsewhere the operand was already rejected
+	}
 	if (pe != nullptr && pe->kind == Entity_Variable) {
 		switch (check_asm_find_kind(pe, decls)) {
 		case AsmTemplateEntityDecl_Immediate:
@@ -3230,6 +3278,31 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		// NOTE(bill): resolved like any other identifier, as the constant may not have been checked yet,
 		// e.g. one declared later in the same block, or one in a lazy file
 		found = resolve_alias_entity(ctx, found, nullptr);
+		if (asm_entity_is_symbol(found) && ate->arch == AsmTemplateArch_Target && asm_check_arch() == TargetArch_mips32be) {
+			GB_ASSERT(ctx->scope == param_scope->parent);
+			check_ident(ctx, operand, expr, nullptr, nullptr, false);
+			if (operand->mode == Addressing_Invalid) {
+				return;
+			}
+			if (found->kind == Entity_Procedure && is_type_polymorphic(found->type)) {
+				error(expr, "A polymorphic proc '%.*s' cannot be named within an 'asm' template", LIT(i->token.string));
+				operand->mode = Addressing_Invalid;
+				return;
+			}
+			i->entity = found;
+			if (ate->symbols.data == nullptr) {
+				array_init(&ate->symbols, heap_allocator());
+			}
+			bool seen = false;
+			for (Entity *s : ate->symbols) {
+				seen |= s == found;
+			}
+			if (!seen) {
+				array_add(&ate->symbols, found);
+			}
+			operand->mode = Addressing_Value;
+			return;
+		}
 		if (found->kind == Entity_Constant) {
 			GB_ASSERT(ctx->scope == param_scope->parent);
 			check_ident(ctx, operand, expr, nullptr, nullptr, false);
@@ -3452,6 +3525,29 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 		mem_op->classify.has_disp_const = has_disp_const;
 		mem_op->classify.ok             = class_ok;
 
+		if (label_node != nullptr && ate->arch == AsmTemplateArch_Target && asm_check_arch() == TargetArch_mips32be) {
+			// MIPS reaches a symbol through memory only as `[%gp + sym]`: its %gp_rel offset, as GAS does for small data.
+			bool gp_base = base.expr != nullptr && base.expr->kind == Ast_AsmRegister &&
+			               (base.expr->AsmRegister.name.string == "gp" || base.expr->AsmRegister.name.string == "28");
+			Entity *sym = entity_of_node(label_node);
+			bool negated = false;
+			for (Ast *term_ast : mem_op->terms) {
+				if (term_ast != nullptr && term_ast->kind == Ast_AsmMemoryTerm && term_ast->AsmMemoryTerm.operand == label_node) {
+					negated = term_ast->AsmMemoryTerm.op.kind == Token_Sub;
+				}
+			}
+			if (!asm_entity_is_symbol(sym)) {
+				error(label_node, "A MIPS memory operand cannot name a template label");
+				mem_op->classify.ok = false;
+			} else if (sym->kind == Entity_Procedure) {
+				error(label_node, "A MIPS memory operand names a variable, not the proc '%.*s'", LIT(sym->token.string));
+				mem_op->classify.ok = false;
+			} else if (negated || !gp_base || index.expr != nullptr || has_disp_const || mem_op->terms.count != 2) {
+				error(expr, "A MIPS memory operand names a symbol only as '[%%gp + symbol]'");
+				mem_op->classify.ok = false;
+			}
+		}
+
 		// Defensive: a well-formed memory operand always classifies to at least one
 		// of base / index / label / displacement. If none is set, the term list
 		// reached the checker empty or malformed — e.g. a bare `[reg]` whose sole
@@ -3650,6 +3746,9 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			}
 
 			Entity *param_entity = entity_of_node(disp.expr);
+			if (asm_entity_is_symbol(param_entity)) {
+				break; // `[%gp + sym]`, checked with the operand's classification
+			}
 			if (param_entity != nullptr && param_entity->kind == Entity_Variable) {
 				auto kind = check_asm_find_kind(param_entity, ate->decls);
 				if (kind == AsmTemplateEntityDecl_Immediate) {

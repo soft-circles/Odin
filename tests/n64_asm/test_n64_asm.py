@@ -182,6 +182,34 @@ def elf32be_symbols(path):
     return functions
 
 
+MIPS_RELOCATIONS = {2: "R_MIPS_32", 4: "R_MIPS_26", 5: "R_MIPS_HI16", 6: "R_MIPS_LO16", 7: "R_MIPS_GPREL16"}
+
+
+def elf32be_relocations(path, function):
+    """[(type, symbol)] of the relocations inside FUNC symbol `function` of a big-endian ELF32 relocatable, in order."""
+    data = Path(path).read_bytes()
+    shoff, = struct.unpack_from(">I", data, 0x20)
+    shentsize, shnum, _ = struct.unpack_from(">HHH", data, 0x2E)
+    sections = [struct.unpack_from(">IIIIIIIIII", data, shoff + i*shentsize) for i in range(shnum)]
+    def name(strtab, offset):
+        start = sections[strtab][4] + offset
+        return data[start:data.index(b"\0", start)].decode()
+    symtab = next(i for i, sh in enumerate(sections) if sh[1] == 2)
+    symbols = [struct.unpack_from(">IIIBBH", data, sections[symtab][4] + i*16) for i in range(sections[symtab][5] // 16)]
+    st_name, value, size, _, _, shndx = next(sym for sym in symbols if name(sections[symtab][6], sym[0]) == function)
+    found = []
+    for sh in sections:
+        if sh[1] not in (4, 9) or sh[7] != shndx:  # SHT_RELA / SHT_REL applying to the function's section
+            continue
+        entry = 12 if sh[1] == 4 else 8
+        for i in range(sh[5] // entry):
+            offset, info = struct.unpack_from(">II", data, sh[4] + i*entry)
+            if value <= offset < value + size:
+                found.append((offset, MIPS_RELOCATIONS.get(info & 0xFF, str(info & 0xFF)),
+                              name(sections[symtab][6], symbols[info >> 8][0])))
+    return [(kind, symbol) for _, kind, symbol in sorted(found)]
+
+
 def elf32be_functions(path):
     """Map each FUNC symbol in a big-endian ELF32 relocatable to its .text words."""
     return {name: words for name, (_, words) in elf32be_symbols(path).items()}
@@ -389,6 +417,7 @@ ENCODINGS = {
     "enc_negu": [0x00041023],  # subu v0, $zero, a0
     "enc_dnegu": [0x0004102F],  # dsubu v0, $zero, a0
     "enc_li": [0x3C021234, 0x34425678],  # lui v0, 0x1234; ori v0, v0, 0x5678
+    "enc_la": [0x3C020000, 0x24420000],  # lui v0, %hi(la_target); addiu v0, v0, %lo(la_target)
     "enc_li_small": [0x2402FFFB],  # addiu v0, $zero, -5
     "enc_li_u16": [0x3402FFFF],  # ori v0, $zero, 0xffff
     "enc_li_hi": [0x3C028000],  # lui v0, 0x8000
@@ -674,7 +703,7 @@ BRANCH_TAKEN = {
 SAMPLE_VALUES = (0, 1, 2, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF)
 
 # Mnemonic objdump prints for a coverage function, where it differs from the name.
-OBJDUMP_NAMES = {"enc_not": "nor", "enc_li": "lui", "enc_li_hi": "lui", "enc_li_small": "li",
+OBJDUMP_NAMES = {"enc_not": "nor", "enc_li": "lui", "enc_la": "lui", "enc_li_hi": "lui", "enc_li_small": "li",
                  "enc_li_u16": "li", "enc_jalr_rd": "jalr"}
 
 
@@ -936,7 +965,7 @@ class Traps(unittest.TestCase):
 
     NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_jump_slot", "noreorder_at_scratch",
                  "noreorder_mult_in_slot", "noreorder_mflo_in_slot", "noreorder_li_in_slot",
-                 "noreorder_li_min_in_slot")
+                 "noreorder_li_min_in_slot", "symbol_operands", "exception_handler")
 
     def test_noreorder_slots_assemble_as_written(self):
         # #noreorder: the instruction after a branch is its delay slot, exactly as
@@ -1037,6 +1066,49 @@ class Traps(unittest.TestCase):
         self.assertEqual(calls_in(build_ir("regress")[1], "plain_alu"),
                          [(False, r"\09addu $0, $1, $1", "=r,r,~{$1}")])
 
+    def test_symbol_operands_are_s_constraints_with_relocations(self):
+        # j/jal/la and [%gp + sym] name a proc, a global or a foreign symbol: each distinct symbol is one 's'
+        # input after the template's own, written as $N, and the object carries the linker's relocations.
+        self.assertEqual(calls_in(build_ir("regress")[1], "symbol_operands"),
+                         [(True, r"\09.set noreorder\0A\09.set noat\0A\09jal $0\0A\09nop \0A\09jal $1"
+                                 r"\0A\09move $$4, $$29\0A\09la $$8, $2\0A\09lbu $$9, 0($$8)"
+                                 r"\0A\09lw $$4, %gp_rel($3)($$28)\0A\09sw $$29, %gp_rel($3)($$28)"
+                                 r"\0A\09j $1\0A\09nop \0A\09.set at\0A\09.set reorder",
+                           "s,s,s,s,~{$8},~{$9},~{$4},~{$31},~{memory},~{$1}")])
+        require_o64_objects(self)
+        for target in TARGETS:
+            with self.subTest(target=target):
+                obj = build_object("regress", target)
+                self.assertIn("symbol_only_from_asm", elf32be_symbols(obj))
+                relocs = elf32be_relocations(obj, "symbol_operands")
+                self.assertEqual(relocs, [("R_MIPS_26", "symbol_only_from_asm"), ("R_MIPS_26", "symbol_foreign_proc"),
+                                          ("R_MIPS_HI16", "symbol_foreign_byte"), ("R_MIPS_LO16", "symbol_foreign_byte"),
+                                          ("R_MIPS_GPREL16", "symbol_word"), ("R_MIPS_GPREL16", "symbol_word"),
+                                          ("R_MIPS_26", "symbol_foreign_proc")])
+
+    def test_foreign_declaration_shares_its_definition(self):
+        # link_names/ foreign-declares shared_word and shared_proc, which exporter/ defines and exports; in one
+        # module the second LLVM value of a name used to be renamed (shared_word.1), leaving the name undefined.
+        ir = build_ir("link_names")[1]  # -use-single-module
+        for word, value in (("shared_word", 7), ("importer_word", 9)):
+            self.assertRegex(ir, rf"(?m)^@{word} = [^\n]*global i32 {value}")
+        for proc in ("shared_proc", "importer_proc"):
+            self.assertRegex(ir, rf"(?m)^define [^\n]*@{proc}\(")
+        self.assertNotRegex(ir, r"@(shared|importer)_(word|proc)\.\d")
+
+    def test_call_to_a_symbol_clobbers_memory(self):
+        # As for jalr, the proc a jal reaches may read or write any memory, whatever the template declares.
+        [(side, _, constraints)] = calls_in(build_ir("regress")[1], "symbol_call")
+        self.assertTrue(side)
+        self.assertEqual(constraints, "=&r,r,s,~{$31},~{memory},~{$1}")
+
+    def test_regress_checks_without_diagnostics(self):
+        # exception_handler reads the #preserve'd %ra, %hi and %lo at entry and restores them before eret, and
+        # symbol_operands writes %a0 in a jal's delay slot: none of it is an undefined read or a dead write.
+        code, output = check_package("regress")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(diagnostics(output), [])
+
     def test_jalr_is_early_clobber_and_clobbers_memory(self):
         # Trap: `jalr rd, rs` with rd == rs is UNPREDICTABLE; the callee may touch any memory.
         self.assertEqual(calls_in(build_ir("regress")[1], "call_through_register"),
@@ -1097,8 +1169,16 @@ CHECK_ERRORS = {
     # a branch-likely's slot runs on the taken path only, so r is unset when a == 0
     "noreorder_likely_path": "'asm' output parameter 'r' is not assigned on all paths through this template; its value is undefined",
     "noreorder_imm_disp":  "'lw' cannot fill the delay slot of 'bnez' in a #noreorder template: a memory operand with a $ immediate displacement may assemble to several instructions",
-    "absolute_j":          "'j' operand-0 has an invalid kind, expected a label operand",
-    "absolute_jal":        "'jal' operand-0 has an invalid kind, expected a label operand",
+    "absolute_j":          "'j' operand-0 has an invalid kind, expected a label or symbol operand",
+    "absolute_jal":        "'jal' operand-0 has an invalid kind, expected a label or symbol operand",
+    "symbol_branch":       "'beq' operand-2 has an invalid kind, expected a label operand",
+    "symbol_memory_base":  "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
+    "symbol_memory_disp":  "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
+    "symbol_memory_label": "A MIPS memory operand cannot name a template label",
+    "symbol_memory_neg":   "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
+    "symbol_memory_proc":  "A MIPS memory operand names a variable, not the proc 'symbol_target_proc'",
+    "symbol_polymorphic":  "A polymorphic proc 'symbol_target_poly' cannot be named within an 'asm' template",
+    "symbol_la_slot":      "'la' cannot fill the delay slot of 'jal' in a #noreorder template: 'la' assembles to two instructions ('lui' + 'addiu')",
     "numeric_branch":      "'beq' operand-2 has an invalid kind, expected a label operand",
     "undeclared_label":    "Undeclared asm label '.nowhere'",
     "duplicate_label":     "Redeclaration of the label 'l' in this scope",

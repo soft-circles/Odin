@@ -135,7 +135,7 @@ enum AsmDelaySlotFlag : u8 {
 	X(DMULT, "dmult") X(DMULTU, "dmultu") X(DDIV, "ddiv") X(DDIVU, "ddivu") \
 	X(MFHI, "mfhi") X(MFLO, "mflo") X(MTHI, "mthi") X(MTLO, "mtlo") \
 	/* assembler aliases */ \
-	X(MOVE, "move") X(NOT, "not") X(NEGU, "negu") X(DNEGU, "dnegu") X(LI, "li") \
+	X(MOVE, "move") X(NOT, "not") X(NEGU, "negu") X(DNEGU, "dnegu") X(LI, "li") X(LA, "la") \
 	/* loads / stores */ \
 	X(LB, "lb") X(LBU, "lbu") X(LH, "lh") X(LHU, "lhu") X(LW, "lw") X(LWU, "lwu") X(LD, "ld") \
 	X(SB, "sb") X(SH, "sh") X(SW, "sw") X(SD, "sd") \
@@ -292,6 +292,7 @@ struct Asm_mips {
 		OP_MEM,      // offset(base), signed 16-bit offset
 		OP_REL16,    // branch target label (PC-relative, 16-bit word offset)
 		OP_TARGET26, // jump target label (256 MiB region, 26-bit word index)
+		OP_SYMBOL,   // `la` source: a proc, global or foreign symbol, whose 32-bit address the assembler loads
 	};
 
 
@@ -303,6 +304,7 @@ struct Asm_mips {
 		ENC_SA,           // bits 10..6
 		ENC_IMM16,        // bits 15..0
 		ENC_IMM_MACRO,    // `li`: expanded by the assembler into lui/ori/addiu
+		ENC_ADDR_MACRO,   // `la`: expanded by the assembler into lui/addiu with HI16/LO16 relocations
 		ENC_OFFSET_BASE,  // base in bits 25..21, offset in bits 15..0
 		ENC_BRANCH16,     // (target - (pc+4)) >> 2 in bits 15..0
 		ENC_TARGET26,     // target >> 2 in bits 25..0
@@ -719,10 +721,13 @@ struct Asm_mips {
 		case OP_MEM:
 			return AsmOperand_Memory;
 
-		// Branch/jump targets are written as template labels.
+		// Branch targets are template labels; a j/jal target is a label or a symbol.
 		case OP_REL16:
-		case OP_TARGET26:
 			return AsmOperand_Label;
+		case OP_TARGET26:
+			return AsmOperand_JumpTarget;
+		case OP_SYMBOL:
+			return AsmOperand_Symbol;
 		}
 		return AsmOperand_Invalid;
 	}
@@ -1215,6 +1220,9 @@ struct Asm_mips {
 	// expand it into more than one word, or nullptr. `imm` is the constant source
 	// of `li`, or nullptr when it is a $-immediate parameter.
 	char const *delay_slot_multiword_reason(u16 m, i64 const *imm) const {
+		if (m == M_LA) {
+			return "'la' assembles to two instructions ('lui' + 'addiu')";
+		}
 		if (m != M_LI) {
 			return nullptr;
 		}
@@ -1330,6 +1338,7 @@ enum Asm_mips::Shape : u8 {
 	SH_I_U64,      // rt, rs, uimm16                   andi, ori, xori
 	SH_LUI,        // rt, uimm16
 	SH_LI,         // rt, imm32                        li (macro)
+	SH_LA,         // rt, symbol                       la (macro)
 	SH_MD_32,      // rs, rt (32-bit)                  mult, div, madd, ...
 	SH_MD_64,      // rs, rt                           dmult, ddiv, ...
 	SH_RD,         // rd                               mfhi, mflo
@@ -1397,6 +1406,7 @@ Asm_mips::FormShape const Asm_mips::form_shapes[SHAPE_COUNT] = {
 	/* SH_I_U64     */ MS((OP_GPR,ENC_RT), (OP_GPR,ENC_RS), (OP_UIMM16,ENC_IMM16), N_),
 	/* SH_LUI       */ MS((OP_GPR,ENC_RT), (OP_UIMM16,ENC_IMM16), N_, N_),
 	/* SH_LI        */ MS((OP_GPR,ENC_RT), (OP_IMM32,ENC_IMM_MACRO), N_, N_),
+	/* SH_LA        */ MS((OP_GPR,ENC_RT), (OP_SYMBOL,ENC_ADDR_MACRO), N_, N_),
 	/* SH_MD_32     */ MS((OP_GPR32,ENC_RS), (OP_GPR32,ENC_RT), N_, N_),
 	/* SH_MD_64     */ MS((OP_GPR,ENC_RS), (OP_GPR,ENC_RT), N_, N_),
 	/* SH_RD        */ MS((OP_GPR,ENC_RD), N_, N_, N_),
@@ -1623,6 +1633,7 @@ Asm_mips::FormRow const Asm_mips::form_rows[] = {
 	R(NEGU,    SH_RD_RT_32,  0x00000023, 0xFFE007FF, MACRO,    MIPS_C_W0_R1),     // subu rd, $0, rt
 	R(DNEGU,   SH_RD_RT_64,  0x0000002F, 0xFFE007FF, MACRO,    MIPS_C_W0_R1),     // dsubu rd, $0, rt
 	R(LI,      SH_LI,        0x24000000, 0x00000000, MACRO,    MIPS_C_W0),        // addiu / ori / lui+ori
+	R(LA,      SH_LA,        0x3C000000, 0x00000000, MACRO,    MIPS_C_W0),        // lui + addiu
 
 	// loads / stores (lwl/lwr/ldl/ldr merge into rt but are modelled as full
 	// writes so the usual lwl+lwr pair does not read an unassigned output)

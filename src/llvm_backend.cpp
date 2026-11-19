@@ -2428,7 +2428,28 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 
 	lbValue g = {};
 	g.type = alloc_type_pointer(e->type);
-	g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
+
+	// A foreign variable and an Odin definition with its link name are one global, as the linker makes them across
+	// objects: in one module the second LLVMAddGlobal would be renamed, and the definition would go missing.
+	char *c_name = alloc_cstring(permanent_allocator(), name);
+	LLVMTypeRef value_type = lb_type(m, e->type);
+	LLVMValueRef existing = LLVMGetNamedGlobal(m->mod, c_name);
+	if (existing != nullptr && LLVMGlobalGetValueType(existing) == value_type) {
+		if (is_foreign) {
+			g.value = LLVMConstPointerCast(existing, lb_type(m, alloc_type_pointer(e->type)));
+			var->var = g;
+			lb_add_entity(m, e, g);
+			lb_add_member(m, name, g);
+			return;
+		}
+		if (LLVMGetInitializer(existing) == nullptr) {
+			LLVMSetExternallyInitialized(existing, false);
+			g.value = existing;
+		}
+	}
+	if (g.value == nullptr) {
+		g.value = LLVMAddGlobal(m->mod, value_type, c_name);
+	}
 
 	if (decl->init_expr != nullptr) {
 		TypeAndValue tav = type_and_value_of_expr(decl->init_expr);

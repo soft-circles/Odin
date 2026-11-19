@@ -128,6 +128,8 @@ output narrower than 64 bits that a 64-bit instruction writes, such as `ld`,
 | FPR `.d`, `.l` | An `f64` parameter. A `.l` slot holds a 64-bit integer bit pattern. |
 | Memory | `[base]`, `[base + disp]` or `[base - disp]`, where `base` is a GPR. |
 | Label | `.name`, a label defined in the same template. |
+| Jump target | A label, or a symbol (below). The slot of `j` and `jal`. |
+| Symbol | A proc, a package-level variable or a `foreign` proc or variable, named as an identifier. The source of `la`. |
 
 The 32-bit GPR slots are those of `add`, `addu`, `sub`, `subu`, `addi`,
 `addiu`, `negu`, `sll`, `srl`, `sra`, `sllv`, `srlv`, `srav`, `mult`, `multu`,
@@ -142,9 +144,31 @@ A literal GPR carries no width and is accepted in either kind of slot.
 FPU widths must match exactly: an `f32` in a `.d` slot is rejected, and an
 integer parameter in a `.w` or `.l` slot is a register-class error.
 
+A symbol reaches LLVM as an `s` operand after the template's own inputs, one
+per distinct name, so the object carries the linker's relocation: `R_MIPS_26`
+for `j` and `jal`, `R_MIPS_HI16`/`R_MIPS_LO16` for `la` (`lui` + `addiu`), and
+`R_MIPS_GPREL16` for `[%gp + sym]`. Nothing is loaded into a register before the
+template runs, so an exception vector can name its handler. A polymorphic proc
+is rejected, and a branch cannot target a symbol. The template's use keeps the
+symbol in the build. Only MIPS templates name symbols.
+
+```odin
+handler :: proc "c" () { ... }
+frame: rawptr // in .sbss, as a global of 8 bytes or less is
+
+body :: asm() -> ! [#volatile, #noreorder, #clobber %a0, #clobber memory] {
+	lw %a0, [%gp + frame] // lw $a0, %gp_rel(frame)($gp)
+	j handler
+	nop
+}
+```
+
 Memory operands have one base register and a constant displacement in the
 signed 16-bit range, -32768–32767. There is no index register or scale. A
 displacement outside that range is an error rather than an `$at` expansion.
+A symbol is a displacement only as `[%gp + sym]`, its offset from `$gp`, with
+no other term and never a proc; the symbol must be in small data (`.sdata`/`.sbss`), within
+±32 KiB of `_gp`, or the link fails.
 A displacement term that names a `$`-immediate parameter is resolved per
 instantiation and is not range-checked; the assembler expands a large one
 through `$at`.
@@ -204,7 +228,7 @@ the last group is rejected.
 | Integer ALU | `add`, `addu`, `sub`, `subu`, `and`, `or`, `xor`, `nor`, `slt`, `sltu`, `dadd`, `daddu`, `dsub`, `dsubu`, `addi`, `addiu`, `slti`, `sltiu`, `andi`, `ori`, `xori`, `lui`, `daddi`, `daddiu` |
 | Shifts | `sll`, `srl`, `sra`, `sllv`, `srlv`, `srav`, `dsll`, `dsrl`, `dsra`, `dsll32`, `dsrl32`, `dsra32`, `dsllv`, `dsrlv`, `dsrav` |
 | Multiply, divide, HI/LO | `mult`, `multu`, `div`, `divu`, `dmult`, `dmultu`, `ddiv`, `ddivu`, `mfhi`, `mflo`, `mthi`, `mtlo` |
-| Assembler aliases | `move`, `not`, `negu`, `dnegu`, `li` |
+| Assembler aliases | `move`, `not`, `negu`, `dnegu`, `li`, `la` |
 | Loads and stores | `lb`, `lbu`, `lh`, `lhu`, `lw`, `lwu`, `ld`, `sb`, `sh`, `sw`, `sd`, `lwl`, `lwr`, `ldl`, `ldr`, `swl`, `swr`, `sdl`, `sdr`, `ll`, `lld`, `sc`, `scd` |
 | Branches | `beq`, `bne`, `blez`, `bgtz`, `bltz`, `bgez`, `bltzal`, `bgezal`, `b`, `bal`, `beqz`, `bnez` |
 | Branch-likely | `beql`, `bnel`, `blezl`, `bgtzl`, `bltzl`, `bgezl`, `bltzall`, `bgezall`, `beqzl`, `bnezl` |
@@ -306,15 +330,26 @@ LLVM cannot name those registers, so each lowers to a memory clobber.
 
 ## Local control flow and delay slots
 
-Declare a label with `.name:` and refer to it as `.name`. Branch and jump
-targets are template labels only; the backend emits them as numeric local
-labels (`1:`, `1b`, `1f`).
+Declare a label with `.name:` and refer to it as `.name`. Branch targets are
+template labels only; the backend emits them as numeric local labels (`1:`,
+`1b`, `1f`). A `j` or `jal` target is a label or a symbol.
 
 - `b .label` and `j .label` are unconditional jumps inside the template.
 - `jal`, `bal`, `bltzal` and `bgezal` link through `%ra`, which they clobber,
   and are modelled as calls that return.
 - `jr rs` and `eret` leave the template. A template that uses them must be
   declared diverging (`-> !`) unless every path still reaches its end.
+- `eret` returns to the code an exception interrupted, which may read any
+  register, so no write before it is reported as dead. An exception handler
+  declares the registers it saves on entry and restores before `eret` with
+  `#preserve` (`#preserve %ra, #preserve %hi, #preserve %lo`): a preserved
+  register holds the interrupted code's value, all 64 bits of it, at entry.
+- `j sym` leaves the template for `sym`, whose code may read any register, so
+  no write before it, its delay slot's included, is reported as dead.
+  `jal sym` calls `sym` and returns, and the callee reads the `%ra` it writes.
+  Either makes the template volatile and clobbers memory, as `jalr` does.
+  `jal sym` clobbers only `%ra` implicitly; name the registers the callee
+  changes with `#clobber`.
 - `jalr rs` and `jalr rd, rs` call through a register and return. They write
   `%ra` or `rd`, make the template volatile and clobber memory, since the
   callee may read or write any of it.

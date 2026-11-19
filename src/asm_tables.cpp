@@ -34,6 +34,8 @@ enum AsmOperandKind : u8 {
 	AsmOperand_RegisterGroup,
 	AsmOperand_Lane,
 	AsmOperand_RegisterShift,
+	AsmOperand_Symbol,
+	AsmOperand_JumpTarget, // a label, or on MIPS a symbol
 
 	AsmOperand_COUNT
 };
@@ -48,6 +50,8 @@ gb_global String const asm_operand_kind_strings[AsmOperand_COUNT] = {
 	str_lit("register group"),
 	str_lit("lane"),
 	str_lit("register shift"),
+	str_lit("symbol"),
+	str_lit("label or symbol"),
 };
 
 gb_global String const asm_operand_kind_expected_strings[AsmOperand_COUNT] = {
@@ -60,6 +64,8 @@ gb_global String const asm_operand_kind_expected_strings[AsmOperand_COUNT] = {
 	str_lit("a register group"),
 	str_lit("a lane"),
 	str_lit("a register shift"),
+	str_lit("a symbol"),
+	str_lit("a label or symbol"),
 };
 
 enum AsmOperandConstraintKind : u32 {

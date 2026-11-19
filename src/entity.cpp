@@ -388,6 +388,7 @@ struct Entity {
 			Scope *param_scope;
 			Scope *label_scope;
 			Array<AsmTemplateEntityDecl> decls;
+			Array<Entity *> symbols; // MIPS: the procs and globals the body names, passed after the inputs as 's' operands
 
 			StringSet clobber_registers_set;
 			StringSet preserve_registers_set;

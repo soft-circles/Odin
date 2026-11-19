@@ -217,3 +217,66 @@ package n64_asm_regress
 	}
 	return t(a)
 }
+
+// Symbol operands: `j`/`jal`/`la` and `[%gp + sym]` name a proc, a global or a foreign symbol, passed as 's' operands.
+foreign import symbol_lib "system:symbol_lib"
+
+@(default_calling_convention="c")
+foreign symbol_lib {
+	symbol_foreign_proc :: proc() ---
+	symbol_foreign_byte: u8
+}
+
+@(export) symbol_word: rawptr
+
+// Named only from the template below: the template's use must keep it in the build.
+@(export) symbol_only_from_asm :: proc "c" () {}
+
+symbol_body :: asm() -> ! [#volatile, #noreorder, #clobber %t0, #clobber %t1, #clobber %a0, #clobber %ra, #clobber memory] {
+	jal symbol_only_from_asm
+	nop
+	jal symbol_foreign_proc
+	move %a0, %sp
+	la %t0, symbol_foreign_byte
+	lbu %t1, [%t0]
+	lw %a0, [%gp + symbol_word]
+	sw %sp, [%gp + symbol_word]
+	j symbol_foreign_proc
+	nop
+}
+
+// No #clobber memory: a call to a symbol clobbers memory by itself.
+@(export) symbol_call :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#clobber %ra] {
+		jal symbol_only_from_asm
+		nop
+		move r, a
+	}
+	return t(a)
+}
+
+@(export) symbol_operands :: proc "naked" () {
+	symbol_body()
+}
+
+// An exception handler: #preserve lets it read the interrupted %ra, %hi and %lo, all 64 bits, and restore them before
+// eret, which returns to code that may read any register, so neither the saves nor the restores are reported.
+exception_body :: asm() -> ! [#volatile, #noreorder, #preserve %ra, #preserve %hi, #preserve %lo, #clobber %t0, #clobber memory] {
+	addiu %sp, %sp, -32
+	sd %ra, [%sp]
+	mflo %t0
+	sd %t0, [%sp + 8]
+	mfhi %t0
+	sd %t0, [%sp + 16]
+	ld %t0, [%sp + 8]
+	mtlo %t0
+	ld %t0, [%sp + 16]
+	mthi %t0
+	ld %ra, [%sp]
+	addiu %sp, %sp, 32
+	eret
+}
+
+@(export) exception_handler :: proc "naked" () {
+	exception_body()
+}
