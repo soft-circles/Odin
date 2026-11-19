@@ -290,8 +290,24 @@ Preserve these guarantees:
   constraint such as `{$t1}` asserts in LLVM's Mips backend. FPR pins lower
   to `{$f12}`-style constraints.
 - Literal registers are written `$$N`/`$$fN`; `$N` is an operand reference.
-- Labels are numeric locals (`N:`, `Nb`, `Nf`). Branch and jump targets are
-  template labels only.
+- Labels are numeric locals (`N:`, `Nb`, `Nf`). Branch targets are template
+  labels only.
+- A symbol operand is an identifier that resolves to a proc, a global or a
+  `foreign` symbol (`asm_entity_is_symbol`), checked with `check_ident` so the
+  template's decl depends on it, and recorded once in `AsmTemplate.symbols`.
+  Only `AsmTemplateArch_Target` templates on mips32be take one; other arches
+  keep the "Only asm parameters or constants" error. It fits `OP_TARGET26`
+  (`AsmOperand_JumpTarget`, label or symbol), `la`'s `OP_SYMBOL`, and a memory
+  operand only as `[%gp + sym]`. `emit_call` passes each as an `s` input after
+  the template's own inputs (`symbol_numbers`), written `$N`, or
+  `%gp_rel($N)($$28)` in memory, so the assembler emits `R_MIPS_26`,
+  `HI16`/`LO16` or `GPREL16`. `la` is a two-word macro, never a delay-slot
+  instruction.
+- `may_read_all_after` marks a `j`/`jal` to a symbol and `eret`: the code they
+  reach may read any register, so `check_asm_cfg` keeps every tracked register
+  live out of their block and reports no dead write before them. A `#preserve`d
+  MIPS register is defined at entry at 64 bits, so a handler can save the
+  interrupted `%ra`, `%hi` and `%lo` with `sd` and restore them before `eret`.
 - By default, delay slots belong to the assembler under `.set reorder`, and
   nothing in the table or backend inserts or expects an explicit slot
   instruction. A `#noreorder` template is wrapped in `.set noreorder; .set
