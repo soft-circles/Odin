@@ -248,3 +248,25 @@ symbol_body :: asm() -> ! [#volatile, #noreorder, #clobber %t0, #clobber %t1, #c
 @(export) symbol_operands :: proc "naked" () {
 	symbol_body()
 }
+
+// An exception handler: #preserve lets it read the interrupted %ra, %hi and %lo, all 64 bits, and restore them before
+// eret, which returns to code that may read any register, so neither the saves nor the restores are reported.
+exception_body :: asm() -> ! [#volatile, #noreorder, #preserve %ra, #preserve %hi, #preserve %lo, #clobber %t0, #clobber memory] {
+	addiu %sp, %sp, -32
+	sd %ra, [%sp]
+	mflo %t0
+	sd %t0, [%sp + 8]
+	mfhi %t0
+	sd %t0, [%sp + 16]
+	ld %t0, [%sp + 8]
+	mtlo %t0
+	ld %t0, [%sp + 16]
+	mthi %t0
+	ld %ra, [%sp]
+	addiu %sp, %sp, 32
+	eret
+}
+
+@(export) exception_handler :: proc "naked" () {
+	exception_body()
+}

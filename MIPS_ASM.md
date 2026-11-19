@@ -339,6 +339,11 @@ template labels only; the backend emits them as numeric local labels (`1:`,
   and are modelled as calls that return.
 - `jr rs` and `eret` leave the template. A template that uses them must be
   declared diverging (`-> !`) unless every path still reaches its end.
+- `eret` returns to the code an exception interrupted, which may read any
+  register, so no write before it is reported as dead. An exception handler
+  declares the registers it saves on entry and restores before `eret` with
+  `#preserve` (`#preserve %ra, #preserve %hi, #preserve %lo`): a preserved
+  register holds the interrupted code's value, all 64 bits of it, at entry.
 - `j sym` leaves the template for `sym`, and `jal sym` calls it and returns.
   The code there may read any register, so no write before either, its delay
   slot's included, is reported as dead. `jal sym` clobbers only `%ra`

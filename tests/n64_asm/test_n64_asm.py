@@ -965,7 +965,7 @@ class Traps(unittest.TestCase):
 
     NOREORDER = ("noreorder_filled", "noreorder_likely", "noreorder_jump_slot", "noreorder_at_scratch",
                  "noreorder_mult_in_slot", "noreorder_mflo_in_slot", "noreorder_li_in_slot",
-                 "noreorder_li_min_in_slot", "symbol_operands")
+                 "noreorder_li_min_in_slot", "symbol_operands", "exception_handler")
 
     def test_noreorder_slots_assemble_as_written(self):
         # #noreorder: the instruction after a branch is its delay slot, exactly as
@@ -1085,6 +1085,13 @@ class Traps(unittest.TestCase):
                                           ("R_MIPS_HI16", "symbol_foreign_byte"), ("R_MIPS_LO16", "symbol_foreign_byte"),
                                           ("R_MIPS_GPREL16", "symbol_word"), ("R_MIPS_GPREL16", "symbol_word"),
                                           ("R_MIPS_26", "symbol_foreign_proc")])
+
+    def test_regress_checks_without_diagnostics(self):
+        # exception_handler reads the #preserve'd %ra, %hi and %lo at entry and restores them before eret, and
+        # symbol_operands writes %a0 in a jal's delay slot: none of it is an undefined read or a dead write.
+        code, output = check_package("regress")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(diagnostics(output), [])
 
     def test_jalr_is_early_clobber_and_clobbers_memory(self):
         # Trap: `jalr rd, rs` with rd == rs is UNPREDICTABLE; the callee may touch any memory.

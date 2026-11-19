@@ -2557,8 +2557,11 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		if (clobber.has_control()) {
 			for_array(i, operands) {
 				if (determine_asm_operand_kind(&operands[i]) == AsmOperand_Symbol) {
-					facts->leaves_to_symbol = true;
+					facts->may_read_all_after = true; // the proc it jumps to or calls
 				}
+			}
+			if (asm_check_arch() == TargetArch_mips32be && instr->mnemonic == Asm_mips::M_ERET) {
+				facts->may_read_all_after = true; // the code an exception interrupted
 			}
 		}
 
