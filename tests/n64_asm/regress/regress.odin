@@ -217,3 +217,34 @@ package n64_asm_regress
 	}
 	return t(a)
 }
+
+// Symbol operands: `j`/`jal`/`la` and `[%gp + sym]` name a proc, a global or a foreign symbol, passed as 's' operands.
+foreign import symbol_lib "system:symbol_lib"
+
+@(default_calling_convention="c")
+foreign symbol_lib {
+	symbol_foreign_proc :: proc() ---
+	symbol_foreign_byte: u8
+}
+
+@(export) symbol_word: rawptr
+
+// Named only from the template below: the template's use must keep it in the build.
+@(export) symbol_only_from_asm :: proc "c" () {}
+
+symbol_body :: asm() -> ! [#volatile, #noreorder, #clobber %t0, #clobber %t1, #clobber %a0, #clobber %ra, #clobber memory] {
+	jal symbol_only_from_asm
+	nop
+	jal symbol_foreign_proc
+	move %a0, %sp
+	la %t0, symbol_foreign_byte
+	lbu %t1, [%t0]
+	lw %a0, [%gp + symbol_word]
+	sw %sp, [%gp + symbol_word]
+	j symbol_foreign_proc
+	nop
+}
+
+@(export) symbol_operands :: proc "naked" () {
+	symbol_body()
+}

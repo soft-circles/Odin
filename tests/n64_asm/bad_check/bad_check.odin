@@ -3,6 +3,10 @@ package n64_asm_bad_check
 // Checker rejections, one per template and one template per line: the test
 // matches each expected message to the line its template is declared on.
 
+symbol_target_word: u32
+symbol_target_proc :: proc "c" () {}
+symbol_target_poly :: proc "c" ($T: typeid) {}
+
 // immediate ranges
 addiu_imm_wide      :: asm(a: u32) -> (r: u32) { addiu r, a, 40000 }
 addiu_imm_max_plus1 :: asm(a: u32) -> (r: u32) { addiu r, a, 32768 }
@@ -63,6 +67,12 @@ noreorder_imm_disp  :: asm(p: rawptr, $D: int) -> (r: u32) [#noreorder] { move r
 // branch and jump targets are template labels only
 absolute_j          :: asm() { j 0x80001000 }
 absolute_jal        :: asm() { jal 0x80000400 }
+symbol_branch       :: asm() [#volatile] { beq %zero, %zero, symbol_target_proc }
+symbol_memory_base  :: asm(p: rawptr) [#volatile, #clobber memory] { sw %zero, [p + symbol_target_word] }
+symbol_memory_disp  :: asm() -> (r: u32) { lw r, [%gp + symbol_target_word + 4] }
+symbol_memory_label :: asm() -> (r: u32) { .l: lw r, [%gp + .l] }
+symbol_polymorphic  :: asm() -> ! [#volatile] { j symbol_target_poly }
+symbol_la_slot      :: asm() [#volatile, #noreorder, #clobber %t0, #clobber %ra] { jal symbol_target_proc; la %t0, symbol_target_word }
 numeric_branch      :: asm(a: u32, b: u32) -> (r: u32) { move r, a; beq a, b, 8 }
 undeclared_label    :: asm(a: u32) -> ! { b .nowhere }
 duplicate_label     :: asm(a: u32) -> (r: u32) { move r, a; .l: addiu r, r, 1; .l: }
@@ -105,10 +115,17 @@ use :: proc "contextless" (x: u32, w: u64, f: f32, d: f64, p: rawptr) {
 	_ = at_operand(x); _ = at_pin(x); _ = at_clobber(x); _ = at_pin_noreorder(x); _ = at_clobber_noreorder(x)
 	_ = noreorder_twice(x); _ = noreorder_no_slot(x); _ = noreorder_label_slot(x); _ = noreorder_branch_slot(x)
 	_ = noreorder_li_slot(x); _ = noreorder_li_slot_low(x); _ = noreorder_likely_path(x); _ = noreorder_imm_disp(p, 4)
-	absolute_j(); absolute_jal(); _ = numeric_branch(x, x); _ = duplicate_label(x); jr_not_diverging(x)
+	absolute_j(); absolute_jal(); symbol_branch(); symbol_memory_base(p); _ = symbol_memory_disp(); _ = symbol_memory_label()
+	symbol_la_slot()
+	_ = numeric_branch(x, x); _ = duplicate_label(x); jr_not_diverging(x)
 	_ = u64_in_gpr32_slot(w, x); _ = f32_in_gpr_slot(f, x); _ = gpr_in_fpr_slot(x, f); _ = f64_in_single_slot(d, f)
 	_ = f32_in_double_slot(f, d); _ = f64_in_word_slot(d); _ = too_many_operands(x, x); _ = too_few_operands(x)
 	_ = literal_write(x); _ = write_untied_input(x); _ = mflo_unproduced(); _ = mfhi_after_mtlo(x); _ = bc1t_unproduced(x)
 	_ = output_pin_zero(x); _ = output_pin_k0(x); _ = output_pin_gp(x); _ = output_pin_sp(x); _ = f32_pinned_to_gpr(f)
 	undeclared_label(x)
+}
+
+@(export)
+use_symbol_polymorphic :: proc "contextless" () {
+	symbol_polymorphic()
 }

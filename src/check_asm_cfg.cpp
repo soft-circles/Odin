@@ -129,6 +129,7 @@ struct AsmInstructionFacts {
 	bool is_control;
 	bool is_conditional;
 	bool is_terminal;
+	bool leaves_to_symbol; // MIPS `j`/`jal` to a proc or global: the code there may read any register
 
 	Entity *branch_target;
 	i32     block_id;
@@ -197,6 +198,17 @@ struct AsmCfg {
 	// skipped rather than reported against values the failed instruction may set.
 	bool has_unchecked_instructions;
 };
+
+// Whether the block ends in a jump or call to a proc or global, which may read any register.
+gb_internal bool check_asm_cfg_block_leaves_to_symbol(AsmCfg const *cfg, AsmBlock const &b) {
+	for (i32 ii = b.first; ii <= b.last; ii++) {
+		AsmInstructionFacts *f = cfg->insts[ii]->facts;
+		if (f != nullptr && f->leaves_to_symbol) {
+			return true;
+		}
+	}
+	return false;
+}
 
 gb_internal void asm_cfg_init(AsmCfg *cfg) {
 	map_init(&cfg->entity_to_index);
@@ -1209,6 +1221,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 			if (check_asm_cfg_block_leaves(cfg, cast(i32)bi)) {
 				lo |= exit_live;
 			}
+			if (check_asm_cfg_block_leaves_to_symbol(cfg, b)) {
+				lo |= REG_TOP; // what a delay slot writes reaches the code the block jumps to
+			}
 
 			u16 live = lo;
 			for (i32 ii = b.last; ii >= b.first; ii--) {
@@ -1217,6 +1232,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 					continue;
 				}
 				live = (live & ~asm_full_kill_mask(f)) | (f->read_regs & REG_TOP);
+				if (f->leaves_to_symbol) {
+					live |= REG_TOP;
+				}
 			}
 
 			if (lo != live_out[bi] || live != live_in[bi]) {
@@ -1251,6 +1269,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 		if (check_asm_cfg_block_leaves(cfg, cast(i32)bi)) {
 			live |= exit_live; // already folded above, but harmless
 		}
+		if (check_asm_cfg_block_leaves_to_symbol(cfg, b)) {
+			live |= REG_TOP;
+		}
 		for (i32 ii = b.last; ii >= b.first; ii--) {
 			AsmInstructionFacts *f = cfg->insts[ii]->facts;
 			if (f == nullptr) {
@@ -1260,7 +1281,7 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 			// A register this instruction writes but that is not live afterward,
 			// and that it does not itself read (self-use like `xor r,r` or `add r,x`) is a dead write.
 			u16 kill = asm_full_kill_mask(f);
-			u16 dead = kill & ~live_after & ~f->read_regs;
+			u16 dead = f->leaves_to_symbol ? 0 : kill & ~live_after & ~f->read_regs; // the callee reads its %ra
 			for (u16 bit = 1; bit != 0; bit <<= 1) {
 				if ((dead & bit) == 0) {
 					continue;
@@ -1277,6 +1298,9 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 				}
 			}
 			live = (live & ~kill) | (f->read_regs & REG_TOP);
+			if (f->leaves_to_symbol) {
+				live |= REG_TOP;
+			}
 		}
 	}
 
