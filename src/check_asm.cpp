@@ -1633,9 +1633,8 @@ gb_internal bool check_pseudo_macro_mnemonic(AsmCtx *asm_ctx, Entity *tmpl_entit
 			return true;
 		}
 		want_int_reg(&operands[0], "destination");
-		AsmOperandKind src = determine_asm_operand_kind(&operands[1]);
-		if (src != AsmOperand_Label && src != AsmOperand_Symbol) {
-			error(operands[1].expr, "'%.*s' source must be a label, or on MIPS a proc, global or foreign symbol", LIT(name));
+		if (determine_asm_operand_kind(&operands[1]) != AsmOperand_Label) {
+			error(operands[1].expr, "'%.*s' source must be a label", LIT(name));
 		}
 		return true;
 	}
@@ -2554,13 +2553,22 @@ gb_internal bool check_mnemonic(AsmCtx *asm_ctx, CheckerContext *ctx, Entity *tm
 		auto clobber = clobber_forms[valid_form_index];
 
 		facts->read_regs = cast(u16)clobber.implicit_rd & asm_ctx->CLOBBER_REGS_NAMED;
-		if (clobber.has_control()) {
+		if (clobber.has_control() && asm_check_arch() == TargetArch_mips32be) {
 			for_array(i, operands) {
-				if (determine_asm_operand_kind(&operands[i]) == AsmOperand_Symbol) {
-					facts->may_read_all_after = true; // the proc it jumps to or calls
+				if (determine_asm_operand_kind(&operands[i]) != AsmOperand_Symbol) {
+					continue;
+				}
+				// Code outside the template may read or write any memory, as for jalr.
+				ate->clobber_memory = true;
+				ate->is_volatile = true;
+				ate->has_observable_side_effect = true;
+				if (instr->mnemonic == Asm_mips::M_JAL) {
+					facts->calls_symbol = true; // the callee reads the %ra the jal writes, and returns
+				} else {
+					facts->may_read_all_after = true; // `j sym` hands every register to the code there
 				}
 			}
-			if (asm_check_arch() == TargetArch_mips32be && instr->mnemonic == Asm_mips::M_ERET) {
+			if (instr->mnemonic == Asm_mips::M_ERET) {
 				facts->may_read_all_after = true; // the code an exception interrupted
 			}
 		}
@@ -3521,10 +3529,20 @@ gb_internal void check_asm_instruction_operand(AsmCtx *asm_ctx, CheckerContext *
 			// MIPS reaches a symbol through memory only as `[%gp + sym]`: its %gp_rel offset, as GAS does for small data.
 			bool gp_base = base.expr != nullptr && base.expr->kind == Ast_AsmRegister &&
 			               (base.expr->AsmRegister.name.string == "gp" || base.expr->AsmRegister.name.string == "28");
-			if (!asm_entity_is_symbol(entity_of_node(label_node))) {
+			Entity *sym = entity_of_node(label_node);
+			bool negated = false;
+			for (Ast *term_ast : mem_op->terms) {
+				if (term_ast != nullptr && term_ast->kind == Ast_AsmMemoryTerm && term_ast->AsmMemoryTerm.operand == label_node) {
+					negated = term_ast->AsmMemoryTerm.op.kind == Token_Sub;
+				}
+			}
+			if (!asm_entity_is_symbol(sym)) {
 				error(label_node, "A MIPS memory operand cannot name a template label");
 				mem_op->classify.ok = false;
-			} else if (!gp_base || index.expr != nullptr || has_disp_const || mem_op->terms.count != 2) {
+			} else if (sym->kind == Entity_Procedure) {
+				error(label_node, "A MIPS memory operand names a variable, not the proc '%.*s'", LIT(sym->token.string));
+				mem_op->classify.ok = false;
+			} else if (negated || !gp_base || index.expr != nullptr || has_disp_const || mem_op->terms.count != 2) {
 				error(expr, "A MIPS memory operand names a symbol only as '[%%gp + symbol]'");
 				mem_op->classify.ok = false;
 			}

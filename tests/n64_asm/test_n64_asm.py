@@ -1090,10 +1090,17 @@ class Traps(unittest.TestCase):
         # link_names/ foreign-declares shared_word and shared_proc, which exporter/ defines and exports; in one
         # module the second LLVM value of a name used to be renamed (shared_word.1), leaving the name undefined.
         ir = build_ir("link_names")[1]  # -use-single-module
-        self.assertRegex(ir, r"(?m)^@shared_word = [^\n]*global i32 7")
-        self.assertRegex(ir, r"(?m)^define [^\n]*@shared_proc\(")
-        self.assertNotIn("shared_word.1", ir)
-        self.assertNotIn("shared_proc.1", ir)
+        for word, value in (("shared_word", 7), ("importer_word", 9)):
+            self.assertRegex(ir, rf"(?m)^@{word} = [^\n]*global i32 {value}")
+        for proc in ("shared_proc", "importer_proc"):
+            self.assertRegex(ir, rf"(?m)^define [^\n]*@{proc}\(")
+        self.assertNotRegex(ir, r"@(shared|importer)_(word|proc)\.\d")
+
+    def test_call_to_a_symbol_clobbers_memory(self):
+        # As for jalr, the proc a jal reaches may read or write any memory, whatever the template declares.
+        [(side, _, constraints)] = calls_in(build_ir("regress")[1], "symbol_call")
+        self.assertTrue(side)
+        self.assertEqual(constraints, "=&r,r,s,~{$31},~{memory},~{$1}")
 
     def test_regress_checks_without_diagnostics(self):
         # exception_handler reads the #preserve'd %ra, %hi and %lo at entry and restores them before eret, and
@@ -1168,6 +1175,8 @@ CHECK_ERRORS = {
     "symbol_memory_base":  "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
     "symbol_memory_disp":  "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
     "symbol_memory_label": "A MIPS memory operand cannot name a template label",
+    "symbol_memory_neg":   "A MIPS memory operand names a symbol only as '[%gp + symbol]'",
+    "symbol_memory_proc":  "A MIPS memory operand names a variable, not the proc 'symbol_target_proc'",
     "symbol_polymorphic":  "A polymorphic proc 'symbol_target_poly' cannot be named within an 'asm' template",
     "symbol_la_slot":      "'la' cannot fill the delay slot of 'jal' in a #noreorder template: 'la' assembles to two instructions ('lui' + 'addiu')",
     "numeric_branch":      "'beq' operand-2 has an invalid kind, expected a label operand",

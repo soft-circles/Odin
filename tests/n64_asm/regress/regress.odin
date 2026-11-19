@@ -245,6 +245,16 @@ symbol_body :: asm() -> ! [#volatile, #noreorder, #clobber %t0, #clobber %t1, #c
 	nop
 }
 
+// No #clobber memory: a call to a symbol clobbers memory by itself.
+@(export) symbol_call :: proc "contextless" (a: u32) -> u32 {
+	t :: asm(a: u32) -> (r: u32) [#clobber %ra] {
+		jal symbol_only_from_asm
+		nop
+		move r, a
+	}
+	return t(a)
+}
+
 @(export) symbol_operands :: proc "naked" () {
 	symbol_body()
 }

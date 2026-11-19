@@ -167,7 +167,7 @@ Memory operands have one base register and a constant displacement in the
 signed 16-bit range, -32768–32767. There is no index register or scale. A
 displacement outside that range is an error rather than an `$at` expansion.
 A symbol is a displacement only as `[%gp + sym]`, its offset from `$gp`, with
-no other term; the symbol must be in small data (`.sdata`/`.sbss`), within
+no other term and never a proc; the symbol must be in small data (`.sdata`/`.sbss`), within
 ±32 KiB of `_gp`, or the link fails.
 A displacement term that names a `$`-immediate parameter is resolved per
 instantiation and is not range-checked; the assembler expands a large one
@@ -344,10 +344,12 @@ template labels only; the backend emits them as numeric local labels (`1:`,
   declares the registers it saves on entry and restores before `eret` with
   `#preserve` (`#preserve %ra, #preserve %hi, #preserve %lo`): a preserved
   register holds the interrupted code's value, all 64 bits of it, at entry.
-- `j sym` leaves the template for `sym`, and `jal sym` calls it and returns.
-  The code there may read any register, so no write before either, its delay
-  slot's included, is reported as dead. `jal sym` clobbers only `%ra`
-  implicitly; name the registers the callee changes with `#clobber`.
+- `j sym` leaves the template for `sym`, whose code may read any register, so
+  no write before it, its delay slot's included, is reported as dead.
+  `jal sym` calls `sym` and returns, and the callee reads the `%ra` it writes.
+  Either makes the template volatile and clobbers memory, as `jalr` does.
+  `jal sym` clobbers only `%ra` implicitly; name the registers the callee
+  changes with `#clobber`.
 - `jalr rs` and `jalr rd, rs` call through a register and return. They write
   `%ra` or `rd`, make the template volatile and clobber memory, since the
   callee may read or write any of it.

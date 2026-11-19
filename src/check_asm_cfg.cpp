@@ -129,7 +129,8 @@ struct AsmInstructionFacts {
 	bool is_control;
 	bool is_conditional;
 	bool is_terminal;
-	bool may_read_all_after; // MIPS `j`/`jal` to a symbol, or `eret`: the code it reaches may read any register
+	bool may_read_all_after; // MIPS `j` to a symbol, or `eret`: the code it reaches may read any register
+	bool calls_symbol;       // MIPS `jal` to a symbol: the callee reads the %ra it writes
 
 	Entity *branch_target;
 	i32     block_id;
@@ -199,7 +200,7 @@ struct AsmCfg {
 	bool has_unchecked_instructions;
 };
 
-// Whether the block ends in a jump or call to a symbol, or an eret, whose target may read any register.
+// Whether the block ends in a jump to a symbol, or an eret, whose target may read any register.
 gb_internal bool check_asm_cfg_block_reaches_any_reader(AsmCfg const *cfg, AsmBlock const &b) {
 	for (i32 ii = b.first; ii <= b.last; ii++) {
 		AsmInstructionFacts *f = cfg->insts[ii]->facts;
@@ -1282,7 +1283,10 @@ gb_internal bool check_asm_cfg_liveness(AsmCtx *asm_ctx, AsmCfg *cfg, Entity *en
 			// A register this instruction writes but that is not live afterward,
 			// and that it does not itself read (self-use like `xor r,r` or `add r,x`) is a dead write.
 			u16 kill = asm_full_kill_mask(f);
-			u16 dead = f->may_read_all_after ? 0 : kill & ~live_after & ~f->read_regs; // a callee reads the %ra its jal writes
+			u16 dead = f->may_read_all_after ? 0 : kill & ~live_after & ~f->read_regs;
+			if (f->calls_symbol) {
+				dead &= ~cast(u16)asm_ctx->clobber_bit_for_reg_name(str_lit("ra")); // the callee reads it to return
+			}
 			for (u16 bit = 1; bit != 0; bit <<= 1) {
 				if ((dead & bit) == 0) {
 					continue;

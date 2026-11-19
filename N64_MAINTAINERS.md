@@ -306,11 +306,14 @@ Preserve these guarantees:
 - A `foreign` proc or variable and an Odin definition with its link name are
   one LLVM value in a module (`lb_create_procedure`, `lb_create_global_variable`),
   as the linker makes them across objects; otherwise `-use-single-module`
-  renames the later one (`name.1`) and the definition goes missing from the
-  link. `link_names/` pins it.
-- `may_read_all_after` marks a `j`/`jal` to a symbol and `eret`: the code they
+  renames the later global (`name.1`), or `lb_create_procedure` hands the
+  definition the foreign declaration's body-less procedure, and the definition
+  goes missing from the link. `link_names/` pins both orders.
+- `may_read_all_after` marks a `j` to a symbol and `eret`: the code they
   reach may read any register, so `check_asm_cfg` keeps every tracked register
-  live out of their block and reports no dead write before them. A `#preserve`d
+  live out of their block and reports no dead write before them. A `jal` to a
+  symbol is `calls_symbol`: only its own `%ra` write is not dead. Both clobber
+  memory and make the template volatile. A `#preserve`d
   MIPS register is defined at entry at 64 bits, so a handler can save the
   interrupted `%ra`, `%hi` and `%lo` with `sd` and restore them before `eret`.
 - By default, delay slots belong to the assembler under `.set reorder`, and

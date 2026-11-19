@@ -212,7 +212,11 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 	{
 		StringHashKey key = string_hash_string(link_name);
 		lbValue *found = string_map_get(&m->members, key);
-		if (found) {
+		lbProcedure **existing = found ? string_map_get(&m->procedures, key) : nullptr;
+		// An Odin definition takes over a foreign declaration of its link name, rather than becoming it and
+		// losing its body; the function it creates below is the declaration's LLVM value.
+		bool defines_foreign = existing != nullptr && (*existing)->is_foreign && !entity->Procedure.is_foreign && !ignore_body;
+		if (found && !defines_foreign) {
 			lb_add_entity(m, entity, *found);
 			return string_map_must_get(&m->procedures, key);
 		}

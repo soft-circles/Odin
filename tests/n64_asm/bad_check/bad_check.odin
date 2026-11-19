@@ -71,6 +71,8 @@ symbol_branch       :: asm() [#volatile] { beq %zero, %zero, symbol_target_proc 
 symbol_memory_base  :: asm(p: rawptr) [#volatile, #clobber memory] { sw %zero, [p + symbol_target_word] }
 symbol_memory_disp  :: asm() -> (r: u32) { lw r, [%gp + symbol_target_word + 4] }
 symbol_memory_label :: asm() -> (r: u32) { .l: lw r, [%gp + .l] }
+symbol_memory_neg   :: asm() -> (r: u32) { lw r, [%gp - symbol_target_word] }
+symbol_memory_proc  :: asm() -> (r: u32) { lw r, [%gp + symbol_target_proc] }
 symbol_polymorphic  :: asm() -> ! [#volatile] { j symbol_target_poly }
 symbol_la_slot      :: asm() [#volatile, #noreorder, #clobber %t0, #clobber %ra] { jal symbol_target_proc; la %t0, symbol_target_word }
 numeric_branch      :: asm(a: u32, b: u32) -> (r: u32) { move r, a; beq a, b, 8 }
@@ -116,6 +118,7 @@ use :: proc "contextless" (x: u32, w: u64, f: f32, d: f64, p: rawptr) {
 	_ = noreorder_twice(x); _ = noreorder_no_slot(x); _ = noreorder_label_slot(x); _ = noreorder_branch_slot(x)
 	_ = noreorder_li_slot(x); _ = noreorder_li_slot_low(x); _ = noreorder_likely_path(x); _ = noreorder_imm_disp(p, 4)
 	absolute_j(); absolute_jal(); symbol_branch(); symbol_memory_base(p); _ = symbol_memory_disp(); _ = symbol_memory_label()
+	_ = symbol_memory_neg(); _ = symbol_memory_proc()
 	symbol_la_slot()
 	_ = numeric_branch(x, x); _ = duplicate_label(x); jr_not_diverging(x)
 	_ = u64_in_gpr32_slot(w, x); _ = f32_in_gpr_slot(f, x); _ = gpr_in_fpr_slot(x, f); _ = f64_in_single_slot(d, f)
