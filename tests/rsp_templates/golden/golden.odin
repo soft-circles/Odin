@@ -417,6 +417,24 @@ WHOLE_TAIL :: intrinsics.rsp_template_label_offset(whole_forms, "tail")
 WHOLE_HALT :: intrinsics.rsp_template_label_offset(whole_forms, "halt")
 WHOLE_DOT_TAIL :: intrinsics.rsp_template_label_offset(whole_forms, ".tail")
 
+// Whole Microcode's linking branches, bal (bgezal %zero) to a routine of its own and
+// bltzal, which libdragon's Opus FFT overlays use to call kf_twiddle_2 and DMAIn
+// from whichever IMEM address they are loaded at
+@(rsp, rsp_origin = WHOLE_ORIGIN)
+whole_link_forms :: asm() -> ! {
+.top:
+	bgezal %zero, .tail
+	nop
+	bltzal %t3, .top
+	nop
+.tail:
+	jr    %ra
+	nop
+}
+
+WHOLE_LINK :: intrinsics.rsp_template_code(whole_link_forms)
+WHOLE_LINK_GNU :: [?]u32{0x04110003, 0x00000000, 0x0570fffd, 0x00000000, 0x03e00008, 0x00000000}
+
 @(rsp, rsp_origin = WHOLE_ORIGIN)
 whole_pinned :: asm(p: ^u32) -> ! [p = %sp] {
 .top:
@@ -469,10 +487,10 @@ COP2      :: intrinsics.rsp_template_code(cop2_forms)
 VU        :: intrinsics.rsp_template_code(vu_forms)
 VLS       :: intrinsics.rsp_template_code(vls_forms)
 
-// rexcode's RSP mnemonics an @(rsp) template may not use (asm_tables_rsp.cpp's
-// mnemonic_unavailable_reason; bad.odin's `profile` checks each one's error). LWV is
-// one rexcode encodes but the RSP does not implement.
-REJECTED :: bit_set[rsp.Mnemonic]{.JALR, .BLTZAL, .BGEZAL, .LWV}
+// rexcode's RSP mnemonics no @(rsp) template may use, whole Microcode included
+// (asm_tables_rsp.cpp's mnemonic_unavailable_reason; bad.odin's `profile` checks each
+// one's error). LWV is one rexcode encodes but the RSP does not implement.
+REJECTED :: bit_set[rsp.Mnemonic]{.JALR, .LWV}
 
 vr :: proc(n: int) -> rsp.Register {
 	return rsp.Register(rsp.REG_VR | u16(n))
@@ -1006,6 +1024,17 @@ main :: proc() {
 		fmt.printfln("whole_forms: labels tail at %d (.tail at %d) and halt at %d, want 44 and 36", WHOLE_TAIL, WHOLE_DOT_TAIL, WHOLE_HALT)
 		failures += 1
 	}
+	whole_link := [?]rsp.Instruction{
+		rsp.inst_bgezal(rsp.ZERO, 1),
+		rsp.inst_nop(),
+		rsp.inst_bltzal(rsp.T3, 0),
+		rsp.inst_nop(),
+		rsp.inst_jr(rsp.RA),
+		rsp.inst_nop(),
+	}
+	compare("whole_link_forms", WHOLE_LINK, whole_link[:], {0, 4})
+	whole_link_gnu := WHOLE_LINK_GNU
+	compare_words("whole_link_forms", WHOLE_LINK, whole_link_gnu[:])
 	cross_gnu := CROSS_GNU
 	compare_words("cross_overlay", CROSS, cross_gnu[:])
 	compare_words("cross_package", CROSS_PACKAGE, {cross_gnu[0], 0, cross_gnu[20], 0})
@@ -1033,7 +1062,7 @@ main :: proc() {
 	// Every rexcode RSP mnemonic (one form each) is diffed above, or is one the
 	// table rejects and none of the templates holds.
 	covered: bit_set[rsp.Mnemonic]
-	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:], call[:], whole[:]}) {
+	for list in ([][]rsp.Instruction{scalar[:], edge[:], fill[:], vector[:], rest[:], cop2[:], vu_code[:], vls_code[:], call[:], whole[:], whole_link[:]}) {
 		for inst in list {
 			covered += {inst.mnemonic}
 		}

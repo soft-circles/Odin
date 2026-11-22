@@ -18,6 +18,8 @@
 //     j jr jalr        jumps: a body branches only to its own labels, and calls
 //                      only another @(rsp) template, with jal (pkg.routine)
 //     bltzal bgezal    they write %ra, which holds the rspq return address
+//                      (whole Microcode's bal, bgezal %zero, calls its own
+//                      routines PC-relatively)
 //     mfc0 mtc0        CP0 (DMA, semaphore, RDP registers): the prologue's and
 //                      epilogue's
 //     break            halting the RSP is rspq's
@@ -25,7 +27,8 @@
 //                      nothing (ares), and rsp.inc has no lwv. swv is real.
 //
 // Whole Microcode, @(rsp, rsp_origin = A), is rspq itself (N64_MAINTAINERS.md,
-// "Whole Microcode"): for it the table also has j, jr, mfc0, mtc0 and break, %sp,
+// "Whole Microcode"): for it the table also has j, jr, bltzal, bgezal, mfc0, mtc0
+// and break, %sp,
 // jumps, calls and addiu to its labels, and writes to gp and ra
 // (Asm_rsp::whole_microcode).
 //
@@ -81,7 +84,7 @@
 	/* a call to another @(rsp) template (check_asm_rsp.cpp), or to a label of whole Microcode */ \
 	X(JAL, "jal") \
 	/* whole Microcode only (Asm_rsp::whole_microcode) */ \
-	X(J, "j") X(JR, "jr") \
+	X(J, "j") X(JR, "jr") X(BLTZAL, "bltzal") X(BGEZAL, "bgezal") \
 	/* scalar loads / stores, nop */ \
 	X(LB, "lb") X(LH, "lh") X(LW, "lw") X(LBU, "lbu") X(LHU, "lhu") X(SB, "sb") \
 	X(SH, "sh") X(SW, "sw") X(NOP, "nop") \
@@ -423,12 +426,12 @@ struct Asm_rsp {
 	u16 VRLEN;
 
 	// Set while a whole-Microcode template (@(rsp, rsp_origin = A)) is checked, under
-	// rsp_template_body_mutex: it admits j, jr, mfc0, mtc0 and break, and writes to gp
+	// rsp_template_body_mutex: it admits j, jr, bltzal, bgezal, mfc0, mtc0 and break, and writes to gp
 	// and ra.
 	bool whole_microcode;
 
 	static bool is_whole_microcode_mnemonic(Mnemonic m) {
-		return m == M_J || m == M_JR || m == M_MFC0 || m == M_MTC0 || m == M_BREAK;
+		return m == M_J || m == M_JR || m == M_BLTZAL || m == M_BGEZAL || m == M_MFC0 || m == M_MTC0 || m == M_BREAK;
 	}
 
 	bool init(i64 word_size);
@@ -794,7 +797,8 @@ struct Asm_rsp {
 			       "@(rsp, rsp_origin = A), may use j and jr";
 		}
 		if (name == "bltzal" || name == "bgezal") {
-			return "writes %ra, which holds the rspq return address; an @(rsp) template branches with bltz or bgez";
+			return "writes %ra, which holds the rspq return address; an @(rsp) template branches with bltz or bgez, "
+			       "and whole Microcode, @(rsp, rsp_origin = A), may use it";
 		}
 		if (name == "mfc0" || name == "mtc0") {
 			return "is CP0 access (DMA, semaphore and RDP registers), which belongs to the generated prologue and "
@@ -1200,9 +1204,9 @@ enum Asm_rsp::Shape : u8 {
 	SH_I_U,        // rt, rs, uimm16                     andi ori xori
 	SH_LUI,        // rt, uimm16                         lui
 	SH_BR2,        // rs, rt, label                      beq bne
-	SH_BR1,        // rs, label                          blez bgtz bltz bgez
+	SH_BR1,        // rs, label                          blez bgtz bltz bgez; bltzal bgezal (whole)
 	SH_BR2_ADDR,   // rs, rt, constant address (whole)   beq bne
-	SH_BR1_ADDR,   // rs, constant address (whole)       blez bgtz bltz bgez
+	SH_BR1_ADDR,   // rs, constant address (whole)       blez bgtz bltz bgez bltzal bgezal
 	SH_CALL,       // constant address                   jal; j (whole Microcode)
 	SH_JUMP,       // label (whole Microcode)            j jal
 	SH_JR,         // rs                                 jr
@@ -1287,6 +1291,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_C_BR1     RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND)
 #define RSP_C_BR2     RSP_CLB(0,      RSP_O0|RSP_O1, false, false, RSP_CTL|RSP_COND)
 #define RSP_C_CALL    RSP_CLB(0,      0,             false, false, RSP_CTL|RSP_CALL)
+#define RSP_C_BRAL    RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND|RSP_CALL)
 #define RSP_C_JUMP    RSP_CLB(0,      0,             false, false, RSP_CTL)
 #define RSP_C_JR      RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL)
 #define RSP_C_R0      RSP_CLB(0,      RSP_O0,        false, false, 0)  // mtc0
@@ -1339,6 +1344,10 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(J,      SH_JUMP,      0x08000000, 0xFC000000, RSP_SCALAR, RSP_C_JUMP),
 	R(J,      SH_CALL,      0x08000000, 0xFC000000, RSP_SCALAR, RSP_C_JUMP),
 	R(JR,     SH_JR,        0x00000008, 0xFC1FFFFF, RSP_SCALAR, RSP_C_JR),
+	R(BLTZAL, SH_BR1,       0x04100000, 0xFC1F0000, RSP_SCALAR, RSP_C_BRAL),
+	R(BLTZAL, SH_BR1_ADDR,  0x04100000, 0xFC1F0000, RSP_SCALAR, RSP_C_BRAL),
+	R(BGEZAL, SH_BR1,       0x04110000, 0xFC1F0000, RSP_SCALAR, RSP_C_BRAL),
+	R(BGEZAL, SH_BR1_ADDR,  0x04110000, 0xFC1F0000, RSP_SCALAR, RSP_C_BRAL),
 	R(LB,     SH_MEM,       0x80000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LH,     SH_MEM,       0x84000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
 	R(LW,     SH_MEM,       0x8C000000, 0xFC000000, RSP_SCALAR, RSP_C_LOAD),
@@ -1433,6 +1442,7 @@ isize const Asm_rsp::form_row_count = gb_count_of(Asm_rsp::form_rows);
 #undef RSP_C_W1_R0
 #undef RSP_C_BR2
 #undef RSP_C_CALL
+#undef RSP_C_BRAL
 #undef RSP_C_JUMP
 #undef RSP_C_JR
 #undef RSP_C_R0

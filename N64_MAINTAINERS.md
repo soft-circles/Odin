@@ -407,10 +407,10 @@ gives back, and that it calls no routine itself) is the generator's: the
 compiler only names the callee.
 
 The table holds every mnemonic of `core/rexcode/isa/rsp/tablegen/encoding_table.odin`
-(one form each, with its bits and mask) except four: `jalr`, `bltzal` and
-`bgezal`, which write `ra`, and `lwv`, which the RSP does not implement (LWC2
-sub-opcode 0x0a does nothing; `swv` is real and in the table). Five more, `j`,
-`jr`, `mfc0`, `mtc0` and `break`, are in the table for whole Microcode only (see
+(one form each, with its bits and mask) except two: `jalr`, which writes `ra`,
+and `lwv`, which the RSP does not implement (LWC2 sub-opcode 0x0a does nothing;
+`swv` is real and in the table). Seven more, `j`, `jr`, `bltzal`, `bgezal`,
+`mfc0`, `mtc0` and `break`, are in the table for whole Microcode only (see
 below): elsewhere `mnemonic_lookup` hides them. A hidden or missing mnemonic fails
 the lookup, and `mnemonic_unavailable_reason` says why.
 
@@ -427,7 +427,8 @@ address (a word-aligned 32-bit constant) into the `AttributeContext`, and
 `Asm_rsp::whole_microcode` while they read one, under `rsp_template_body_mutex`,
 saving and restoring it around nested checks. With it set:
 
-- `mnemonic_lookup` finds `j`, `jr`, `mfc0`, `mtc0` and `break`, and
+- `mnemonic_lookup` finds `j`, `jr`, `bltzal`, `bgezal`, `mfc0`, `mtc0` and
+  `break`, and
   `register_lookup` finds `%sp`; `register_write_reject_reason` lets the template
   write `gp` and `ra`.
 - `j .label` and `jal .label` (SH_JUMP, `OP_LABEL26`) encode the label's address
@@ -435,6 +436,11 @@ saving and restoring it around nested checks. With it set:
   `addiu rt, rs, .label` (SH_I_LO, `OP_LABEL_LO16`) its low 16 bits, GNU as's
   `li rt, %lo(label)`. Outside whole Microcode `rsp_check_whole_microcode_forms`
   rejects the `addiu` form and `rsp_check_routine_calls` the `jal` one.
+- `bgezal %zero, .label` (GNU as's `bal`) and `bltzal` branch PC-relatively and
+  write `ra`, as `beq`'s forms do (SH_BR1 and, to another template's label,
+  SH_BR1_ADDR). Code that runs from an address other than its `rsp_origin`, as
+  libdragon's Opus FFT overlays do from the IMDCT's overlay slot, calls its own
+  routines this way, since `jal` encodes an absolute address.
 - Whole Microcode reaches another one, as an rdpq overlay reaches rspq's kernel:
   `(t).label` or `(pkg.t).label` is the constant address `t`'s `rsp_origin + 4*index`
   of `.label` (`rsp_template_label_operand`, which checks `t` first if the queue has
