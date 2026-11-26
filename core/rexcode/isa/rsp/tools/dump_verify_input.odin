@@ -50,8 +50,12 @@ armips_lacks :: proc(mn: r.Mnemonic) -> bool {
 	// Upstream armips removed LWV (known broken RSP instruction), but we
 	// build a patched armips at ~/.local/bin/armips-lwv that restores it.
 	// The verifier prefers that binary when present, so we emit normal asm
-	// here.
-	_ = mn
+	// here. MPEG-1's ops are left out: armips has no vrndp16 or vrndn16, and
+	// rsp.inc's operand forms of vmacq and vrndp/vrndn are not armips's.
+	#partial switch mn {
+	case .VMULQ, .VMACQ, .VRNDP, .VRNDP16, .VRNDN, .VRNDN16:
+		return true
+	}
 	return false
 }
 

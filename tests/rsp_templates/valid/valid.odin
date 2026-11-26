@@ -137,3 +137,25 @@ single_lane :: asm() {
 single_lane_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
 	return intrinsics.rsp_template_code(single_lane)
 }
+
+// MPEG-1's VU ops: vmulq, vmacq, which takes only vd, and the rounding ops, whose 16
+// forms set vs to 1; gnu/mpeg1_ops.S is the same code for GNU as (golden.odin's
+// MPEG1_OPS_GNU)
+@(rsp)
+mpeg1_ops :: asm() {
+	vmulq   %v00, %v00, %v01
+	vmulq   %v07, %v18, %v30.e5
+	vmacq   %v00
+	vmacq   %v31
+	vrndp16 %v00, %v29.e0
+	vrndp   %v12, %v03.q1
+	vrndp   %v14, %v27.h1
+	vrndn16 %v00, %v29.e1
+	vrndn16 %v00, %v29.e7
+	vrndn   %v25, %v14
+}
+
+@(export)
+mpeg1_ops_code :: proc "contextless" () -> []intrinsics.Rsp_Code_Line {
+	return intrinsics.rsp_template_code(mpeg1_ops)
+}

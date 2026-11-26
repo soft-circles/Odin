@@ -138,6 +138,15 @@ run_rsp_printer_tests :: proc() {
 	check_print(rsp.inst_vsar_acc(rsp.VR31, .LO), "vsar $v31, 10", 0x4B4007DD)
 	check_print(rsp.inst_v_v_v(.VSAR, rsp.VR1, rsp.VR2, rsp.VR3, 9), "vectorOp 0b011101, $v01, $v02, $v03, 9", 0x4B23105D)
 	check_print(rsp.inst_none(.VNOP), "vnop", 0x4A000037)
+	// MPEG-1's ops: vmulq is three-operand, vmacq takes only vd, and the
+	// rounding ops print vt's element as a number, which rsp.inc encodes
+	// (its `vt.eN` form of them encodes element 0); the 16 forms set vs = 1.
+	check_print(rsp.inst_vmulq(rsp.VR0, rsp.VR0, rsp.VR1), "vmulq $v00, $v00, $v01", 0x4A010003)
+	check_print(rsp.inst_vmacq(rsp.VR31), "vmacq $v31", 0x4A0007CB)
+	check_print(rsp.inst_vrndp16(rsp.VR0, rsp.VR29, 8), "vrndp16 $v00, $v29, 8", 0x4B1D0802)
+	check_print(rsp.inst_vrndn16(rsp.VR0, rsp.VR29, 15), "vrndn16 $v00, $v29, 15", 0x4BFD080A)
+	check_print(rsp.inst_vrndp(rsp.VR12, rsp.VR3, 3), "vrndp $v12, $v03, 3", 0x4A630302)
+	check_print(rsp.inst_vrndn(rsp.VR25, rsp.VR14), "vrndn $v25, $v14", 0x4A0E064A)
 
 	// Vector load/store: `op vt, element, byte_offset, base`. The element is
 	// always printed; the offset field is scaled by the access size.

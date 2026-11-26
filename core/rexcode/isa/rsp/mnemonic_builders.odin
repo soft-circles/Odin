@@ -126,6 +126,12 @@ inst_vmulf_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Re
 emit_vmulf_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmulf_vr_vr_vr(a, b, c, element)) }
 inst_vmulu_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMULU, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vmulu_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmulu_vr_vr_vr(a, b, c, element)) }
+inst_vrndp_vr_vr         :: #force_inline proc "contextless" (a: Register, b: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRNDP, operand_count = 2, length = 4, ops = {op_vr(a), op_vr(b, element), {}, {}} } }
+emit_vrndp_vr_vr         :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, element: u8 = 0) { append_elem(instructions, inst_vrndp_vr_vr(a, b, element)) }
+inst_vrndp16_vr_vr       :: #force_inline proc "contextless" (a: Register, b: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRNDP16, operand_count = 2, length = 4, ops = {op_vr(a), op_vr(b, element), {}, {}} } }
+emit_vrndp16_vr_vr       :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, element: u8 = 0) { append_elem(instructions, inst_vrndp16_vr_vr(a, b, element)) }
+inst_vmulq_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMULQ, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
+emit_vmulq_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmulq_vr_vr_vr(a, b, c, element)) }
 inst_vmudl_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMUDL, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vmudl_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmudl_vr_vr_vr(a, b, c, element)) }
 inst_vmudm_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMUDM, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
@@ -138,6 +144,12 @@ inst_vmacf_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Re
 emit_vmacf_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmacf_vr_vr_vr(a, b, c, element)) }
 inst_vmacu_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMACU, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vmacu_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmacu_vr_vr_vr(a, b, c, element)) }
+inst_vrndn_vr_vr         :: #force_inline proc "contextless" (a: Register, b: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRNDN, operand_count = 2, length = 4, ops = {op_vr(a), op_vr(b, element), {}, {}} } }
+emit_vrndn_vr_vr         :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, element: u8 = 0) { append_elem(instructions, inst_vrndn_vr_vr(a, b, element)) }
+inst_vrndn16_vr_vr       :: #force_inline proc "contextless" (a: Register, b: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VRNDN16, operand_count = 2, length = 4, ops = {op_vr(a), op_vr(b, element), {}, {}} } }
+emit_vrndn16_vr_vr       :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, element: u8 = 0) { append_elem(instructions, inst_vrndn16_vr_vr(a, b, element)) }
+inst_vmacq_vr            :: #force_inline proc "contextless" (a: Register) -> Instruction { return Instruction{ mnemonic = .VMACQ, operand_count = 1, length = 4, ops = {op_vr(a), {}, {}, {}} } }
+emit_vmacq_vr            :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register) { append_elem(instructions, inst_vmacq_vr(a)) }
 inst_vmadl_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMADL, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
 emit_vmadl_vr_vr_vr      :: #force_inline proc(instructions: ^[dynamic]Instruction, a: Register, b: Register, c: Register, element: u8 = 0) { append_elem(instructions, inst_vmadl_vr_vr_vr(a, b, c, element)) }
 inst_vmadm_vr_vr_vr      :: #force_inline proc "contextless" (a: Register, b: Register, c: Register, element: u8 = 0) -> Instruction { return Instruction{ mnemonic = .VMADM, operand_count = 3, length = 4, ops = {op_vr(a), op_vr(b), op_vr(c, element), {}} } }
@@ -363,6 +375,12 @@ inst_vmulf                    :: inst_vmulf_vr_vr_vr
 emit_vmulf                    :: emit_vmulf_vr_vr_vr
 inst_vmulu                    :: inst_vmulu_vr_vr_vr
 emit_vmulu                    :: emit_vmulu_vr_vr_vr
+inst_vrndp                    :: inst_vrndp_vr_vr
+emit_vrndp                    :: emit_vrndp_vr_vr
+inst_vrndp16                  :: inst_vrndp16_vr_vr
+emit_vrndp16                  :: emit_vrndp16_vr_vr
+inst_vmulq                    :: inst_vmulq_vr_vr_vr
+emit_vmulq                    :: emit_vmulq_vr_vr_vr
 inst_vmudl                    :: inst_vmudl_vr_vr_vr
 emit_vmudl                    :: emit_vmudl_vr_vr_vr
 inst_vmudm                    :: inst_vmudm_vr_vr_vr
@@ -375,6 +393,12 @@ inst_vmacf                    :: inst_vmacf_vr_vr_vr
 emit_vmacf                    :: emit_vmacf_vr_vr_vr
 inst_vmacu                    :: inst_vmacu_vr_vr_vr
 emit_vmacu                    :: emit_vmacu_vr_vr_vr
+inst_vrndn                    :: inst_vrndn_vr_vr
+emit_vrndn                    :: emit_vrndn_vr_vr
+inst_vrndn16                  :: inst_vrndn16_vr_vr
+emit_vrndn16                  :: emit_vrndn16_vr_vr
+inst_vmacq                    :: inst_vmacq_vr
+emit_vmacq                    :: emit_vmacq_vr
 inst_vmadl                    :: inst_vmadl_vr_vr_vr
 emit_vmadl                    :: emit_vmadl_vr_vr_vr
 inst_vmadm                    :: inst_vmadm_vr_vr_vr

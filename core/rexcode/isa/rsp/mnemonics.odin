@@ -52,9 +52,9 @@ Mnemonic :: enum u16 {
 	// Vector ALU (COP2, CO=1; opcode 0x12 with funct selecting)
 	// -------------------------------------------------------------------------
 
-	VMULF, VMULU,
+	VMULF, VMULU, VRNDP, VRNDP16, VMULQ,
 	VMUDL, VMUDM, VMUDN, VMUDH,
-	VMACF, VMACU,
+	VMACF, VMACU, VRNDN, VRNDN16, VMACQ,
 	VMADL, VMADM, VMADN, VMADH,
 	VADD, VSUB, VABS,
 	VADDC, VSUBC,
