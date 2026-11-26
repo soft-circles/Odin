@@ -496,7 +496,8 @@ as with libdragon's rsp.inc, diffed when libdragon's toolchain is found; golden.
 MPEG-1's ops are rsp.inc's: `vmulq vd, vs, vt.e`, `vmacq vd` (vs, vt and the
 element 0), and `vrndp`/`vrndn vd, vt.e` with vs 0, which rexcode has as one
 mnemonic each, and `vrndp16`/`vrndn16`, the same with vs 1 (vt pre-shifted by
-16), as two more. rsp.inc's `vt.eN` form of the rounding ops encodes element 0
+16), as two more. Their masks fix the fields rsp.inc writes as constants, so
+rexcode's decoder rejects a word with other values there. rsp.inc's `vt.eN` form of the rounding ops encodes element 0
 whatever N is, so `gnu/mpeg1_ops.S` and rsp_mpeg1.S name it as `vt, e(N)`, and
 rexcode's printer writes it as `vt, N`; golden.odin's `MPEG1_OPS_GNU` holds the
 words of `valid.mpeg1_ops`.

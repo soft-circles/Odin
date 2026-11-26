@@ -1296,7 +1296,7 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 #define RSP_C_W0_R1   RSP_CLB(RSP_O0, RSP_O1,        false, false, 0)  // rt <- rs op imm
 #define RSP_C_LOAD    RSP_CLB(RSP_O0, RSP_O1,        false, true,  0)
 #define RSP_C_STORE   RSP_CLB(0,      RSP_O0|RSP_O1, true,  false, 0)
-#define RSP_C_W0      RSP_CLB(RSP_O0, 0,             false, false, 0)  // lui, vsar
+#define RSP_C_W0      RSP_CLB(RSP_O0, 0,             false, false, 0)  // lui, vsar, vmacq
 #define RSP_C_W1_R0   RSP_CLB(RSP_O1, RSP_O0,        false, false, 0)  // mtc2, ctc2
 #define RSP_C_BR1     RSP_CLB(0,      RSP_O0,        false, false, RSP_CTL|RSP_COND)
 #define RSP_C_BR2     RSP_CLB(0,      RSP_O0|RSP_O1, false, false, RSP_CTL|RSP_COND)

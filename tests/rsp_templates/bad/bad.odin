@@ -168,6 +168,22 @@ accumulator :: asm() {
 	vsar  %v02, %acc_md
 }
 
+// MPEG-1's ops: vmacq takes only vd, and the rounding ops vd and vt, whose vs is
+// their flag, not an operand.
+@(rsp)
+mpeg1_ops :: asm() {
+	vmacq %v01, %v02, %v03 // ERROR: The asm instruction 'vmacq' expects 1 operands, got 3
+	vmacq %v01.e0 // ERROR: '.e0' on %v01 takes no element accessor
+	vrndp %v01, %v02, %v03 // ERROR: The asm instruction 'vrndp' expects 2 operands, got 3
+	vrndn %v01 // ERROR: The asm instruction 'vrndn' expects 2 operands, got 1
+	vrndp16 %v01.e0, %v02 // ERROR: '.e0' on %v01 takes no element accessor
+	vrndn16 %acc_hi, %v02 // ERROR: 'vrndn16' operand-0 cannot be %acc_hi
+	vrndp %v01, %v02.e8 // ERROR: '.e8' on %v02 is not a VU element accessor
+	vmacq %v01
+	vrndp16 %v01, %v02.e7
+	vrndn %v03, %v04
+}
+
 // ltv and stv move one lane of each of a group of 8 registers, which the RSP
 // addresses by vt & ~7.
 @(rsp)

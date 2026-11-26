@@ -14,6 +14,7 @@ mpeg1_ops:
 	vmacq   $v31
 	vrndp16 $v00, $v29, e(0)
 	vrndp   $v12, $v03, e(1q)
+	vrndp   $v14, $v27, e(1h)
 	vrndn16 $v00, $v29, e(1)
 	vrndn16 $v00, $v29, e(7)
 	vrndn   $v25, $v14

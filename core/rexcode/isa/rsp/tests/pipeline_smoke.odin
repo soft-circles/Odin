@@ -142,6 +142,53 @@ run_rsp_pipeline_tests :: proc() {
 			   "    vmulf $v00, $v01, $v02.q1\n")
 	}
 
+	// ---- 2b. MPEG-1's VU ops round-trip ---------------------------------
+	//   vmacq $v31 = 0x4A0007CB; vrndp16 $v00, $v29, 8 = 0x4B1D0802 (vs = 1);
+	//   vrndn $v25, $v14 = 0x4A0E064A (vs = 0). The masks fix the fields
+	//   rsp.inc writes as constants, so other values of them do not decode.
+	{
+		clear(&relocs); clear(&errors)
+		for i in 0..<len(code) { code[i] = 0 }
+		insts := []rsp.Instruction{
+			rsp.inst_vmacq(rsp.VR31),
+			rsp.inst_vrndp16(rsp.VR0, rsp.VR29, 8),
+			rsp.inst_vrndn(rsp.VR25, rsp.VR14),
+		}
+		byte_count, success := rsp.encode(insts, nil, code[:], &relocs, &errors)
+		ok     ("mpeg1: encode",  success)
+		eq_word("mpeg1: VMACQ",   load_be(code[:], 0), 0x4A0007CB)
+		eq_word("mpeg1: VRNDP16", load_be(code[:], 4), 0x4B1D0802)
+		eq_word("mpeg1: VRNDN",   load_be(code[:], 8), 0x4A0E064A)
+
+		d_insts:  [dynamic]rsp.Instruction
+		d_info:   [dynamic]rsp.Instruction_Info
+		d_labels: [dynamic]rsp.Label_Definition
+		defer delete(d_insts)
+		defer delete(d_info)
+		defer delete(d_labels)
+		clear(&errors)
+		_, dsuccess := rsp.decode(code[:byte_count], nil, &d_insts, &d_info, &d_labels, &errors)
+		ok("mpeg1: decode", dsuccess && len(d_insts) == 3)
+		if len(d_insts) == 3 {
+			ok("mpeg1: VMACQ one operand",  d_insts[0].mnemonic == .VMACQ && d_insts[0].operand_count == 1 && d_insts[0].ops[0].reg == rsp.VR31)
+			ok("mpeg1: VRNDP16 mnem",       d_insts[1].mnemonic == .VRNDP16)
+			ok("mpeg1: VRNDP16 vt=$v29.e0", d_insts[1].ops[1].reg == rsp.VR29 && d_insts[1].ops[1].element == 8)
+			ok("mpeg1: VRNDN mnem",         d_insts[2].mnemonic == .VRNDN && d_insts[2].ops[1].reg == rsp.VR14)
+		}
+		text := rsp.aprint(d_insts[:], d_info[:], d_labels[:],
+						   nil, nil, nil, context.temp_allocator)
+		eq_str("mpeg1: print",
+			   text,
+			   "    vmacq $v31\n    vrndp16 $v00, $v29, 8\n    vrndn $v25, $v14\n")
+
+		for word in ([?]u32{0x4A01000B, 0x4A001002}) {
+			bytes := [4]u8{u8(word >> 24), u8(word >> 16), u8(word >> 8), u8(word)}
+			clear(&d_insts); clear(&d_info); clear(&d_labels); clear(&errors)
+			_, bad := rsp.decode(bytes[:], nil, &d_insts, &d_info, &d_labels, &errors)
+			ok(fmt.tprintf("mpeg1: %08x (vmacq vs=1, vrndp vs=2) does not decode", word), !bad)
+		}
+	}
+
 	// ---- 3. Vector load: LQV $v04, 0, 256, t0 ----------------------------
 	//   bits: 0xC8002000 (LQV)
 	//   base=$t0=8 (bits 25-21 = 8 << 21 = 0x01000000), vt=4 (bits 20-16 = 4 << 16 = 0x40000),

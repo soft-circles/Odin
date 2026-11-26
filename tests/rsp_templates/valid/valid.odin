@@ -149,6 +149,7 @@ mpeg1_ops :: asm() {
 	vmacq   %v31
 	vrndp16 %v00, %v29.e0
 	vrndp   %v12, %v03.q1
+	vrndp   %v14, %v27.h1
 	vrndn16 %v00, %v29.e1
 	vrndn16 %v00, %v29.e7
 	vrndn   %v25, %v14

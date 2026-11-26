@@ -359,6 +359,16 @@ is_single_lane :: proc(m: Mnemonic) -> bool {
 	return false
 }
 
+// MPEG-1's rounding ops: `vd, vt` with vs a flag (1 in the 16 forms), not a register.
+@(private="file")
+is_rounding :: proc(m: Mnemonic) -> bool {
+	#partial switch m {
+	case .VRNDP, .VRNDP16, .VRNDN, .VRNDN16:
+		return true
+	}
+	return false
+}
+
 // Mnemonic plus operands. Most instructions print their operands in order;
 // the cases below are where rsp.inc's macros want a different shape.
 @(private="file")
@@ -425,7 +435,7 @@ write_instruction :: proc(
 		write_comma(sb, opts)
 		write_decimal_u32(sb, u32(ops[2].element & 0x0F))
 
-	case (m == .VRNDP || m == .VRNDP16 || m == .VRNDN || m == .VRNDN16) && len(ops) == 2:
+	case is_rounding(m) && len(ops) == 2:
 		// `op vd, vt, element`: vt is the second operand, and rsp.inc's
 		// `vt.eN` form of these ops encodes element 0 whatever N is.
 		write_register(sb, ops[0].reg)

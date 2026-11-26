@@ -476,8 +476,8 @@ SINGLE_LANE_GNU :: [?]u32{
 // valid.mpeg1_ops: GNU as's words for gnu/mpeg1_ops.S, through libdragon's rsp.inc
 MPEG1_OPS :: intrinsics.rsp_template_code(valid.mpeg1_ops)
 MPEG1_OPS_GNU :: [?]u32{
-	0x4a010003, 0x4bbe91c3, 0x4a00000b, 0x4a0007cb, 0x4b1d0802, 0x4a630302, 0x4b3d080a, 0x4bfd080a,
-	0x4a0e064a,
+	0x4a010003, 0x4bbe91c3, 0x4a00000b, 0x4a0007cb, 0x4b1d0802, 0x4a630302, 0x4abb0382, 0x4b3d080a,
+	0x4bfd080a, 0x4a0e064a,
 }
 CROSS_GNU :: [?]u32{
 	0x1022ffc0, 0x00000000, 0x1403ffc0, 0x00000000, 0x0481ffbc, 0x00000000, 0x18a0ffbc, 0x00000000,
