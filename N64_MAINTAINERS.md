@@ -493,6 +493,13 @@ reads only the low three bits), so the golden program gives rexcode `de` as
 8+lane. `tests/rsp_templates/gnu/single_lane.S` is `valid.single_lane` for GNU
 as with libdragon's rsp.inc, diffed when libdragon's toolchain is found; golden.odin's
 `SINGLE_LANE_GNU` holds its words, which the n64 IR of `valid/` is checked against.
+MPEG-1's ops are rsp.inc's: `vmulq vd, vs, vt.e`, `vmacq vd` (vs, vt and the
+element 0), and `vrndp`/`vrndn vd, vt.e` with vs 0, which rexcode has as one
+mnemonic each, and `vrndp16`/`vrndn16`, the same with vs 1 (vt pre-shifted by
+16), as two more. rsp.inc's `vt.eN` form of the rounding ops encodes element 0
+whatever N is, so `gnu/mpeg1_ops.S` and rsp_mpeg1.S name it as `vt, e(N)`, and
+rexcode's printer writes it as `vt, N`; golden.odin's `MPEG1_OPS_GNU` holds the
+words of `valid.mpeg1_ops`.
 The golden program in
 [tests/rsp_templates/golden](tests/rsp_templates/golden) encodes every form
 through both the table and `core:rexcode/isa/rsp`, and fails when a rexcode

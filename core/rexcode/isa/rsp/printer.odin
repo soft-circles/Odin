@@ -425,6 +425,17 @@ write_instruction :: proc(
 		write_comma(sb, opts)
 		write_decimal_u32(sb, u32(ops[2].element & 0x0F))
 
+	case (m == .VRNDP || m == .VRNDP16 || m == .VRNDN || m == .VRNDN16) && len(ops) == 2:
+		// `op vd, vt, element`: vt is the second operand, and rsp.inc's
+		// `vt.eN` form of these ops encodes element 0 whatever N is.
+		write_register(sb, ops[0].reg)
+		write_comma(sb, opts)
+		write_register(sb, ops[1].reg)
+		if ops[1].element & 0x0F != 0 {
+			write_comma(sb, opts)
+			write_decimal_u32(sb, u32(ops[1].element & 0x0F))
+		}
+
 	case len(ops) == 2 && ops[1].kind == .VECTOR_MEM:
 		// `op vt, element, byte_offset, base`. The encoder takes the element
 		// from the VECTOR_MEM operand, so vt prints without a suffix even when

@@ -12,7 +12,7 @@
 // here through both and diffs the words.
 //
 // Scope: every rexcode RSP mnemonic (core:rexcode/isa/rsp/tablegen/
-// encoding_table.odin, 116 mnemonics, one form each) except the nine a job body
+// encoding_table.odin, 122 mnemonics, one form each) except the nine a job body
 // may not use, which mnemonic_unavailable_reason names:
 //
 //     j jr jalr        jumps: a body branches only to its own labels, and calls
@@ -49,6 +49,10 @@
 //   * vsar reads one slice of the accumulator into vd: `vsar %v01, %acc_hi`
 //     (or %acc_md, %acc_lo), rsp.inc's `vsar vd, COP2_ACC_HI`. The slice is
 //     the element field (8, 9, 10); vs and vt are unused and 0.
+//   * MPEG-1's ops, as rsp.inc spells them: vmulq is a three-operand op;
+//     vrndp and vrndn take `vd, vt.e` with vs 0, and vrndp16 and vrndn16 the
+//     same with vs 1, which pre-shifts vt by 16; vmacq takes only vd, with vs,
+//     vt and the element 0.
 //   * mtc2/mfc2 name a byte of the vector register: .e0-.e7 (lane N, byte 2N)
 //     or .b0-.b15 (byte N), or none for byte 0, into bits 10-7.
 //   * A vector load/store names its element as rsp.inc does for that
@@ -93,8 +97,10 @@
 	/* CP0 moves and halting: whole Microcode only */ \
 	X(MFC0, "mfc0") X(MTC0, "mtc0") X(BREAK, "break") \
 	/* vector unit */ \
-	X(VMULF, "vmulf") X(VMULU, "vmulu") X(VMUDL, "vmudl") X(VMUDM, "vmudm") X(VMUDN, "vmudn") X(VMUDH, "vmudh") \
-	X(VMACF, "vmacf") X(VMACU, "vmacu") X(VMADL, "vmadl") X(VMADM, "vmadm") X(VMADN, "vmadn") X(VMADH, "vmadh") \
+	X(VMULF, "vmulf") X(VMULU, "vmulu") X(VRNDP, "vrndp") X(VRNDP16, "vrndp16") X(VMULQ, "vmulq") \
+	X(VMUDL, "vmudl") X(VMUDM, "vmudm") X(VMUDN, "vmudn") X(VMUDH, "vmudh") \
+	X(VMACF, "vmacf") X(VMACU, "vmacu") X(VRNDN, "vrndn") X(VRNDN16, "vrndn16") X(VMACQ, "vmacq") \
+	X(VMADL, "vmadl") X(VMADM, "vmadm") X(VMADN, "vmadn") X(VMADH, "vmadh") \
 	X(VADD, "vadd") X(VSUB, "vsub") X(VABS, "vabs") X(VADDC, "vaddc") X(VSUBC, "vsubc") X(VSAR, "vsar") \
 	X(VLT, "vlt") X(VEQ, "veq") X(VNE, "vne") X(VGE, "vge") X(VCL, "vcl") X(VCH, "vch") \
 	X(VCR, "vcr") X(VMRG, "vmrg") X(VAND, "vand") X(VNAND, "vnand") X(VOR, "vor") X(VNOR, "vnor") \
@@ -1219,6 +1225,8 @@ enum Asm_rsp::Shape : u8 {
 	SH_VU,         // vd, vs, vt.e                       vmulf ... vnxor
 	SH_VSAR,       // vd, %acc_hi/%acc_md/%acc_lo        vsar
 	SH_VSINGLE,    // vd.lane, vt.lane                   vrcp vrcpl vrcph vmov vrsq vrsql vrsqh
+	SH_VRND,       // vd, vt.e                           vrndp vrndp16 vrndn vrndn16
+	SH_VD,         // vd                                 vmacq
 	SH_VLS,        // vt.byte, [base + disp]             lbv lsv llv ldv lqv lrv lhv lfv (and stores, swv)
 	SH_VLS_LANE,   // vt.lane, [base + disp]             lpv luv spv suv
 	SH_VLS_EVEN,   // vt.lane (byte 2N), [base + disp]   ltv stv
@@ -1254,6 +1262,8 @@ Asm_rsp::FormShape const Asm_rsp::form_shapes[SHAPE_COUNT] = {
 	/* SH_VU       */ RS((OP_VR,ENC_VD), (OP_VR,ENC_VS), (OP_VR_ELEM,ENC_VT), N_),
 	/* SH_VSAR     */ RS((OP_VR,ENC_VD), (OP_ACC,ENC_ELEM), N_, N_),
 	/* SH_VSINGLE  */ RS((OP_VR_DE,ENC_VD_DE), (OP_VR_LANE,ENC_VT), N_, N_),
+	/* SH_VRND     */ RS((OP_VR,ENC_VD), (OP_VR_ELEM,ENC_VT), N_, N_),
+	/* SH_VD       */ RS((OP_VR,ENC_VD), N_, N_, N_),
 	/* SH_VLS      */ RS((OP_VR_LS,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
 	/* SH_VLS_LANE */ RS((OP_VR_LS_LANE,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
 	/* SH_VLS_EVEN */ RS((OP_VR_LS_EVEN,ENC_VT_LS), (OP_VMEM,ENC_VBASE), N_, N_),
@@ -1367,12 +1377,18 @@ Asm_rsp::FormRow const Asm_rsp::form_rows[] = {
 	R(BREAK,  SH_BREAK,     0x0000000D, 0xFC00FFFF, RSP_SCALAR, RSP_C_NONE),
 	R(VMULF,  SH_VU,        0x4A000000, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMULU,  SH_VU,        0x4A000001, 0xFE00003F, RSP_VU,     RSP_C_VU),
+	R(VRNDP,  SH_VRND,      0x4A000002, 0xFE00F83F, RSP_VU,     RSP_C_W0_R1),
+	R(VRNDP16,SH_VRND,      0x4A000802, 0xFE00F83F, RSP_VU,     RSP_C_W0_R1),
+	R(VMULQ,  SH_VU,        0x4A000003, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMUDL,  SH_VU,        0x4A000004, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMUDM,  SH_VU,        0x4A000005, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMUDN,  SH_VU,        0x4A000006, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMUDH,  SH_VU,        0x4A000007, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMACF,  SH_VU,        0x4A000008, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMACU,  SH_VU,        0x4A000009, 0xFE00003F, RSP_VU,     RSP_C_VU),
+	R(VRNDN,  SH_VRND,      0x4A00000A, 0xFE00F83F, RSP_VU,     RSP_C_W0_R1),
+	R(VRNDN16,SH_VRND,      0x4A00080A, 0xFE00F83F, RSP_VU,     RSP_C_W0_R1),
+	R(VMACQ,  SH_VD,        0x4A00000B, 0xFFFFF83F, RSP_VU,     RSP_C_W0),
 	R(VMADL,  SH_VU,        0x4A00000C, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMADM,  SH_VU,        0x4A00000D, 0xFE00003F, RSP_VU,     RSP_C_VU),
 	R(VMADN,  SH_VU,        0x4A00000E, 0xFE00003F, RSP_VU,     RSP_C_VU),

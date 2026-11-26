@@ -173,9 +173,9 @@ cop2_forms :: asm() {
 	ctc2  %zero, %vce
 }
 
-// Every VU instruction: the three-operand ones through every element accessor, vsar
-// with each accumulator slice, the single-lane ones and vmov with two lane pairs
-// each, and vnop.
+// Every VU instruction: the three-operand ones through every element accessor, MPEG-1's
+// vmulq, vmacq and rounding ops, vsar with each accumulator slice, the single-lane ones
+// and vmov with two lane pairs each, and vnop.
 @(rsp)
 vu_forms :: asm() {
 	vmulf %v00, %v11, %v23
@@ -212,6 +212,12 @@ vu_forms :: asm() {
 	vnor  %v11, %v22, %v02.e7
 	vxor  %v18, %v29, %v09
 	vnxor %v25, %v04, %v16.q0
+	vmulq %v03, %v12, %v21.e3
+	vmacq %v09
+	vrndp %v14, %v27.h1
+	vrndp16 %v00, %v29.e0
+	vrndn %v22, %v05
+	vrndn16 %v31, %v08.e7
 	vrcp  %v01.e0, %v17.e7
 	vrcp  %v01.e3, %v17.e5
 	vrcpl %v06.e1, %v22.e6
@@ -466,6 +472,12 @@ SINGLE_LANE :: intrinsics.rsp_template_code(valid.single_lane)
 SINGLE_LANE_GNU :: [?]u32{
 	0x4bf14070, 0x4bb15870, 0x4bd649b1, 0x4bbb7af2, 0x4b805c34, 0x4b656575, 0x4b4a6eb6, 0x4be147b3,
 	0x4b4f7ff3,
+}
+// valid.mpeg1_ops: GNU as's words for gnu/mpeg1_ops.S, through libdragon's rsp.inc
+MPEG1_OPS :: intrinsics.rsp_template_code(valid.mpeg1_ops)
+MPEG1_OPS_GNU :: [?]u32{
+	0x4a010003, 0x4bbe91c3, 0x4a00000b, 0x4a0007cb, 0x4b1d0802, 0x4a630302, 0x4b3d080a, 0x4bfd080a,
+	0x4a0e064a,
 }
 CROSS_GNU :: [?]u32{
 	0x1022ffc0, 0x00000000, 0x1403ffc0, 0x00000000, 0x0481ffbc, 0x00000000, 0x18a0ffbc, 0x00000000,
@@ -773,6 +785,12 @@ expected_vu :: proc() -> (code: [dynamic]rsp.Instruction) {
 		vu(.VNOR, 11, 22, 2, 15),
 		vu(.VXOR, 18, 29, 9, 0),
 		vu(.VNXOR, 25, 4, 16, 2),
+		vu(.VMULQ, 3, 12, 21, 11),
+		rsp.inst_vmacq(vr(9)),
+		rsp.inst_vrndp(vr(14), vr(27), 5),
+		rsp.inst_vrndp16(vr(0), vr(29), 8),
+		rsp.inst_vrndn(vr(22), vr(5), 0),
+		rsp.inst_vrndn16(vr(31), vr(8), 15),
 		single(.VRCP, 1, 0, 17, 7),
 		single(.VRCP, 1, 3, 17, 5),
 		single(.VRCPL, 6, 1, 22, 6),
@@ -1040,6 +1058,8 @@ main :: proc() {
 	compare_words("cross_package", CROSS_PACKAGE, {cross_gnu[0], 0, cross_gnu[20], 0})
 	single_lane_gnu := SINGLE_LANE_GNU
 	compare_words("single_lane", SINGLE_LANE, single_lane_gnu[:])
+	mpeg1_ops_gnu := MPEG1_OPS_GNU
+	compare_words("mpeg1_ops", MPEG1_OPS, mpeg1_ops_gnu[:])
 	whole_pins := WHOLE_PINS
 	if len(whole_pins) != 1 || whole_pins[0] != {29, false} {
 		fmt.printfln("whole_pinned: pins %v, want sp", whole_pins)

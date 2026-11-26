@@ -10,8 +10,9 @@ Packages under tests/rsp_templates/:
   golden/  a host program that encodes every form of src/asm_tables_rsp.cpp
            through both the compiler and core:rexcode/isa/rsp and diffs the words
   gnu/     GNU as source for whole Microcode reaching another one
-           (valid.cross_overlay) and the single-lane ops through rsp.inc
-           (valid.single_lane), diffed when libdragon's toolchain is found
+           (valid.cross_overlay), and the single-lane ops and MPEG-1's ops through
+           rsp.inc (valid.single_lane, valid.mpeg1_ops), diffed when libdragon's
+           toolchain is found
 
 `odin check` works with any compiler. The golden program and the byte-order IR
 checks need the compiler's LLVM to have the host and target backends; a fork built
@@ -308,7 +309,8 @@ class Encode(unittest.TestCase):
             if len(parts) == 4 and parts[0] in lines:
                 printed.setdefault(parts[0], []).append(int(parts[3]))
         for name in ("scalar_forms", "edge_forms", "fill", "vector_forms", "scalar_rest", "cop2_forms", "vu_forms",
-                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay", "cross_package", "single_lane"):
+                     "vls_forms", "call_forms", "transform", "shade", "cross_overlay", "cross_package", "single_lane",
+                     "mpeg1_ops"):
             with self.subTest(template=name):
                 self.assertEqual(printed.get(name), lines[name])
 
@@ -370,26 +372,7 @@ class Encode(unittest.TestCase):
     def test_single_lane_matches_gnu_as(self):
         # valid.single_lane against GNU as on gnu/single_lane.S through libdragon's rsp.inc,
         # whose single-lane ops write the destination lane in vs as 8|lane
-        tools = {name: gnu_tool(name) for name in ("gcc", "objcopy")}
-        include = Path(os.environ.get("N64_INST", "/nonexistent")) / "mips64-elf" / "include"
-        if None in tools.values() or not (include / "rsp.inc").exists():
-            self.skipTest("libdragon's toolchain and rsp.inc not found ($N64_INST)")
-        target = host_target()
-        require_backend(self, target)
-        code, output = golden_run()
-        self.assertEqual(code, 0, output)
-        words = [int(row.split()[2], 16) for row in output.splitlines()
-                 if len(row.split()) == 4 and row.split()[0] == "single_lane"]
-        work = unique_dir("gnu-single")
-        obj, binary = work / "single.o", work / "single.bin"
-        for args in ([tools["gcc"], "-march=mips1", "-mabi=32", f"-I{include}", "-c", "-o", obj,
-                      HERE / "gnu" / "single_lane.S"],
-                     [tools["objcopy"], "-O", "binary", "-j", ".text", obj, binary]):
-            result = subprocess.run([str(a) for a in args], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        text = binary.read_bytes()
-        gnu = [int.from_bytes(text[i:i + 4], "big") for i in range(0, len(text), 4)]
-        self.assertEqual([f"{w:08x}" for w in words], [f"{w:08x}" for w in gnu])
+        output = self.assert_rsp_inc_words("single_lane")
 
         # intrinsics.rsp_template_location: the declaration's file, line and column
         locations = {}
@@ -403,6 +386,36 @@ class Encode(unittest.TestCase):
                 declared = [n for n, text in enumerate(path.read_text().splitlines(), 1)
                             if text.startswith(f"{name} :: asm")]
                 self.assertEqual(locations.get(name), (declared[0], 1, path.resolve()))
+
+    def test_mpeg1_ops_match_gnu_as(self):
+        # valid.mpeg1_ops against GNU as on gnu/mpeg1_ops.S through libdragon's rsp.inc:
+        # vmulq, vmacq (vd only) and vrndp/vrndn, whose 16 forms set vs to 1
+        self.assert_rsp_inc_words("mpeg1_ops")
+
+    def assert_rsp_inc_words(self, template):
+        """Diffs valid.`template`'s words against GNU as on gnu/`template`.S through
+        libdragon's rsp.inc, and returns the golden program's output."""
+        tools = {name: gnu_tool(name) for name in ("gcc", "objcopy")}
+        include = Path(os.environ.get("N64_INST", "/nonexistent")) / "mips64-elf" / "include"
+        if None in tools.values() or not (include / "rsp.inc").exists():
+            self.skipTest("libdragon's toolchain and rsp.inc not found ($N64_INST)")
+        target = host_target()
+        require_backend(self, target)
+        code, output = golden_run()
+        self.assertEqual(code, 0, output)
+        words = [int(row.split()[2], 16) for row in output.splitlines()
+                 if len(row.split()) == 4 and row.split()[0] == template]
+        work = unique_dir(f"gnu-{template}")
+        obj, binary = work / f"{template}.o", work / f"{template}.bin"
+        for args in ([tools["gcc"], "-march=mips1", "-mabi=32", f"-I{include}", "-c", "-o", obj,
+                      HERE / "gnu" / f"{template}.S"],
+                     [tools["objcopy"], "-O", "binary", "-j", ".text", obj, binary]):
+            result = subprocess.run([str(a) for a in args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = binary.read_bytes()
+        gnu = [int.from_bytes(text[i:i + 4], "big") for i in range(0, len(text), 4)]
+        self.assertEqual([f"{w:08x}" for w in words], [f"{w:08x}" for w in gnu])
+        return output
 
     def test_pins_need_no_earlier_check(self):
         # The pins come from the template's specification block, which its body check
@@ -434,8 +447,9 @@ class Encode(unittest.TestCase):
                 self.assertIn(f'c"{word}{line}', ir)
 
     def test_constants_are_gnu_as_words(self):
-        # valid.cross_overlay's and valid.single_lane's constants in n64 IR hold GNU as's
-        # words (golden.odin's CROSS_GNU and SINGLE_LANE_GNU, from gnu/), each followed by
+        # valid.cross_overlay's, valid.single_lane's and valid.mpeg1_ops's constants in n64 IR
+        # hold GNU as's words (golden.odin's CROSS_GNU, SINGLE_LANE_GNU and MPEG1_OPS_GNU, from
+        # gnu/), each followed by
         # its line, big-endian. Unlike the golden program this needs only the n64 backend,
         # which a MIPS-only LLVM has.
         require_backend(self, "n64")
@@ -444,7 +458,8 @@ class Encode(unittest.TestCase):
                                 "-no-entry-point", "-use-single-module", f"-out:{directory}")
         self.assertEqual(code, 0, output)
         ir = "".join(p.read_text() for p in directory.glob("*.ll"))
-        for template, constant in (("cross_overlay", "CROSS_GNU"), ("single_lane", "SINGLE_LANE_GNU")):
+        for template, constant in (("cross_overlay", "CROSS_GNU"), ("single_lane", "SINGLE_LANE_GNU"),
+                                   ("mpeg1_ops", "MPEG1_OPS_GNU")):
             with self.subTest(template=template):
                 self.assertIn(self.ir_string(template, constant), ir)
 
